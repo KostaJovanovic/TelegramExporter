@@ -23,6 +23,7 @@ cargo run -p tgx-parity -- media "N:\telegram export\UA KOLAB TELEGRAM"
 | `json` | `result.json` re-emitted from its own data is byte-identical | **4 of 4 topics**, 6,643 messages, 3.2 MB |
 | `html` | the pages rendered from that data match Desktop's line for line | **4 of 4 topics, 256,780 lines** |
 | `media` | the filenames Desktop chose are reproduced from the message sequence | **830 of 836** (the six are custom emoji, invisible to a JSON replay) |
+| `wire` | our own live export agrees with a reference run on ids, size decisions and every field a converter bug would change | needs a signed-in account — see Phase 5 |
 
 The harness was built **before** the code it judges. That ordering is the whole
 method, and it paid for itself on the first run — see *What the harness caught*
@@ -42,6 +43,11 @@ messages from real people, and pushing it publishes them. Without one the
 corpus test skips and says so. See *The corpus, and why it is not committed*.
 
 ## Running it
+
+`save.bat` is the everyday driver — run it bare for a menu, or pass the action:
+`save`, `commit`, `push`, `pull`, `build`, `test`, `parity`, `corpus`, `wire`.
+It pushes to [KostaJovanovic/TelegramExporter](https://github.com/KostaJovanovic/TelegramExporter),
+and adds that remote itself on a checkout that has none.
 
 ```powershell
 cargo run -p tgx-app --bin TelegramExporter      # the window
