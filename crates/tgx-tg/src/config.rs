@@ -288,7 +288,7 @@ fn set_lockdown_error(e: Option<String>) {
 /// run at startup with the user's rights. Never invoke a system tool by bare
 /// name from a portable binary.
 #[cfg(windows)]
-fn system32(exe: &str) -> PathBuf {
+pub fn system32(exe: &str) -> PathBuf {
     let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
     PathBuf::from(root).join("System32").join(exe)
 }
