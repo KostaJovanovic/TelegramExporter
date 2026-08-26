@@ -22,12 +22,35 @@ A full-scope roadmap for rewriting `C:\Users\Kosta\Projekti\telegram` in Rust on
 | **2** `tgx-format` | **done** | JSON leg: **4 of 4 topics byte-identical**, 6,643 messages, 3.2 MB |
 | **3** `tgx-html` | **done** | HTML leg: **4 of 4 topics reproduced exactly, 256,780 lines** |
 | **4** `tgx-media` | **done** | Media leg: **830 of 836 filenames**, the six being the documented custom-emoji ceiling |
-| **5** `tgx-tg` | **built, unverified** | compiles and runs; `tgx login \| chats \| export`. Exit criterion needs a live account — see below |
+| **5** `tgx-tg` | **built; verification deferred by decision** | compiles and runs; `tgx login \| chats \| export`. Exit criterion needs a live account — see below |
 | **6** `tgx-ui` | **done** | tokens from `analyser.css`, components, empty states; **gpui builds and renders on Windows** |
 | **7** `tgx-app` | **built** | window opens and stays up; nav bar, chat list, settings, queue, status bar all live |
 | **8** Packaging | **done** | release binary **9.8 MB** (Python: 46.4 MB), assets embedded, CI on `windows-latest` |
 
-### Phase 5 is written but cannot be signed off by me
+### Phase 5: verification deferred, by decision
+
+**Decided 2026-08-26: the exporter ships built-but-unproven at the wire.**
+The live-export check was offered and declined. It is not forgotten, it is a
+named open item — nothing below is a surprise waiting to be discovered.
+
+What that costs, precisely: `convert.rs` and `plan.rs` are proven to map a
+given TL object correctly (16 wire tests in `crates/tgx-tg/tests/wire.rs`),
+but nothing proves Telegram sends the shapes those tests assume. Everything
+downstream of them is pinned byte for byte by the three parity legs, so the
+exposure is narrow and named.
+
+To close it later, two commands and one diff:
+
+```powershell
+$env:TG_API_ID="..."; $env:TG_API_HASH="..."
+cargo run -p tgx-tg --bin tgx -- login
+cargo run -p tgx-tg --bin tgx -- export "UA KOLAB TELEGRAM"
+```
+
+then compare the result against our own earlier run on message ids and
+size-skip decisions.
+
+### Why it could not be signed off here
 
 The engine, the client, the converter, the topic routing and the streamed
 output are all in place, and a CLI drives them:
