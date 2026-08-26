@@ -82,9 +82,8 @@ decision rather than a limitation of the code.
 * **Risk 4 (DirectWrite colour fringing)** is unmeasured. GPUI renders through
   DirectWrite, which is exactly what the Qt original abandoned over fringing on
   light text over near-black. The measurement task in Phase 6 has not been run.
-* **Risk 2 (`N:\` disappears)** — the reference is still only on `N:\`. The
-  preview-sizing fixture is committed, but the golden corpus for the json/html
-  legs is not.
+* **Risk 2 (`N:\` disappears)** — reduced, not closed, and the step that is
+  left is a decision rather than work. See below.
 
 Run the legs with:
 
@@ -93,6 +92,43 @@ cargo run -p tgx-parity -- json  "N:\telegram export\UA KOLAB TELEGRAM"
 cargo run -p tgx-parity -- html  "N:\telegram export\UA KOLAB TELEGRAM"
 cargo run -p tgx-parity -- media "N:\telegram export\UA KOLAB TELEGRAM"
 ```
+
+### The corpus, and why it is not committed
+
+`tgx-parity corpus <export root>` cuts a standalone corpus into `reference/`:
+
+```powershell
+cargo run -p tgx-parity -- corpus "N:\telegram export\UA KOLAB TELEGRAM"
+```
+
+It copies only `result.json` and `messages*.html` — 7.8 MB of a 278 MB export,
+and the whole oracle. None of the three legs reads a byte of media, the media
+leg included: it diffs *names* against the tree the JSON already records.
+Against the corpus all three return exactly what they return against the drive:
+**json 4/4, html 4/4 (256,780 lines), media 830/836**.
+`crates/tgx-parity/tests/corpus.rs` then runs them as ordinary `cargo test`,
+after checking every file against a sha256 manifest — because the tempting way
+to close a failing diff is to edit the reference, and a reference edited to
+agree with us is our own output wearing Desktop's name.
+
+Two things the cut cannot do:
+
+* **It cannot take a slice.** The HTML writer's pagination and joining are
+  cumulative down a topic, so page 3 is only reproducible if pages 1 and 2 were
+  written first. A corpus is whole topics or nothing — which is why the tool
+  ends with a coverage survey naming what each topic uniquely holds. On this
+  export the answer is lopsided: `ćaskanje` alone owns polls, voice messages,
+  location, custom emoji and seven service actions, while the other three
+  contribute no shape that is not already somewhere else.
+* **It cannot decide whether to commit itself.** `reference/` is in
+  `.gitignore`, because a corpus is verbatim messages from real people and this
+  repository has a CI workflow — pushing it publishes them, permanently. So
+  here the corpus test *skips*, and says out loud what it did not check.
+
+That is the honest state of Risk 2: the corpus is one command away and the
+tests are already written against it, but until `reference/` is committed, CI
+proves the unit tests rather than the parity legs. Committing it is a privacy
+decision, and not one the tooling should make quietly on someone's behalf.
 
 ### What the harness caught that the Python suite could not
 
@@ -232,7 +268,7 @@ telegram_rust/
     tgx-parity/               the oracle harness (bin, not a test)
     tgx-analyse/              PHASE 9 — export -> report.html
     tgx-analyse-app/          PHASE 9 — its small window
-  reference/                  golden corpus checked in (see Phase 1)
+  reference/                  the parity corpus, cut by `tgx-parity corpus` (gitignored)
 ```
 
 **One rule the layout enforces:** `tgx-html` may not depend on
@@ -675,7 +711,7 @@ path itself.
 | # | Risk | Impact | Mitigation |
 |---|---|---|---|
 | 1 | **GPUI is pre-1.0 with breaking changes between versions**, and `gpui-component` is pre-1.0 on top of it | A routine dependency bump can break the UI | Pin exact versions; never `"*"`, despite the README. Bump deliberately, on its own commit, with the parity suite green before and after. Keep `tgx-ui` thin enough to re-target. |
-| 2 | **`N:\` disappears** | The rewrite loses its oracle and drops to "asserted" | Phase 0 backs both exports up and hashes them. Phase 1 commits a golden corpus so CI never depends on `N:\`. |
+| 2 | **`N:\` disappears** | The rewrite loses its oracle and drops to "asserted" | Phase 0 backs both exports up and hashes them. `tgx-parity corpus` cuts a 7.8 MB standalone corpus that all three legs run against with identical results, and `tests/corpus.rs` runs them from `cargo test`. Committing `reference/` is left to a deliberate privacy decision — see "The corpus, and why it is not committed". |
 | 3 | **JSON escaping differs silently** between `json.dumps` and `serde_json` | A byte-level diff on a small fraction of messages, invisible until someone diffs | Phase 1's JSON leg exists specifically for this, and runs before the emitter is written. |
 | 4 | **DirectWrite colour fringing** on light text over near-black | The exact problem Qt had; the fix there was abandoning DirectWrite entirely | Measure in Phase 6 with the established method. If it reproduces, the options are a GPUI text-rendering setting, a slightly lifted background, or upstreaming. Discovering it late is the real risk. |
 | 5 | **Text input** — GPUI ships none; Zed's editor is not published | The login dialog cannot accept a phone number | Resolved: `gpui-component`'s `Input`/`InputState`. Fallback is `EntityInputHandler` directly, roughly one extra milestone. |

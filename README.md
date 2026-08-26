@@ -28,6 +28,19 @@ The harness was built **before** the code it judges. That ordering is the whole
 method, and it paid for itself on the first run — see *What the harness caught*
 in ROADMAP.md.
 
+An export is 278 MB, but the oracle inside it is 7.8 MB: no leg reads media,
+only `result.json` and `messages*.html`. Cut that out and the legs become an
+ordinary `cargo test`, on any machine, with the same three results:
+
+```powershell
+cargo run -p tgx-parity -- corpus "N:\telegram export\UA KOLAB TELEGRAM"
+cargo test -p tgx-parity
+```
+
+The corpus lands in `reference/`, which is **gitignored** — it is verbatim
+messages from real people, and pushing it publishes them. Without one the
+corpus test skips and says so. See *The corpus, and why it is not committed*.
+
 ## Running it
 
 ```powershell
