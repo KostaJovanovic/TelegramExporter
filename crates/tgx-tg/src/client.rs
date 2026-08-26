@@ -27,6 +27,17 @@ pub enum LoginStep {
 
 pub struct Session {
     pub client: Client,
+    /// The task driving the connection pool's I/O.
+    ///
+    /// **A `Client` is only a handle.** `SenderPool` hands back three things —
+    /// a handle, a runner and an update channel — and the runner is the half
+    /// that owns the sockets. Taking the handle and dropping the runner
+    /// compiles, connects, and then fails every single request with
+    /// `dropped (cancelled)`: the requests go into a channel whose receiver no
+    /// longer exists. Held here so it lives exactly as long as the client that
+    /// depends on it, and no longer — each action makes its own `Session`, so
+    /// a detached runner per action would be a leak.
+    runner: tokio::task::JoinHandle<()>,
     session: Arc<SqliteSession>,
     api_hash: String,
     token: Option<grammers_client::client::LoginToken>,
@@ -58,8 +69,15 @@ impl Session {
         );
         let pool = SenderPool::new(session.clone(), settings.api_id as i32);
         let client = Client::new(pool.handle);
+        // `pool.updates` is deliberately dropped. Nothing here reacts to live
+        // updates — an export reads history — and the runner sends them with
+        // `let _ = tx.send(..)`, so a dropped receiver makes each send a
+        // no-op. Holding the receiver without draining it would instead grow
+        // an unbounded queue for the length of an export.
+        let runner = tokio::spawn(pool.runner.run());
         Ok(Self {
             client,
+            runner,
             session,
             api_hash: settings.api_hash.clone(),
             token: None,
@@ -194,6 +212,18 @@ impl ChatKind {
             ChatKind::Group => "private_group",
             ChatKind::Private | ChatKind::Bot => "personal_chat",
         }
+    }
+}
+
+impl Drop for Session {
+    /// Stop driving the pool when the session goes.
+    ///
+    /// The runner would otherwise outlive its `Session` for as long as the
+    /// runtime does, and the app builds one per action — connect, list chats,
+    /// list topics, export — so a detached runner each time is a socket and a
+    /// task that nothing will ever close.
+    fn drop(&mut self) {
+        self.runner.abort();
     }
 }
 
