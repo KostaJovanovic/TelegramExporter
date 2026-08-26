@@ -173,6 +173,7 @@ impl Shell {
                 list = list.child(
                     div()
                         .flex()
+                        .w_full()
                         .gap(px(8.0))
                         .text_size(type_scale::TINY)
                         .text_color(p.muted)
@@ -183,7 +184,12 @@ impl Shell {
                                 .text_color(p.rule)
                                 .child(SharedString::from(format!("{}", i + 1))),
                         )
-                        .child(div().child(SharedString::from(*step))),
+                        // `flex_1` to take the rest of the row and `min_w_0` to
+                        // be *allowed* to. A flex child's automatic minimum
+                        // size is its content, so without this a long line
+                        // pushes the row wider than the card instead of
+                        // wrapping inside it — the text runs off the panel.
+                        .child(div().flex_1().min_w_0().child(SharedString::from(*step))),
                 );
             }
             card = card.child(list);
@@ -222,13 +228,49 @@ impl Shell {
         }
 
         if let Some(err) = &dialog.error {
+            // **Click to copy.** A Telegram RPC error is the one string in this
+            // app a user genuinely needs to hand to someone else — it names the
+            // constructor that failed — and it arrives in a modal with nothing
+            // selectable in it. Retyping `AUTH_RESTART caused by auth.sendCode`
+            // from a screenshot is how the useful half gets lost.
+            let copyable = err.to_string();
+            let copied = dialog.copied;
             card = card.child(
                 div()
                     .px(px(20.0))
                     .pt(px(10.0))
-                    .text_size(type_scale::TINY)
-                    .text_color(p.accent)
-                    .child(err.clone()),
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .id("login-error")
+                            .w_full()
+                            .min_w_0()
+                            .text_size(type_scale::TINY)
+                            .text_color(p.accent)
+                            .cursor_pointer()
+                            .child(err.clone())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    copyable.clone(),
+                                ));
+                                if let Some(d) = this.login.as_mut() {
+                                    d.copied = true;
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_size(type_scale::MICRO)
+                            .text_color(p.muted)
+                            .child(SharedString::from(if copied {
+                                "Copied to clipboard"
+                            } else {
+                                "Click the message to copy it"
+                            })),
+                    ),
             );
         }
 
@@ -248,6 +290,11 @@ impl Shell {
                         .cursor_pointer()
                         .child(SharedString::from("Cancel"))
                         .on_click(cx.listener(|this, _, _, cx| {
+                            // Abandoning the dialog abandons the half-finished
+                            // credential with it, rather than leaving a live
+                            // login token and its connection sitting around
+                            // for the rest of the run.
+                            this.bridge.spawn(crate::actions::forget_pending_login());
                             this.login = None;
                             cx.notify();
                         })),
@@ -312,6 +359,7 @@ impl Shell {
         // A stale failure must not sit under a fresh attempt.
         if let Some(d) = self.login.as_mut() {
             d.error = None;
+            d.copied = false;
         }
 
         match stage {
@@ -328,6 +376,7 @@ impl Shell {
                     }
                     _ => {
                         if let Some(d) = self.login.as_mut() {
+                            d.copied = false;
                             d.error = Some(
                                 "An api_id is a number, and an api_hash cannot be blank.".into(),
                             );
@@ -339,6 +388,7 @@ impl Shell {
                 let phone = get(Field::Phone);
                 if phone.is_empty() {
                     if let Some(d) = self.login.as_mut() {
+                        d.copied = false;
                         d.error = Some("A phone number is needed, with its country code.".into());
                     }
                     return;
@@ -362,6 +412,7 @@ impl Shell {
                 });
                 if secret.is_empty() {
                     if let Some(d) = self.login.as_mut() {
+                        d.copied = false;
                         d.error = Some("This cannot be blank.".into());
                     }
                     return;
@@ -809,6 +860,7 @@ impl Shell {
                 Event::LoginFailed(msg) => {
                     if let Some(d) = self.login.as_mut() {
                         d.busy = false;
+                        d.copied = false;
                         d.error = Some(msg.into());
                     }
                 }

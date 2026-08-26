@@ -167,6 +167,9 @@ pub struct LoginDialog {
     /// Shown under the fields. Cleared on every submit, so a stale failure
     /// cannot sit under a fresh attempt.
     pub error: Option<SharedString>,
+    /// Whether the last error was copied. Reset with the error, so the
+    /// confirmation never sits under a message it does not belong to.
+    pub copied: bool,
     pub busy: bool,
 }
 
@@ -209,6 +212,7 @@ impl LoginDialog {
             code: field(window, cx, Field::Code, "", "12345"),
             password: field(window, cx, Field::Password, "", ""),
             error: None,
+            copied: false,
             busy: false,
         }
     }
