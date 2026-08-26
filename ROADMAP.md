@@ -25,7 +25,7 @@ A full-scope roadmap for rewriting `C:\Users\Kosta\Projekti\telegram` in Rust on
 | **5** `tgx-tg` | **built; verification deferred by decision** | compiles and runs; `tgx login \| chats \| export`. Exit criterion needs a live account — see below |
 | **6** `tgx-ui` | **done** | tokens from `analyser.css`, components, empty states; **gpui builds and renders on Windows** |
 | **7** `tgx-app` | **built** | window opens and stays up; nav bar, chat list, settings, queue, status bar all live |
-| **8** Packaging | **done** | release binary **17.8 MB** (Python: 46.4 MB), assets embedded, CI on `windows-latest` |
+| **8** Packaging | **done** | release binary **18.4 MB** (Python: 46.4 MB), assets embedded, CI on `windows-latest` |
 
 ### Phase 5: verification deferred, by decision
 
