@@ -12,7 +12,7 @@
 
 use crate::error::{classify, EnrichError};
 use crate::plan::DownloadJob;
-use grammers_client::media::Media;
+use grammers_client::media::{Downloadable, Media, PhotoSize};
 use grammers_client::Client;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -114,27 +114,44 @@ async fn run_one(client: &Client, root: &Path, pending: PendingDownload) -> Medi
         return tally;
     };
 
+    if let Some(written) = fetch_with_retry(client, &media, &dest).await {
+        tally.downloaded += 1;
+        tally.bytes += written;
+        fetch_thumb(client, root, &media, &pending.job, &mut tally).await;
+        fetch_preview(client, root, &media, &pending.job, &dest, &mut tally).await;
+    } else {
+        tally.failed += 1;
+        tally.missing.push(pending.job.dest.clone());
+    }
+    tally
+}
+
+/// Fetch one downloadable, waiting out rate limits and retrying real failures.
+///
+/// `None` means the file is not on disk and the remnant has been removed.
+///
+/// **Shared by the file, its thumbnail and its preview.** The thumbnail used to
+/// be fetched by a bare call: one rate limit cost it outright while the file
+/// beside it was retried five times — and the JSON has already named the
+/// thumbnail by then, so losing it leaves a broken `<img>`. The Python original
+/// carries a comment recording exactly that, which is the reason this is one
+/// function rather than three loops.
+async fn fetch_with_retry<D: Downloadable>(client: &Client, media: &D, dest: &Path) -> Option<i64> {
     let mut attempt = 0;
     loop {
         attempt += 1;
-        match fetch(client, &media, &dest).await {
-            Ok(written) if written > 0 => {
-                tally.downloaded += 1;
-                tally.bytes += written;
-                return tally;
-            }
+        match fetch(client, media, dest).await {
+            Ok(written) if written > 0 => return Some(written),
             // Zero bytes is a failure, not a success. Remove the remnant so a
             // later existence check cannot mistake it for a saved file.
             Ok(_) => {
-                let _ = std::fs::remove_file(&dest);
+                let _ = std::fs::remove_file(dest);
                 if attempt >= MAX_RETRIES {
-                    tally.failed += 1;
-                    tally.missing.push(pending.job.dest.clone());
-                    return tally;
+                    return None;
                 }
             }
             Err(e) => {
-                let _ = std::fs::remove_file(&dest);
+                let _ = std::fs::remove_file(dest);
                 if let Some(wait) = e.retry_after() {
                     // A rate limit is temporary. Wait it out in slices so a
                     // cancel is not swallowed, and do not spend a retry on it.
@@ -143,16 +160,134 @@ async fn run_one(client: &Client, root: &Path, pending: PendingDownload) -> Medi
                     continue;
                 }
                 if attempt >= MAX_RETRIES {
-                    tally.failed += 1;
-                    tally.missing.push(pending.job.dest.clone());
-                    return tally;
+                    return None;
                 }
             }
         }
     }
 }
 
-async fn fetch(client: &Client, media: &Media, dest: &Path) -> Result<i64, EnrichError> {
+/// Fetch Telegram's own thumbnail for a file we just saved.
+///
+/// **This is the half that did not exist.** `plan.rs` wrote
+/// `"thumbnail": "<file>_thumb.jpg"` into `result.json` and set
+/// `DownloadJob::thumb_dest`, and nothing anywhere read that field — it was a
+/// `pub` member of a `pub` struct, so no dead-code lint fired and clippy stayed
+/// clean. Every export therefore shipped a `thumbnail` path with no file behind
+/// it: 1,559 of them in the last live run, every single one dangling, and none
+/// recorded in `missing_media.txt` because no job had ever been queued to fail.
+///
+/// A thumbnail that cannot be fetched is counted and named like any other
+/// missing file rather than silently left out, because the JSON has already
+/// promised it by the time we get here.
+async fn fetch_thumb(
+    client: &Client,
+    root: &Path,
+    media: &Media,
+    job: &DownloadJob,
+    tally: &mut MediaTally,
+) {
+    let Some(rel) = job.thumb_dest.as_ref() else {
+        return;
+    };
+    let Some(thumb) = largest_thumb(media) else {
+        // The plan only sets `thumb_dest` when it saw a non-stripped thumb, so
+        // arriving here means the two disagreed about the same document.
+        tally.failed += 1;
+        tally.missing.push(rel.clone());
+        return;
+    };
+    let dest = root.join(rel);
+    match fetch_with_retry(client, &thumb, &dest).await {
+        Some(written) => {
+            tally.downloaded += 1;
+            tally.bytes += written;
+        }
+        None => {
+            tally.failed += 1;
+            tally.missing.push(rel.clone());
+        }
+    }
+}
+
+/// Put the inline preview on disk beside the file it previews.
+///
+/// Desktop renders this one locally with an image scaler. We take Telegram's
+/// next size down instead, which needs no decoder in the binary and lands a
+/// real image at the name Desktop uses. **The bytes therefore differ from
+/// Desktop's**; the file, its path and its role do not, and no parity leg reads
+/// media bytes — the media leg diffs names.
+///
+/// When Telegram advertises nothing smaller, the full-size file is copied. That
+/// costs page weight and is the deliberate trade: `_p.preview` has already been
+/// written into the HTML by the time this runs, so the alternative is an
+/// `<img>` pointing at nothing, and a dangling reference is worse than a heavy
+/// one.
+async fn fetch_preview(
+    client: &Client,
+    root: &Path,
+    media: &Media,
+    job: &DownloadJob,
+    full: &Path,
+    tally: &mut MediaTally,
+) {
+    let Some(rel) = job.preview_dest.as_ref() else {
+        return;
+    };
+    let dest = root.join(rel);
+    // Strictly smaller than the file itself, or it is not a downscale.
+    let smaller = match media {
+        Media::Photo(p) => p
+            .thumbs()
+            .into_iter()
+            .filter(|t| !matches!(t, PhotoSize::Stripped(_)))
+            .filter(|t| (t.size() as i64) < job.size)
+            .max_by_key(|t| t.size()),
+        _ => None,
+    };
+    if let Some(t) = smaller {
+        if let Some(written) = fetch_with_retry(client, &t, &dest).await {
+            tally.downloaded += 1;
+            tally.bytes += written;
+            return;
+        }
+    }
+    match std::fs::copy(full, &dest) {
+        Ok(n) => {
+            tally.downloaded += 1;
+            tally.bytes += n as i64;
+        }
+        Err(_) => {
+            let _ = std::fs::remove_file(&dest);
+            tally.failed += 1;
+            tally.missing.push(rel.clone());
+        }
+    }
+}
+
+/// The thumbnail `plan::thumb_bytes` measured, so the file on disk is the one
+/// whose size `thumbnail_file_size` reports.
+///
+/// Stripped sizes are excluded for the same reason the plan excludes them: they
+/// are the blur preview carried inside the message, not a downloadable file,
+/// and they travel as `stripped_thumbnail` on their own path.
+fn largest_thumb(media: &Media) -> Option<PhotoSize> {
+    let thumbs = match media {
+        Media::Document(d) => d.thumbs(),
+        Media::Sticker(s) => s.document.thumbs(),
+        _ => return None,
+    };
+    thumbs
+        .into_iter()
+        .filter(|t| !matches!(t, PhotoSize::Stripped(_)))
+        .max_by_key(|t| t.size())
+}
+
+async fn fetch<D: Downloadable>(
+    client: &Client,
+    media: &D,
+    dest: &Path,
+) -> Result<i64, EnrichError> {
     let mut iter = client.iter_download(media);
     let mut file = match tokio::fs::File::create(dest).await {
         Ok(f) => f,
@@ -215,6 +350,7 @@ mod tests {
             job: DownloadJob {
                 dest: "thumbnails/a.jpg".into(),
                 thumb_dest: None,
+                preview_dest: None,
                 size: 3,
                 inline_bytes: Some(vec![1, 2, 3]),
                 message_id: 1,

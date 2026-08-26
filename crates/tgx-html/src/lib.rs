@@ -1,5 +1,6 @@
 pub mod assets;
 pub mod escape;
+pub mod index;
 pub mod inline;
 pub mod join;
 pub mod media;

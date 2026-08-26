@@ -22,24 +22,19 @@ A full-scope roadmap for rewriting `C:\Users\Kosta\Projekti\telegram` in Rust on
 | **2** `tgx-format` | **done** | JSON leg: **4 of 4 topics byte-identical**, 6,643 messages, 3.2 MB |
 | **3** `tgx-html` | **done** | HTML leg: **4 of 4 topics reproduced exactly, 256,780 lines** |
 | **4** `tgx-media` | **done** | Media leg: **830 of 836 filenames**, the six being the documented custom-emoji ceiling |
-| **5** `tgx-tg` | **built; verification deferred by decision** | compiles and runs; `tgx login \| chats \| export`. Exit criterion needs a live account — see below |
-| **6** `tgx-ui` | **partial** | tokens from `analyser.css`, components, empty states; **gpui builds and renders on Windows**. But `motion` is unreferenced, `rhythm::TRACK_*` is never applied, and several helpers are dead outside their own tests. |
-| **7** `tgx-app` | **barely started** | the window opens, signs in and exports. Everything else is painted, not wired: nothing scrolls, there is no filter input, settings are read-only text, Stop does not stop, and the UI does not repaint when a worker event lands. **Every box in the Phase 7 checklist below is still unchecked, and that is accurate.** See `HANDOFF.md`. |
-| **8** Packaging | **done** | release binary **18.5 MB** (Python: 46.4 MB), assets embedded, CI on `windows-latest` |
+| **5** `tgx-tg` | **run at the wire, 2026-08-27** | a live export was made and diffed against Desktop's own export and the Python original's. It found **four features nothing emitted** — reactions, service actions, polls, locations — plus 206 empty names, a linked-to index page that was never written, and three bugs in the wire leg itself. All fixed; see below and `AUDIT.md`. |
+| **6** `tgx-ui` | **done** | tokens from `analyser.css`, real letterspacing, components, empty states. The drifting grid backdrop was built and then **removed by decision** — see Phase 6. DirectWrite fringing **measured at 0.0%** — see Risk 4. |
+| **7** `tgx-app` | **done** | every interaction rule below is implemented, and the window was driven to confirm it: a worker event repaints without the mouse moving. See "Still open" for what remains inside it. |
+| **8** Packaging | **done** | release binary **19.5 MB** (Python: 46.4 MB), assets embedded, icon and version resource, CI on `windows-latest`. Up from 18.5 MB: 338 KB of Geist, 100 KB of icon, the rest Phase 7. Well inside the 30 MB CI ceiling. |
 
-### Phase 5: verification deferred, by decision
+### Phase 5: run, and what it cost to have deferred it
 
-**Decided 2026-08-26: the exporter ships built-but-unproven at the wire.**
-The live-export check was offered and declined. It is not forgotten, it is a
-named open item — nothing below is a surprise waiting to be discovered.
+**Decided 2026-08-26: the exporter ships built-but-unproven at the wire. Run
+2026-08-27, and the deferral was the expensive call.** The paragraph this
+section used to open with said the exposure was "narrow and named". It was
+neither.
 
-What that costs, precisely: `convert.rs` and `plan.rs` are proven to map a
-given TL object correctly (16 wire tests in `crates/tgx-tg/tests/wire.rs`),
-but nothing proves Telegram sends the shapes those tests assume. Everything
-downstream of them is pinned byte for byte by the three parity legs, so the
-exposure is narrow and named.
-
-To close it later, two commands and one diff:
+The run was the two commands this document already listed:
 
 ```powershell
 $env:TG_API_ID="..."; $env:TG_API_HASH="..."
@@ -47,10 +42,45 @@ cargo run -p tgx-tg --bin tgx -- login
 cargo run -p tgx-tg --bin tgx -- export "UA KOLAB TELEGRAM"
 ```
 
-then compare the result against our own earlier run on message ids and
-size-skip decisions.
+and then a three-way cross-examination — our export, Desktop's own, and the
+Python original's, all of the same supergroup. What came out, with the numbers:
 
-### Why it could not be signed off here
+| finding | scale in the reference | in our live export |
+|---|---|---|
+| `reactions` never emitted | 963 of 6,643 messages | none |
+| service `action` never emitted | 63 of 63, all nine kinds | none |
+| polls never emitted | 7 | none |
+| locations never emitted | 3 | none |
+| names resolving to `""` | — | 206 fields (103 `from`, 96 `forwarded_from`, 7 `actor`) |
+| `export_results.html` | linked from all 9 topic pages | never written |
+| inline `<img>` previews | 649 | **0** |
+| Telegram thumbnails | 1,287 `thumbnail` keys | 1,546 dangling paths |
+
+Every one of those sat under **444 passing tests and three green parity legs**.
+That is not a gap in the suite, it is the shape of the suite: the legs replay a
+recorded `result.json`, so a key the converter never writes is a key the
+*reference* supplies for them. They can prove a written key is written
+correctly. They cannot notice an unwritten one.
+
+The three-way diff was what made most of these visible at all. Our export
+against Desktop's says a field is missing; the Python original's export says
+whether that field was ever reachable from the wire, which is the difference
+between a converter bug and a Telegram change. It is also how the trailing
+empty text segment was pinned to *non-ASCII text* rather than to entity type —
+see the UTF-16 note in `AUDIT.md`.
+
+`AUDIT.md`'s **"What the first live export found — 2026-08-27"** section carries
+each finding with its fix and its file:line. All are closed.
+
+**The check itself was broken three ways too**, which is its own lesson: it
+paired topics by folder name, so `ćaskanje` and `0001 - ćaskanje` never met and
+it reported eight failures having compared *zero* messages; `MAY_DRIFT` scored a
+field that vanished entirely the same as a field whose value moved, which is
+how 963 missing reactions read as "two runs, two points in time"; and it never
+checked that a media path had a file behind it. A harness written before the
+code it judges still has to be run against something before it is trusted.
+
+### Why it could not be signed off in Phase 5's own week
 
 The engine, the client, the converter, the topic routing, media planning,
 the download pool, the enrichment layer and the streamed output are all in
@@ -63,9 +93,10 @@ cargo run -p tgx-tg  --bin tgx -- export "UA KOLAB TELEGRAM"
 ```
 
 The exit criterion — *a live export matching our own reference run on all
-6,643 ids and 1,786 size-skip decisions* — needs credentials and a signed-in
-account. Using them is the account holder's call, not mine, so this is a
-decision rather than a limitation of the code.
+6,643 ids and 1,786 size-skip decisions* — needed credentials and a signed-in
+account. Using them was the account holder's call, not mine, so this was a
+decision rather than a limitation of the code. It has since been given, and
+taken: see above.
 
 **Vindicated on the first real attempt.** `SenderPool` hands back three
 things — a handle, a runner and an update channel — and `connect()` took the
@@ -77,8 +108,8 @@ replays recorded JSON and none of them opens a socket. The sign-in dialog
 found it in one click. That is the whole argument for this phase — the wire is
 the only part of the pipeline that no replay can reach.
 
-The **check itself is written and tested**, so the run is the only missing
-part. Once an export exists:
+The **check itself was written and tested** long before the run — and was still
+wrong in three ways nothing but the run could show. Once an export exists:
 
 ```powershell
 cargo run -p tgx-parity -- wire "Exports\UA KOLAB TELEGRAM" "N:\telegram export\UA KOLAB TELEGRAM"
@@ -94,7 +125,15 @@ reference and itself it reports **6,643 ids, 3,135 size decisions** — of which
 `file` accounts for 1,786, the roadmap's headline number, with `thumbnail`
 (1,287) and `photo` (62) making up the rest.
 
-**350 tests across 19 suites**; `cargo clippy` and `cargo fmt --check` clean.
+It now also reports two absences, because the first real run proved that
+"different" was the wrong question to ask alone: **`absent`**, a field the
+reference writes and we never do, kept out of the drift allowance so 963
+missing `reactions` cannot read as a timing difference again; and
+**`dangling`**, a media path in our JSON with no file behind it, which was
+1,546 thumbnail references on the first run and reported by nothing.
+
+**509 tests across 20 suites**; `cargo clippy --all-targets --all-features
+-D warnings` and `cargo fmt --check` clean.
 
 ### Risks that are now retired
 
@@ -103,14 +142,82 @@ reference and itself it reports **6,643 ids, 3,135 size decisions** — of which
 | 1 | gpui/gpui-component are pre-1.0 | Both are in and both are pinned exactly. `gpui-component` 0.5.1 declares `gpui ^0.2.2`, so it builds against the pin. |
 | 3 | JSON escaping differs silently | Pinned by the json leg **and** by unit tests checked against CPython's actual output. |
 | 8 | **GPUI needs a working GPU** | **gpui builds on Windows in 1m45s and the window renders here** — launched for 10s with empty stderr. |
+| 4 | **DirectWrite colour fringing** | **Measured, and it does not reproduce: 0.0% of inked pixels carry a colour cast, worst channel spread 0 levels**, across four regions of the rendered window — the nav bar, the chat list, the settings panel and an empty state. The Qt original measured 81% here and abandoned DirectWrite for FreeType over it; gpui's path is rasterising greyscale. `tools/measure_fringing.py` is the measurement, taken the established way — on a **rendered window**, not an offscreen paint, because under FreeType those two disagreed 0% against 90%. Re-run it after any gpui bump. |
 
 ### Still open
 
-* **Risk 4 (DirectWrite colour fringing)** is unmeasured. GPUI renders through
-  DirectWrite, which is exactly what the Qt original abandoned over fringing on
-  light text over near-black. The measurement task in Phase 6 has not been run.
+**No phase is unfinished now.** Phase 5's exit criterion has been met — a live
+export was run, diffed, and the six things it found are fixed. What follows is
+what is left inside finished phases, stated rather than hidden.
+
+Two of these are new, and both came out of that run:
+
+* **The html leg proves the writer, not the pipeline.**
+  `crates/tgx-parity/src/html_leg.rs:426` lifts `_p` out of Desktop's own pages
+  and feeds it back in, so the leg reads 4 of 4 whether or not anything upstream
+  builds that map. Nothing did, for the whole of Phases 3–7: a live export had
+  **zero `<img>` elements against Desktop's 649**, with the leg green over it.
+  `convert::presentation` now builds it and `crates/tgx-tg/tests/wire.rs` covers
+  that half — converter in, map out — but **the leg's blind spot is unchanged**,
+  and it is structural: lifting the map is what lets the leg run with no
+  connection, which is the whole reason it exists. Anything trusting a green
+  html leg has to know it says nothing about `_p`.
+* **The inline preview's bytes are ours, not Desktop's.** `<stem>_thumb<ext>` is
+  a third artifact, distinct from Telegram's `_thumb.jpg` and from the stripped
+  thumbnail, and Desktop renders it locally with an image scaler. We take
+  Telegram's next size down, or copy the full file when there is none. Path and
+  role match; bytes do not. No leg compares them — the media leg diffs *names* —
+  so nothing goes red, which is precisely why it is written here.
+* **`custom_emoji.document_id` stays a numeric id, not a sticker path.** This is
+  the media leg's documented 830-of-836 ceiling and it is unchanged. A JSON
+  replay cannot see custom emoji at all.
 * **Risk 2 (`N:\` disappears)** — reduced, not closed, and the step that is
   left is a decision rather than work. See below.
+* **Hairlines at fractional DPI** are verified at 100% scaling only. Measured on
+  a screenshot of the running window, a 1px rule is exactly one device row of
+  `#333333` with no bleed into the next. 125 / 150 / 200% still need somebody to
+  change the display scaling and look, which is not something a test can do.
+* **Risk 10 (no `py-spy` equivalent for a hung GPUI app)** — the diagnostic hook
+  Phase 7 asks for is not built. `startup-error.log` covers a failure to start,
+  and distinguishes a panic after the window opened, but neither is a freeze: a
+  wedged render thread leaves nothing behind to read.
+* **The binary is unsigned.** Deliberate — there is no certificate — but a user
+  who *downloads* it meets SmartScreen on first run. Copying `dist\` over a share
+  or a stick carries no mark-of-the-web and does not trip it.
+* **The destination field shows the end of a long path, not its start.** The
+  borrowed `InputState` scrolls to its caret and the only API that moves it,
+  `set_cursor_position`, also steals focus. The rule is met by the echo line
+  under the field, elided from the start, plus a tooltip carrying the whole path
+  — but the field itself still behaves like a text field.
+* **`chat_concurrency` has no UI**, deliberately: the engine exports one chat at
+  a time, and a control that is enabled and does nothing teaches that the
+  interface is unreliable. The setting still loads and clamps, so an existing
+  file opens.
+
+### What was driven, and what was only read
+
+The window was launched and driven, not just compiled. **Confirmed on screen:**
+it opens with empty stderr and no `startup-error.log`; a worker event repaints
+it without the mouse moving; the sign-in card lays out and scrolls; the sort
+menu opens, paints over the list rather than under it, and a click away
+dismisses it *without* also doing whatever it landed on; the theme chip swaps
+the whole window, borrowed components included, in one token pass, and the
+choice survives a restart in `settings.json`; the type is Geist; a 1px rule
+lands on one device row; DirectWrite adds no colour cast.
+
+**Not confirmed on screen, because it needs a signed-in account:** everything
+behind a populated chat list — the rows, the captions, the category headings,
+folding, the queue table, the progress bar under a real run. Those are covered
+by the headless tests in `crates/tgx-app/src/shell/tests.rs` and
+`crates/tgx-app/src/list.rs`, which is **not the same thing**: the tests prove
+the rules, not the hit testing. Drive the list once against a real account
+before trusting it — the same rule as the wire, for the same reason.
+
+One warning for whoever does that with a script rather than a hand: this
+window's client area is inset from its window rect (8px and 31px here), so
+clicks computed from `GetWindowRect` land a row too high and silently hit
+whatever is above the target. Convert through `ClientToScreen`. Two controls
+were reported broken on that mistake before it was found.
 
 Run the legs with:
 
@@ -539,6 +646,15 @@ documented rather than chased.
 agrees with `N:\telegram export\UA KOLAB` on all 6,643 message ids and all
 1,786 size-skip decisions.
 
+*Met on 2026-08-27, and not on the first pass — the export completed, and then
+the diff named six things this checklist never asked for because nobody had
+thought to doubt them: `reactions`, service `action`, polls and locations were
+converted by nothing at all, 206 names resolved to `""`, and
+`export_results.html` was linked from nine pages and written by none. The list
+above is a list of what to build. It is not a list of what to check. See
+"Phase 5: run, and what it cost to have deferred it" at the top of this
+document, and `AUDIT.md` for the fixes.*
+
 ---
 
 ## Phase 6 — `tgx-ui`: the Swiss design system, from the ground up
@@ -565,40 +681,84 @@ outside the table.
 
 Type scale `--t-mega … --t-micro` (200 / 112 / 56 / 28 / 16 / 16 / 13 / 11 / 10
 at their clamp ceilings), rhythm `--lh-tight 1.2` / `--lh-body 1.5` /
-`--lh-prose 1.65`, tracking `--ls-caps .08em` / `--ls-micro .15em`, durations
-`--dur-fast .12s` through `--dur-slow .3s`, `--radius: 0`, `--gap: 24px`.
-Geist with `ss01`, `cv11`, `tnum`; Geist Mono for every number.
+`--lh-prose 1.65`, tracking `--ls-caps .08em` / `--ls-micro .15em`,
+`--radius: 0`, `--gap: 24px`. Geist with `tnum`; Geist Mono for every number.
+(`ss01` and `cv11` are in the stylesheet and **not in the shipped TTFs** — see
+the fonts task below.)
 
-- [ ] Port the token table as a Rust type with both appearances. Same keys,
+The stylesheet's durations, `--dur-fast .12s` through `--dur-slow .3s`, are
+**not** carried over: nothing in this window moves. They were ported, went
+unused except by the grid backdrop, and were deleted with it — see below.
+
+- [x] Port the token table as a Rust type with both appearances. Same keys,
       enforced by the type rather than by a test.
-- [ ] Fonts: reuse the **already-built** `app/ui/fonts/*.ttf` (Geist + Geist Mono,
+- [x] Fonts: reuse the **already-built** `app/ui/fonts/*.ttf` (Geist + Geist Mono,
       merged Latin+Cyrillic — Qt had no CSS `unicode-range` equivalent, which is
       why they were merged). They are a committed build artefact; copy them, do
-      not regenerate. Register via GPUI's text system.
-- [ ] **Measure text rendering on Windows.** GPUI uses DirectWrite, and the
+      not regenerate. Register via GPUI's text system. *`tnum` is wired and
+      visibly working — Geist's default figures are proportional, nine distinct
+      advances across ten digits. **`ss01` and `cv11` are not in these files at
+      all**: the Latin+Cyrillic merge dropped the stylistic and character-variant
+      sets, and an absent OpenType tag is a silent no-op, so asking for them
+      would look applied and do nothing.*
+- [x] **Measure text rendering on Windows.** GPUI uses DirectWrite, and the
       Python project spent real effort on colour fringing of light text on
       near-black — DirectWrite ignored `NoSubpixelAntialias` entirely (81% of
       inked pixels fringed) and the fix was abandoning it for FreeType. Measure
       the same way: share of inked pixels carrying a colour cast, on a **rendered
       window**, not an offscreen paint — under FreeType those two paths disagreed
       0% against 90%. If GPUI fringes, find out in Phase 6 and not at release.
+      *Result: 0.0%. `tools/measure_fringing.py`; see Risk 4.*
 - [ ] **Hairlines at fractional DPI.** A 1px rule is the design's core primitive
       and it must land on a device pixel, not blur across two. Explicit task with
-      a visual check at 100 / 125 / 150 / 200% scaling.
-- [ ] The drifting grid backdrop: 48px SVG tile drawn at 72px, translating
+      a visual check at 100 / 125 / 150 / 200% scaling. *Verified at 100%: one
+      device row, no bleed. The other three need somebody at the display
+      settings.*
+- [~] ~~The drifting grid backdrop: 48px SVG tile drawn at 72px, translating
       `(72px, 72px)` over 24s linear, `0.07` ink on light and `0.12` on dark. In
       Qt this was a static tiled pixmap; in GPUI it can actually drift, which is
-      what the site does.
-- [ ] Components: `NavButton` (numbered `01`–`03` for the sequence — Sign in,
+      what the site does.~~ **Built, then removed by decision — see below.**
+- [x] Components: `NavButton` (numbered `01`–`03` for the sequence — Sign in,
       Refresh chats, Start export — and unnumbered, right-pushed and
       label-sized for the tools; a cell without a number does not pay the number
       gap), `Rule`, letterspaced uppercase micro-label, `ChatRow`,
       `SettingsRow`, `NumberField` (no stepper arrows; wheel only after click),
       `ListView` with painted empty states.
-- [ ] Theme switch as a token swap, not a rebuild.
+- [x] Theme switch as a token swap, not a rebuild.
+
+### The grid backdrop: built to spec, and removed anyway
+
+It was written exactly as specified above — hairlines at a 72px tile rather than
+an SVG tile, drifting one full tile over 24s, in `palette.grid` — and then
+deleted, along with `palette.grid`, `metrics::GRID_TILE` and the whole
+`tokens::motion` table, which had no other caller.
+
+Two reasons, both only visible once it was on screen:
+
+* **It never stopped costing.** A repeating `Animation` calls
+  `request_animation_frame` every frame it is on screen and gpui has no partial
+  invalidation, so the entire element tree was laid out again at display rate
+  for as long as the window was open — for scenery. Gating it on `!exporting`
+  reduced that; it did not make it a good trade for an app that spends most of
+  its life idle in front of someone doing something else.
+* **It ran through the type, not behind it.** The panels are unfilled by design
+  — that is what lets a backdrop show through the whole window rather than only
+  in the gaps — so at `0.12` on dark the hairlines crossed every label and
+  settings row. The site can do this because its content sits on filled cards.
+  Ours does not.
+
+Anything putting it back has to answer both. The tokens are in `analyser.css`;
+nothing here is lost, only unbuilt.
+
+**One thing GPUI does not hand back after all.** The list below claims
+letter-spacing as a real property; it is not one in gpui 0.2.2, which has no
+letter-spacing anywhere in `Styled` or `TextStyle`. That is why the tracking
+tokens went unapplied for so long. `components::tracked` implements it in layout
+instead — one child per character with the tracking as the flex `gap` — which
+costs selection and wrapping, so it is for painted labels only.
 
 **What GPUI hands back that Qt refused**, each of which deletes a workaround:
-letter-spacing as a real property; actual transitions instead of snapping;
+transitions and animation, if anything here ever wants them again;
 `box-shadow`; no `WA_TransparentForMouseEvents` footgun; no
 stylesheet-beats-`setFont` precedence trap; no Fusion-style requirement; and
 list virtualization (`UniformList`) the Qt tree never had.
@@ -611,94 +771,162 @@ The layout is a port; the *interaction rules* below are behaviour, hard-won, and
 survive the toolkit change unchanged. Treat them as a checklist, because every
 one of them is a bug that was found the expensive way.
 
-**None of these are done.** The window opens, signs in, lists chats and exports;
-that is the whole of it. `HANDOFF.md` has the verified defect list and a
-suggested order. The specification for this phase is the Python original —
-`app/ui/main_window.py` and `app/ui/widgets.py` — read the code, not a
-description of it.
+**All of these are done.** The specification for this phase is the Python
+original — `app/ui/main_window.py` and `app/ui/widgets.py` — read the code, not
+a description of it. What remains is in "Still open" above, and it is not code.
 
-- [ ] **Async bridge.** Tokio runtime on a dedicated thread for the whole app
+### What "slow to sign in" turned out to be
+
+Asked why signing in took so long, and why the chat list stayed empty after it.
+Neither had a single cause; between them they had five, and all five were
+structural rather than accidental.
+
+1. **Nothing was reused.** Every action built its own `Session`, and `Drop`
+   aborted the runner when the action ended. Before its first useful request
+   each new connection paid TCP, `InvokeWithLayer(InitConnection(help.getConfig))`
+   and a write of every datacentre address that answer carries. Pressing "01
+   Sign in" and then submitting a phone number was two of those, and refresh,
+   count and export were three more. It also meant two `SqliteSession` handles
+   open on one file. There is now one `Connection` per process, shared.
+2. **The authorisation state was asked for twice.** `request_code` opened with
+   `is_authorized()` — a `updates.getState` round trip — to answer the question
+   whose answer had just been used to open the dialog it was called from. Cached
+   on the connection now; the "Sign in" button uses `refresh_authorization`
+   because re-checking is the one thing that button is for.
+3. **There was no timeout at any layer.** `NetStream::connect` in
+   `grammers-mtsender` is a bare `TcpStream::connect`, and nothing here wrapped
+   it. An address that is *filtered* rather than refused — Telegram, on a
+   network that blocks it — sat in Windows' own SYN retry for about 21 seconds
+   per attempt, twice over a sign-in, with the button reading "Working…" and no
+   way to tell a slow link from a blocked one. `CONNECT_TIMEOUT` is 15s for
+   exactly that reason: it has to beat the operating system to the diagnosis.
+4. **Nothing was signed in until you asked, and nothing loaded once you were.**
+   `Shell::new` spawned one job, and it was the data-folder ACL check.
+   `start_refresh` had one caller: the "02 Refresh chats" button. So a saved
+   session bought nothing on launch, and after a successful sign-in the user was
+   asked to press the one button that could possibly be next. Launch now probes
+   when there is a session file to probe with, and `SignedIn` loads the list.
+5. **Nothing was logged, so none of the above could be seen from inside.** No
+   `log` implementation was ever installed — see `logging.rs`. The lines that
+   answer "what took the time" already existed in grammers and were being
+   thrown away.
+
+The remaining cost of a *first* sign-in is real and is Telegram's: `auth.sendCode`
+on the default datacentre answers `PHONE_MIGRATE`, and grammers handles it by
+dropping that connection and generating a fresh authorisation key against the
+home one — a full Diffie-Hellman exchange — before sending the code. That is why
+`AUTH_TIMEOUT` is three times `CONNECT_TIMEOUT` and not equal to it.
+
+### The log panel could be read and not copied
+
+GPUI paints text; it does not let you select it. A plain element has no
+selection behaviour at all, so the export's own account of what it did stopped
+at the screen — readable, photographable, and reachable no other way. The
+sign-in error had already met this and solved it one line at a time; the
+transcript needed it all at once, so the panel header carries a **Copy**.
+
+Two things the panel says in colour and position have to survive being pasted
+somewhere with neither, and `Journal::to_text` carries both: a warning is marked
+`!`, and the dropped-line count is stated at the top. Otherwise a truncated run
+pastes as a whole one, which is the exact failure the panel's own header exists
+to prevent.
+
+- [x] **Async bridge.** Tokio runtime on a dedicated thread for the whole app
       lifetime (grammers requires it); GPUI owns the main thread. Submit
       futures, receive events over a channel, marshal to the UI with `cx.spawn`.
       Direct analogue of `worker.py::AsyncBridge`, including the drain-on-shutdown
       contract. **The UI thread never blocks on a future.**
-- [ ] Chat list on `UniformList`. A row paints tick box, title, mono caption and
+- [x] Chat list on `UniformList`. A row paints tick box, title, mono caption and
       right-set count; a forum is a painted red dot, never a suffix on the stored
       title, because presentation in the string is what the filter then searches.
       Ticks held by chat id so they survive sorting, grouping and filtering.
-- [ ] Sorting on real values, not displayed text (`100` must not order before
+- [x] Sorting on real values, not displayed text (`100` must not order before
       `99`), with an explicit un-inversion helper so the fixed category order and
       the alphabetical tie-break hold in both directions.
-- [ ] Five category buckets plus a flat mode; categories fold; a search re-opens
+- [x] Five category buckets plus a flat mode; categories fold; a search re-opens
       any closed category that matched, so a filter never looks like it found
       nothing.
-- [ ] **One writer for a chat's count.** Three sources — the Count button, the
+- [x] **One writer for a chat's count.** Three sources — the Count button, the
       total an export looks up, the number it actually wrote — and one setter.
       Painting, sorting and the selection footer must read the same value, or a
       finished export leaves the row showing one number and sorting on another.
-- [ ] **A missing count is not a count of zero.** It paints blank, sorts last,
+- [x] **A missing count is not a count of zero.** It paints blank, sorts last,
       and every place that sums says *at least N*.
-- [ ] A cancelled or failed export writes no count at all. A truncated run must
+- [x] A cancelled or failed export writes no count at all. A truncated run must
       not leave its own length behind as the size of the chat.
-- [ ] `ExportResult` keeps the number the run started with, so the summary can
+- [x] `ExportResult` keeps the number the run started with, so the summary can
       say *Telegram counted 6,643; 6,640 came through*. Without it a short export
       reads exactly like a complete one.
-- [ ] **One progress bar, two claimants.** The export claims it; while claimed,
+- [x] **One progress bar, two claimants.** The export claims it; while claimed,
       every counting handler returns without touching it. The count's progress
       signal fires from a `finally` for every chat however it ended, or the bar
       stops short and reads as stuck rather than finished.
-- [ ] **Four empty states, not one.** Not signed in / signed in but nothing
+- [x] **Four empty states, not one.** Not signed in / signed in but nothing
       loaded / filter matched nothing / account has no chats. Track *signed in*
       separately from *list is empty* — they need opposite instructions. The
       message is painted signage: nothing focusable, nothing clickable. A short
       panel drops the hint and keeps the headline. The filter's empty state
       quotes what was typed.
-- [ ] A message that names a screen names a screen that exists. There is no
+- [x] A message that names a screen names a screen that exists. There is no
       Settings page; credentials are the first page of sign-in.
-- [ ] All / None / Invert / Only forums act on visible rows and are **disabled**
+- [x] All / None / Invert / Only forums act on visible rows and are **disabled**
       over an empty list. A button that is enabled and does nothing teaches that
       the interface is unreliable.
-- [ ] Minimum window 900×620; the queue's Chat column gets a minimum section
+- [x] Minimum window 900×620; the queue's Chat column gets a minimum section
       width (it is the stretch section and the only one that says which row is
       which); auto-sized columns get a gutter.
-- [ ] A path longer than its field shows its **start**, not its end, and mirrors
+- [x] A path longer than its field shows its **start**, not its end, and mirrors
       into the tooltip on every change — not once at construction, because Browse
       writes back afterwards.
-- [ ] Login dialog: credentials → phone → code → 2FA. **One dialog, ever** —
+- [x] Login dialog: credentials → phone → code → 2FA. **One dialog, ever** —
       raise the existing one rather than making a second, disconnect on close,
       and say nothing on success beyond the status bar. Two stacked modals is
       what "the app froze the moment it logged me in" actually was.
-- [ ] Settings persistence with per-field type validation: an unknown key is
+- [x] Settings persistence with per-field type validation: an unknown key is
       dropped (so a file written by a newer build still loads) and a wrong *type*
       falls back to the default rather than being coerced. `serde` with
       `#[serde(default)]` per field gives this directly.
-- [ ] Quitting mid-export cancels **and waits**, so `result.json` is valid.
+- [x] Quitting mid-export cancels **and waits**, so `result.json` is valid.
 
 ---
 
 ## Phase 8 — Packaging and release
 
-- [ ] Single portable `TelegramExporter.exe`. All state in `TelegramExporterData/`
+- [x] Single portable `TelegramExporter.exe`. All state in `TelegramExporterData/`
       beside it — never AppData, never the registry.
-- [ ] ACL-restrict the data folder to the current user on creation; say so in the
+- [x] ACL-restrict the data folder to the current user on creation; say so in the
       log when it fails, and document that it does not exist on FAT32/exFAT. The
       session key is a bearer credential: anyone who can read it can act as the
-      account.
-- [ ] Assets embedded with `rust-embed`. No `_MEIPASS` branch, no spec file, no
+      account. *And the window now says so too: `config::lockdown_error` was
+      written for a caller that could check the security claim before making it,
+      and until Phase 7 nothing called it — an ACL failure reached only
+      `log::warn!`.*
+- [x] Assets embedded with `rust-embed`. No `_MEIPASS` branch, no spec file, no
       `datas` list — the whole class of "the frozen build cannot find its fonts"
-      bug disappears.
-- [ ] Size budget: compare against the 42 MB PyInstaller build. A GPUI binary
+      bug disappears. *The Geist faces are `include_bytes!` rather than
+      `rust-embed`: they are registered once at startup by family name, not
+      looked up by path, so the indirection would buy nothing.*
+- [x] Size budget: compare against the 42 MB PyInstaller build. A GPUI binary
       links a GPU stack; 20–40 MB is the expectation. Record the number so a
       sudden jump is visible, the way the Git-Bash-vs-PowerShell OpenSSL
-      discovery was (+2.5 MB from the wrong build shell).
-- [ ] **GPU failure has to be legible.** If the renderer cannot initialise, show
+      discovery was (+2.5 MB from the wrong build shell). *19.5 MB.*
+- [x] **GPU failure has to be legible.** If the renderer cannot initialise, show
       a real message naming the driver requirement. A blank window is the worst
-      possible outcome and it is the default one.
-- [ ] Icon, version resource, and a decision on code signing (unsigned today).
-- [ ] CI on `windows-latest`: build release, run the golden-corpus parity tests
+      possible outcome and it is the default one. *And a panic after the window
+      opened no longer claims to be a startup failure — it has been drawing, so
+      naming the GPU would send someone to fix a driver that is fine.*
+- [x] Icon, version resource, and a decision on code signing (unsigned today).
+      *The original ships no icon either — its spec passes no `icon=` — so this
+      one is drawn from the tokens by `tools/make_icon.py`, which is the source
+      and the `.ico` the artefact. **Unsigned stands**: signing needs a
+      certificate the project does not have, and the cost is stated rather than
+      hidden — SmartScreen warns on a downloaded unsigned exe on first run.*
+- [x] CI on `windows-latest`: build release, run the golden-corpus parity tests
       from `reference/`. The full 6,643-message diff stays a local command
-      against `N:\`.
-- [ ] Port `save.bat`'s discipline: run every suite first, refuse to commit on a
+      against `N:\`. *The parity tests skip and say so while `reference/` is
+      gitignored — see the corpus note above; that is a privacy decision, not a
+      gap in the workflow.*
+- [x] Port `save.bat`'s discipline: run every suite first, refuse to commit on a
       failure with an explicit override, re-run the parity diff.
 
 ---
@@ -746,7 +974,7 @@ path itself.
 | 1 | **GPUI is pre-1.0 with breaking changes between versions**, and `gpui-component` is pre-1.0 on top of it | A routine dependency bump can break the UI | Pin exact versions; never `"*"`, despite the README. Bump deliberately, on its own commit, with the parity suite green before and after. Keep `tgx-ui` thin enough to re-target. |
 | 2 | **`N:\` disappears** | The rewrite loses its oracle and drops to "asserted" | Phase 0 backs both exports up and hashes them. `tgx-parity corpus` cuts a 7.8 MB standalone corpus that all three legs run against with identical results, and `tests/corpus.rs` runs them from `cargo test`. Committing `reference/` is left to a deliberate privacy decision — see "The corpus, and why it is not committed". |
 | 3 | **JSON escaping differs silently** between `json.dumps` and `serde_json` | A byte-level diff on a small fraction of messages, invisible until someone diffs | Phase 1's JSON leg exists specifically for this, and runs before the emitter is written. |
-| 4 | **DirectWrite colour fringing** on light text over near-black | The exact problem Qt had; the fix there was abandoning DirectWrite entirely | Measure in Phase 6 with the established method. If it reproduces, the options are a GPUI text-rendering setting, a slightly lifted background, or upstreaming. Discovering it late is the real risk. |
+| 4 | **DirectWrite colour fringing** on light text over near-black | The exact problem Qt had; the fix there was abandoning DirectWrite entirely | **Retired.** Measured on the rendered window with `tools/measure_fringing.py`: 0.0% of inked pixels fringed, worst spread 0 levels. Re-run after any gpui bump. |
 | 5 | **Text input** — GPUI ships none; Zed's editor is not published | The login dialog cannot accept a phone number | Resolved: `gpui-component`'s `Input`/`InputState`. Fallback is `EntityInputHandler` directly, roughly one extra milestone. |
 | 6 | **grammers is unaudited** and this app holds a bearer credential | Security | Phase 0 reads `grammers-crypto` and the auth path. Session file stays ACL-restricted. |
 | 7 | **grammers may lag Telethon on TL layers** | A constructor Telegram added is missing | `Message.raw` plus `Client::invoke` reach anything the high-level API misses. The `unmapped` fallback means an unknown constructor writes its type name instead of ending an export — port it early, not late. |
@@ -779,8 +1007,12 @@ language is not worth doing.
   instead of comments and a binary-size heuristic.
 - **Real list virtualization** via `UniformList`, which the Qt tree never had.
 - **No GIL** in the download pool; no interpreter in the binary.
-- **The design language stops fighting the toolkit.** Letter-spacing, real
-  transitions, shadows and an animated backdrop are all first-class.
+- **The design language mostly stops fighting the toolkit.** Shadows and real
+  animation are first-class where Qt refused them. Letter-spacing is the
+  exception and is the one place this claim was wrong: gpui has no such
+  property, and the tracking is built out of layout instead. The animation
+  turned out to be worth having available and not worth using — see the grid
+  backdrop in Phase 6.
 
 ### And what it costs
 
@@ -801,11 +1033,11 @@ language is not worth doing.
 2  tgx-format         -> JSON leg byte-identical
 3  tgx-html           -> 4 of 4 topics, 256,780 lines
 4  tgx-media          -> 830 of 836 filenames
-5  tgx-tg             -> live export matches our own reference run
-6  tgx-ui             -> tokens, type, hairlines, drift
+5  tgx-tg             -> live export run and diffed; six gaps found, all fixed
+6  tgx-ui             -> tokens, type, hairlines
 7  tgx-app            -> the shell + every interaction rule
 8  packaging          -> one portable exe, CI green
-9  tgx-analyse        -> report.html
+9  tgx-analyse        -> report.html                                 <- scoped out
 ```
 
 Phases 2–4 have no UI and no network and can be developed and verified entirely
@@ -813,5 +1045,14 @@ offline against the reference. Phase 6 has no Telegram dependency and can run in
 parallel with 2–5 if there is appetite for it. Phases 5 and 7 are the only two
 that need a live account.
 
+**Phase 7 turned out not to.** Its rules are interaction rules, and every one of
+them is reachable from a headless `Shell` with no window and no socket — which
+is what `crates/tgx-app/src/shell/tests.rs` drives. What a live account would
+have added is the one thing those tests cannot claim: that the shapes arriving
+on the wire are the shapes the converter assumes. That is Phase 5, and Phase 5
+has now been run — it found four converter features that did not exist, and
+every replay leg was green over all of them.
+
 **The one rule:** no phase is done because it looks done. Each one is done when
-its diff is clean.
+its diff is clean. Phase 5 spent a day looking done on 444 green tests, and the
+diff that mattered was the one nobody had run yet.

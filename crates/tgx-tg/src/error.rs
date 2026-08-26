@@ -84,7 +84,17 @@ pub fn classify(err: &grammers_client::InvocationError) -> EnrichError {
         InvocationError::Rpc(rpc) => {
             // FLOOD_WAIT_N, FLOOD_PREMIUM_WAIT_N, and the slow-mode variants
             // all carry the seconds in `value`.
-            if rpc.name.contains("FLOOD_WAIT") || rpc.name.contains("SLOWMODE_WAIT") {
+            //
+            // Matched as two independent substrings, because the family is not
+            // spelled consistently: `FLOOD_PREMIUM_WAIT` does **not** contain
+            // `FLOOD_WAIT`. Testing for the joined form read as though it did,
+            // so a premium rate limit fell through to `Refused` — a wait that
+            // Telegram told us the length of, reported to the user as a
+            // permanent refusal. That is precisely the mistake this module
+            // exists to make unrepresentable.
+            let name = &rpc.name;
+            let flood_wait = name.contains("FLOOD") && name.contains("WAIT");
+            if flood_wait || name.contains("SLOWMODE_WAIT") {
                 let secs = rpc.value.unwrap_or(0) as u64;
                 return EnrichError::Transient(Duration::from_secs(secs));
             }
@@ -113,6 +123,59 @@ mod tests {
         assert!(!refused.is_transient());
         assert_eq!(flood.retry_after(), Some(Duration::from_secs(30)));
         assert_eq!(refused.retry_after(), None);
+    }
+
+    /// Build the error grammers would hand us for a real wire string.
+    ///
+    /// Deliberately routed through `RpcError::from` rather than hand-filling
+    /// the struct: grammers strips the digits out of the name into `value`, so
+    /// `"FLOOD_WAIT_31"` arrives at `classify` as `name: "FLOOD_WAIT"`. A test
+    /// that set `name` directly would be testing our own assumption about that
+    /// split instead of the thing that actually reaches us.
+    fn rpc(code: i32, message: &str) -> grammers_client::InvocationError {
+        grammers_client::InvocationError::Rpc(grammers_client::sender::RpcError::from(
+            grammers_tl_types::types::RpcError {
+                error_code: code,
+                error_message: message.to_string(),
+            },
+        ))
+    }
+
+    #[test]
+    fn every_spelling_of_a_wait_is_a_wait() {
+        // `FLOOD_PREMIUM_WAIT` does not contain `FLOOD_WAIT`, so the old
+        // substring test classified a premium rate limit as a permanent
+        // refusal — a wait whose length Telegram had just told us, reported as
+        // "Telegram declined". No test drove `classify` with a real RPC name,
+        // which is why the comment could claim the case was handled.
+        for (message, secs) in [
+            ("FLOOD_WAIT_31", 31),
+            ("FLOOD_PREMIUM_WAIT_60", 60),
+            ("SLOWMODE_WAIT_12", 12),
+        ] {
+            let got = classify(&rpc(420, message));
+            assert!(got.is_transient(), "{message} was not treated as a wait");
+            assert_eq!(
+                got.retry_after(),
+                Some(Duration::from_secs(secs)),
+                "{message} lost its duration"
+            );
+        }
+    }
+
+    #[test]
+    fn a_refusal_is_still_a_refusal() {
+        // The other half of the same property: widening the wait test must not
+        // start swallowing errors that are genuinely permanent.
+        for message in [
+            "CHAT_ADMIN_REQUIRED",
+            "CHANNEL_PRIVATE",
+            "AUTH_KEY_UNREGISTERED",
+        ] {
+            let got = classify(&rpc(400, message));
+            assert!(!got.is_transient(), "{message} was mistaken for a wait");
+            assert_eq!(got.retry_after(), None);
+        }
     }
 
     #[test]

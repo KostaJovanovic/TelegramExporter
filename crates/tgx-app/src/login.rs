@@ -12,7 +12,7 @@
 //! and **success just closes it** — the status bar already reads
 //! `Signed in: <name>`.
 
-use gpui::{AppContext, Entity, SharedString, Window};
+use gpui::{AppContext, Entity, ScrollHandle, SharedString, Window};
 use gpui_component::input::InputState;
 
 /// Where the sign-in has got to. There is exactly one of these at a time.
@@ -171,6 +171,10 @@ pub struct LoginDialog {
     /// confirmation never sits under a message it does not belong to.
     pub copied: bool,
     pub busy: bool,
+    /// The card's body scrolls. The credentials stage carries five numbered
+    /// steps and a link, and a modal taller than the window put its own action
+    /// button off screen with no way to reach it.
+    pub scroll: ScrollHandle,
 }
 
 impl LoginDialog {
@@ -214,6 +218,7 @@ impl LoginDialog {
             error: None,
             copied: false,
             busy: false,
+            scroll: ScrollHandle::default(),
         }
     }
 

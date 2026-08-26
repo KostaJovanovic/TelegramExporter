@@ -84,6 +84,23 @@ pub fn safe_href(url: &str) -> Option<String> {
     }
     let collapsed: String = cleaned.split_whitespace().collect();
     let lowered = collapsed.to_lowercase();
+    // **Before the scheme test, because these have no scheme to test.** An
+    // archive is opened as `file://`, where `//host/x` and `\\host\share` both
+    // resolve against that scheme to `file://host/…` — on Windows a UNC path,
+    // so following one opens an SMB connection to a host the message chose and
+    // leaks an NTLM handshake to it. A `text_link` entity carries an arbitrary
+    // URL, so this is reachable from any message. Neither form is a relative
+    // URL despite having no `scheme:` prefix, which is exactly how both slipped
+    // through the branch below.
+    let bytes = collapsed.as_bytes();
+    if bytes.starts_with(b"//") || bytes.starts_with(br"\\") {
+        return None;
+    }
+    // A backslash is not a path separator in a URL, but browsers normalise it
+    // to one before resolving, so `/\host` reaches the same place as `//host`.
+    if matches!(bytes, [b'/' | b'\\', b'/' | b'\\', ..]) {
+        return None;
+    }
     if SAFE_SCHEMES.iter().any(|s| lowered.starts_with(s)) {
         return Some(cleaned);
     }
@@ -214,6 +231,33 @@ mod tests {
         assert_eq!(safe_href(""), None);
         assert_eq!(safe_href("   "), None);
         assert_eq!(safe_href("\u{1}\u{2}"), None);
+    }
+
+    #[test]
+    fn a_host_relative_target_cannot_reach_a_remote_host() {
+        // The archive is opened as `file://`, so every one of these resolves to
+        // `file://evil.example/…` — a UNC path on Windows. Following one opens
+        // an SMB connection to a host the *message* chose and hands it an NTLM
+        // handshake. They have no `scheme:`, so the relative-URL branch waved
+        // them through.
+        for bad in [
+            "//evil.example/x",
+            r"\\evil.example\share",
+            r"/\evil.example/x",
+            r"\/evil.example/x",
+            "//evil.example",
+            "  //evil.example/x  ",
+            "/\t/evil.example/x",
+        ] {
+            assert_eq!(safe_href(bad), None, "{bad} was accepted");
+        }
+    }
+
+    #[test]
+    fn a_single_leading_slash_is_still_an_ordinary_relative_path() {
+        // Only the doubled form names a host. One slash is a path.
+        assert!(safe_href("/photos/photo_1.jpg").is_some());
+        assert!(safe_href("/a//b").is_some());
     }
 
     // ---- the JS boundary --------------------------------------------------

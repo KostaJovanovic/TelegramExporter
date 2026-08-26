@@ -36,8 +36,6 @@ pub struct Palette {
     pub accent: Hsla,
     /// Text on the accent.
     pub accent_fg: Hsla,
-    /// The grid backdrop's ink.
-    pub grid: Hsla,
 }
 
 /// Convert a `#rrggbb` literal to GPUI's colour type.
@@ -50,13 +48,6 @@ fn hex(rgb: u32) -> Hsla {
     let g = ((rgb >> 8) & 0xff) as f32 / 255.0;
     let b = (rgb & 0xff) as f32 / 255.0;
     rgb_to_hsla(r, g, b, 1.0)
-}
-
-fn rgba(rgb: u32, alpha: f32) -> Hsla {
-    let r = ((rgb >> 16) & 0xff) as f32 / 255.0;
-    let g = ((rgb >> 8) & 0xff) as f32 / 255.0;
-    let b = (rgb & 0xff) as f32 / 255.0;
-    rgb_to_hsla(r, g, b, alpha)
 }
 
 fn rgb_to_hsla(r: f32, g: f32, b: f32, a: f32) -> Hsla {
@@ -94,7 +85,6 @@ impl Palette {
             surface: hex(0xf4f4f4),
             accent: hex(0xe60023),
             accent_fg: hex(0xffffff),
-            grid: rgba(0x000000, 0.07),
         }
     }
 
@@ -109,7 +99,6 @@ impl Palette {
             surface: hex(0x141414),
             accent: hex(0xff3347),
             accent_fg: hex(0xffffff),
-            grid: rgba(0xffffff, 0.12),
         }
     }
 
@@ -153,15 +142,12 @@ pub mod rhythm {
     pub const TRACK_MICRO: f32 = 0.15;
 }
 
-/// Durations, in milliseconds.
-pub mod motion {
-    pub const FAST: u64 = 120;
-    pub const SNAPPY: u64 = 150;
-    pub const BASE: u64 = 200;
-    pub const SLOW: u64 = 300;
-    /// One full cycle of the drifting grid backdrop, in seconds.
-    pub const GRID_DRIFT_SECONDS: f32 = 24.0;
-}
+// The stylesheet's `--dur-fast .12s` through `--dur-slow .3s` are **not** here.
+// Nothing in this app moves: the one thing that ever did was the drifting grid
+// backdrop, removed by decision (see `ROADMAP.md`, Phase 6), and a duration
+// table with no caller is a token that looks applied and is not — which is
+// exactly what `rhythm::TRACK_*` was for as long as nothing letterspaced.
+// `analyser.css` is the source if motion is wanted back.
 
 /// Metrics.
 pub mod metrics {
@@ -171,8 +157,6 @@ pub mod metrics {
     pub const GAP: Pixels = px(24.0);
     /// `--radius: 0`. Square corners are the design, not a default.
     pub const RADIUS: Pixels = px(0.0);
-    /// The grid backdrop's tile.
-    pub const GRID_TILE: Pixels = px(72.0);
     /// `--nav-offset`
     pub const NAV_HEIGHT: Pixels = px(60.0);
     /// Below this the layout stops being merely tight: the Chat column goes.
@@ -227,15 +211,6 @@ mod tests {
                                          // Hue near 0 (or 1) and strongly saturated.
         assert!(a.h < 0.03 || a.h > 0.97, "hue was {}", a.h);
         assert!(a.s > 0.9, "saturation was {}", a.s);
-    }
-
-    #[test]
-    fn the_grid_backdrop_is_translucent_and_flips_polarity() {
-        let (l, d) = (Palette::light(), Palette::dark());
-        assert!(l.grid.a < 0.2 && d.grid.a < 0.2);
-        // Dark ink on light, light ink on dark.
-        assert!(l.grid.l < 0.5);
-        assert!(d.grid.l > 0.5);
     }
 
     #[test]

@@ -102,6 +102,13 @@ pub fn layout(kind: &str) -> (&'static str, &'static str) {
         "video_messages" => ("round_video_messages", ".mp4"),
         "stickers" => ("stickers", ".webp"),
         "animations" => ("video_files", ".mp4"),
+        // A stripped thumbnail is not a document Telegram sent — falling
+        // through to "files" here handed it the same file_N counter real
+        // unnamed documents use, so plan.rs's own comment claiming it "gets
+        // its own counter and its own folder" was false. Verified live: a
+        // real export had thumbnails/file_10@... shifting every later
+        // files/ name by one.
+        "thumbnails" => ("thumbnails", ".jpg"),
         _ => ("files", ""),
     }
 }
@@ -116,6 +123,9 @@ pub fn synth_prefix(subdir: &str) -> &'static str {
         "photos" => "photo",
         "video_files" | "round_video_messages" => "video",
         "voice_messages" => "audio",
+        // Matches the Python original: N:\telegram export\UA KOLAB
+        // PYTHON\0001 - ćaskanje\thumbnails\thumb_10@08-03-2026_23-17-42.jpg.
+        "thumbnails" => "thumb",
         _ => "file",
     }
 }
@@ -372,6 +382,23 @@ mod tests {
         assert_eq!(v2, "audio_2@s.ogg");
         // And a photo is on a different counter again.
         assert_eq!(b.reserve_name("photos", None, "s", ""), "photo_1@s.jpg");
+    }
+
+    #[test]
+    fn a_stripped_thumbnail_does_not_consume_the_file_counter() {
+        // The bug: layout("thumbnails") fell through to ("files", ""), so
+        // synth_prefix returned "file" and a stripped thumbnail took
+        // file_1@stamp.jpg — the same counter an unnamed document uses.
+        // The next real document then became file_2 instead of file_1,
+        // shifting every later name in files/. Verified live: a real export
+        // had thumbnails/file_10@28-01-2026_22-36-41.jpg.
+        let mut b = NameBook::new();
+        let thumb = b.reserve_name("thumbnails", None, "s", "");
+        let doc = b.reserve_name("files", None, "s", "");
+        assert_eq!(thumb, "thumb_1@s.jpg");
+        assert_eq!(doc, "file_1@s", "the thumbnail must not have taken file_1");
+        assert_eq!(b.counter("thumb"), 1);
+        assert_eq!(b.counter("file"), 1);
     }
 
     #[test]

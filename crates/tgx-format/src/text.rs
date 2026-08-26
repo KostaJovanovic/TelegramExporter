@@ -155,6 +155,34 @@ pub fn build_text_entities(text: &str, entities: &[Entity]) -> Vec<Value> {
         }
         out.push(seg);
     }
+
+    // Desktop's empty tail segment.
+    //
+    // When the last entity runs to the end of the message Desktop appends one
+    // more part — the empty string — but *only* when the text is not pure
+    // ASCII. Measured over the whole reference export: 98 messages end on an
+    // entity, and the 11 that carry the empty tail are exactly the 11 whose
+    // text contains a non-ASCII character. 98 of 98, no exceptions. The entity
+    // type plays no part: `mention` and `link` occur on both sides of the
+    // split, so "always append when the text ends on an entity" would have been
+    // right 11 times and wrong 87.
+    //
+    // That split is the signature of comparing a UTF-16 offset against a UTF-8
+    // byte count. Desktop asks "is there anything after the last entity?" with
+    // the entity's end *offset* (code units) and the text's *byte* length, and
+    // above U+007F the byte count is the larger of the two — so it slices a
+    // tail that is already empty and writes it out. Reference message 2084,
+    // `"Treba mi nešto malo starije fazon " + phone`, ends at unit 43 of a
+    // 44-byte string and gets the tail; message 4111, `".lens\n" + mention`,
+    // ends at unit 20 of a 20-byte string and does not.
+    //
+    // Neither replay leg can catch this. Both start from Desktop's own
+    // `result.json`, so the segment is already in their input and comes back
+    // out untouched — which is exactly how it survived until a live export was
+    // held up against the reference. The tests below are the only guard.
+    if out.last().is_some_and(|last| last["type"] != "plain") && text.len() > n {
+        out.push(json!({ "type": "plain", "text": "" }));
+    }
     out
 }
 
@@ -303,6 +331,50 @@ mod tests {
         assert_eq!(plain_text(&nested), "the answer");
         assert_eq!(plain_text(&json!("flat")), "flat");
         assert_eq!(plain_text(&Value::Null), "");
+    }
+
+    #[test]
+    fn a_trailing_entity_gets_desktops_empty_tail_when_the_text_is_not_ascii() {
+        // Reference message 2084 in `ćaskanje`. Desktop wrote
+        //   ["Treba mi nešto malo starije fazon ", {phone "2021-2023"}, ""]
+        // and we used to stop at the phone. 43 UTF-16 units, 44 UTF-8 bytes.
+        let text = "Treba mi nešto malo starije fazon 2021-2023";
+        let segs = build_text_entities(text, &[ent(34, 9, "phone")]);
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs[1]["type"], "phone");
+        assert_eq!(segs[1]["text"], "2021-2023");
+        // `text_entities` carries it as a plain segment...
+        assert_eq!(segs[2], json!({ "type": "plain", "text": "" }));
+        // ...and `text` as a bare empty string.
+        let field = build_text_field(&segs);
+        assert_eq!(
+            field,
+            json!(["Treba mi nešto malo starije fazon ", { "type": "phone", "text": "2021-2023" }, ""])
+        );
+    }
+
+    #[test]
+    fn a_trailing_entity_in_pure_ascii_text_gets_no_tail() {
+        // The other 87 of the 98. Reference message 4111: 20 units, 20 bytes,
+        // so Desktop's "is anything left?" test comes out false.
+        let text = ".lens\n@flicsbysoleee";
+        let segs = build_text_entities(text, &[ent(6, 14, "mention")]);
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[1]["type"], "mention");
+        assert_eq!(
+            build_text_field(&segs),
+            json!([".lens\n", { "type": "mention", "text": "@flicsbysoleee" }])
+        );
+    }
+
+    #[test]
+    fn a_non_ascii_message_ending_in_plain_text_gets_no_tail() {
+        // The tail is about the *last entity* reaching the end, not about the
+        // text being non-ASCII: here the entity is in the middle and Desktop's
+        // ordinary tail part is non-empty already.
+        let segs = build_text_entities("šta @matfic hm", &[ent(4, 7, "mention")]);
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs[2], json!({ "type": "plain", "text": " hm" }));
     }
 
     #[test]

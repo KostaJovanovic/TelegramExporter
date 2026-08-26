@@ -340,3 +340,128 @@ fn media_fields_do_not_disturb_desktops_key_order() {
     assert!(photo_at < text_at, "media must precede the text: {keys:?}");
     assert_eq!(*keys.last().unwrap(), "text_entities");
 }
+
+// --------------------------------------------------- the presentation ----
+
+/// Assemble a message exactly as `engine::payload` does, `_p` included.
+fn payload_with_presentation(
+    m: &tl::types::Message,
+    media: &tl::enums::MessageMedia,
+) -> serde_json::Map<String, Value> {
+    let facts = plan::classify(media, false).expect("classified");
+    let mut book = NameBook::new();
+    let (fields, job) = plan::plan(&facts, m.id as i64, "s", &mut book, &Settings::default());
+    let preview_src = job.as_ref().and_then(|j| j.preview_dest.clone());
+    let mut out = base_message(m, &names());
+    for (k, v) in fields {
+        out.insert(k, v);
+    }
+    let mut out = tgx_format::order::ordered(&out);
+    if let Some(p) = tgx_tg::convert::presentation(m, &out, &names(), preview_src.as_deref()) {
+        out.insert("_p".into(), Value::Object(p));
+    }
+    out
+}
+
+/// Render one message through the real HTML writer and hand back the page.
+fn render(out: &serde_json::Map<String, Value>, tag: &str) -> String {
+    let dir = std::env::temp_dir().join(format!("tgx-pres-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut w = tgx_html::writer::HtmlWriter::new(&dir, "t", 1000);
+    w.add(out).unwrap();
+    w.close().unwrap();
+    let page = std::fs::read_to_string(dir.join("messages.html")).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    page
+}
+
+#[test]
+fn a_photo_renders_as_an_inline_image_and_not_a_coloured_row() {
+    // The engine never built `_p`, and `render_media` gates every inline
+    // preview on it — so a real export contained **zero** `<img>` elements
+    // anywhere, against 649 in Desktop's export of the same chat. Every photo,
+    // sticker, animation and video came out as a placeholder row.
+    //
+    // The html leg could not see this: it lifts `_p` out of Desktop's own HTML
+    // before replaying, so it proves the writer and never the pipeline.
+    let mut m = message(1, 1_766_071_072);
+    m.message = "caption".into();
+    let media = photo_media(photo(1, 800, 600, 1000), false);
+    let out = payload_with_presentation(&m, &media);
+
+    let p = out["_p"].as_object().expect("a presentation map");
+    let preview = p["preview"].as_object().expect("a preview");
+    assert_eq!(preview["src"], "photos/photo_1@s_thumb.jpg");
+    // 800x600 into the 260 box, stored at twice the displayed size.
+    assert_eq!(preview["width"], 260);
+    assert_eq!(preview["height"], 195);
+
+    let page = render(&out, "photo");
+    assert!(
+        page.contains("class=\"photo_wrap"),
+        "no inline image: {page}"
+    );
+    assert!(page.contains("<img class=\"photo\""), "no <img>: {page}");
+    assert!(
+        page.contains("photos/photo_1@s_thumb.jpg"),
+        "the preview does not point at the thumbnail"
+    );
+}
+
+#[test]
+fn a_file_skipped_for_size_still_renders_as_a_row() {
+    // The other half of the same rule: a preview must not be invented for a
+    // file we did not save, or the page gains a broken image where Desktop
+    // deliberately draws a coloured row.
+    let s = Settings {
+        size_limit_mb: 1,
+        ..Settings::default()
+    };
+    let media = photo_media(photo(1, 800, 600, 50 * 1024 * 1024), false);
+    let facts = plan::classify(&media, false).unwrap();
+    let mut book = NameBook::new();
+    let (fields, _) = plan::plan(&facts, 1, "s", &mut book, &s);
+    let mut out = base_message(&message(1, 1_766_071_072), &names());
+    for (k, v) in fields {
+        out.insert(k, v);
+    }
+    let out = tgx_format::order::ordered(&out);
+    let p = tgx_tg::convert::presentation(&message(1, 1_766_071_072), &out, &names(), None);
+    assert!(
+        p.as_ref().and_then(|p| p.get("preview")).is_none(),
+        "a skipped file must not claim a preview"
+    );
+}
+
+#[test]
+fn the_presentation_map_never_reaches_result_json() {
+    // `_p` is the one key in the map that Desktop does not write. If it ever
+    // leaked, every message in `result.json` would gain a key and the json leg
+    // would stop being a parity check at all.
+    let mut m = message(1, 1_766_071_072);
+    m.message = "caption".into();
+    let media = photo_media(photo(1, 800, 600, 1000), false);
+    let out = payload_with_presentation(&m, &media);
+    assert!(out.contains_key("_p"), "the fixture is meant to have one");
+
+    let dir = std::env::temp_dir().join(format!("tgx-pres-json-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut o = tgx_tg::output::Output::new(
+        &dir,
+        "t",
+        "public_supergroup",
+        1,
+        &Settings::default(),
+        None,
+        None,
+    )
+    .unwrap();
+    o.add(&out).unwrap();
+    o.close().unwrap();
+    let raw = std::fs::read_to_string(dir.join("result.json")).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !raw.contains("_p"),
+        "the presentation map leaked into the JSON"
+    );
+}

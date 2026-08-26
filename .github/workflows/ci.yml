@@ -44,7 +44,10 @@ jobs:
       - name: Release build
         run: cargo build --release -p tgx-app
 
-      # The Python build was 42 MB via PyInstaller and the Rust one is ~10 MB.
+      # The Python build was 46.4 MB via PyInstaller and the Rust one is
+      # 19.5 MB. Both numbers were stale here and disagreed with the README,
+      # the ROADMAP and save.bat, which is exactly the way a "sudden jump"
+      # stops being visible.
       # Record it so a sudden jump is visible, the way the
       # Git-Bash-vs-PowerShell OpenSSL discovery was (+2.5 MB from the wrong
       # build shell).

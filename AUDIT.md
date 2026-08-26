@@ -55,8 +55,20 @@ reach**: `tgx-tg`'s wire-facing half and `tgx-app`.
   code the user typed is submitted against a possibly-new `phone_code_hash`.
   Falls out of the same fix.
 
-- [ ] **2. Telegram's own thumbnails are written into `result.json` but never
-  downloaded.** `crates/tgx-tg/src/plan.rs:370` inserts
+- [x] **2. Telegram's own thumbnails are written into `result.json` but never
+  downloaded.** *Fixed: `download::fetch_thumb`
+  (`crates/tgx-tg/src/download.rs:170`) is called from `run_one` at line 124,
+  so `thumb_dest` is read at last. The audit had half of it. Desktop does not
+  write a **path** in `thumbnail` for a size-skipped file — it writes the
+  placeholder, the same string it writes in `file`. Counted over the
+  reference's 1,786 skipped files: 1,287 carry the placeholder, 499 carry no
+  `thumbnail` key at all, and 0 carry a path. `plan.rs:382` now writes
+  `TOO_LARGE` there and reserves no name, so a skip promises nothing it has no
+  job to fetch. The old test `a_skipped_document_keeps_its_thumbnail_record`
+  asserted the wrong half of that and is now
+  `a_skipped_document_records_its_thumbnail_as_skipped_too`
+  (`plan.rs:607`).*
+  `crates/tgx-tg/src/plan.rs:370` inserts
   `"thumbnail": "<path>"`; line 405 populates `DownloadJob.thumb_dest` — and
   **nothing ever reads it** (`grep thumb_dest` returns writes only). Every
   export therefore carries dangling `thumbnail` references, and because they
@@ -66,7 +78,14 @@ reach**: `tgx-tg`'s wire-facing half and `tgx-app`.
   decisions, so this is not a rare path.
   **Fix:** fetch the thumb in `download::run_one`, or stop writing the key.
 
-- [ ] **3. `Stop` does not stop, and re-enables `Export`.**
+- [x] **3. `Stop` does not stop, and re-enables `Export`.** *Fixed:
+  `crates/tgx-tg/src/cancel.rs` is the token, checked in the read loop, in
+  `sleep_in_slices` and in the download pool, and `ExportError::Cancelled` is
+  now constructed. `Shell::stop` (`crates/tgx-app/src/shell/mod.rs:792`) sets
+  it and **leaves `exporting` true** until the worker's `Finished` arrives —
+  the interface says "Stopping…" in between. The token resets when a run
+  starts, never when one ends, so a cancel landing after the last message does
+  not carry into the next run.*
   `crates/tgx-app/src/shell.rs:486` sets `exporting = false` and status
   `"Stopped"` but touches nothing on the tokio side — the export keeps reading
   history and writing files. Line 392 gates the Export button on
@@ -86,7 +105,14 @@ reach**: `tgx-tg`'s wire-facing half and `tgx-app`.
 
 ## High
 
-- [ ] **4. `FLOOD_PREMIUM_WAIT` is classified as a permanent refusal.**
+- [x] **4. `FLOOD_PREMIUM_WAIT` is classified as a permanent refusal.**
+  *Fixed: `crates/tgx-tg/src/error.rs:96` is now
+  `name.contains("FLOOD") && name.contains("WAIT")`, which catches the slow-mode
+  spellings too. The two new tests drive `classify` through `RpcError::from`
+  with the real wire strings rather than hand-built names —
+  `every_spelling_of_a_wait_is_a_wait` (`error.rs:145`) over `FLOOD_WAIT_31`
+  and `FLOOD_PREMIUM_WAIT_60`, and `a_refusal_is_still_a_refusal`
+  (`error.rs:167`) so the widened match did not swallow the other direction.*
   `crates/tgx-tg/src/error.rs:87` tests `rpc.name.contains("FLOOD_WAIT")`.
   `"FLOOD_PREMIUM_WAIT_60"` does **not** contain that substring. The comment
   directly above (line 85) claims it does. This is precisely the
@@ -95,7 +121,14 @@ reach**: `tgx-tg`'s wire-facing half and `tgx-app`.
   **Fix:** match `name.contains("FLOOD")` *and* `name.contains("WAIT")`, or list
   the names explicitly — plus a table test over the real error strings.
 
-- [ ] **5. Every channel and supergroup is exported as `public_*`.**
+- [x] **5. Every channel and supergroup is exported as `public_*`.** *Fixed:
+  `ChatInfo` carries `public`, set in `dialogs::chat_info`
+  (`crates/tgx-tg/src/dialogs.rs:53`) from `has_username`
+  (`dialogs.rs:126`), which reads **both** `username` and the `usernames`
+  vector — a channel that bought a second name keeps the first in `usernames`
+  and would otherwise have flipped to private. `engine.rs:213` now calls
+  `chat.kind.export_type(chat.public)`. The same pass stopped hardcoding
+  `access_hash` to `0`; see 12 for what that unlocked.*
   `crates/tgx-tg/src/engine.rs:191` hardcodes `chat.kind.export_type(true)`.
   `ChatInfo` carries no `public`/`username` field, so the `false` branch is
   unreachable in production — a private supergroup writes
@@ -103,8 +136,11 @@ reach**: `tgx-tg`'s wire-facing half and `tgx-app`.
   function, not the call.
   **Fix:** carry `username.is_some()` on `ChatInfo` from `dialogs::chat_info`.
 
-- [ ] **6. An empty non-forum chat deletes its own export folder — including
-  `participants.json`.** `crates/tgx-tg/src/engine.rs:474` does
+- [x] **6. An empty non-forum chat deletes its own export folder — including
+  `participants.json`.** *Fixed: `close_all` prunes only when
+  `sink.output.root != root` (`crates/tgx-tg/src/engine.rs:663`). An empty
+  chat now leaves an empty export rather than no export.*
+  `crates/tgx-tg/src/engine.rs:474` does
   `remove_dir_all(&sink.output.root)` when a sink wrote zero messages. In the
   split-topics case that is a topic subfolder (intended). In the non-split case
   `Output::new(root, …)` at line 220 means `sink.output.root == root`, so a chat
@@ -112,7 +148,13 @@ reach**: `tgx-tg`'s wire-facing half and `tgx-app`.
   at line 265 and releasing the `unique_dir` reservation.
   **Fix:** only prune when the sink's root is a topic subfolder of `root`.
 
-- [ ] **7. Stripped thumbnails consume the `file_N` counter.**
+- [x] **7. Stripped thumbnails consume the `file_N` counter.** *Fixed:
+  `names::layout` gained `"thumbnails" => ("thumbnails", ".jpg")`
+  (`crates/tgx-media/src/names.rs:111`) and `synth_prefix` gained
+  `"thumbnails" => "thumb"` (`names.rs:128`), so the name is
+  `thumb_N@stamp.jpg` and `files/` numbering is untouched. The prefix was read
+  off the Python exporter's own output, not chosen —
+  `thumbnails\thumb_10@08-03-2026_23-17-42.jpg`.*
   `crates/tgx-tg/src/plan.rs:412` calls `reserve_name("thumbnails", …)`, but
   `layout("thumbnails")` falls through to `("files", "")`, so `synth_prefix`
   returns `"file"` — the same counter real unnamed documents use. Verified with
@@ -124,7 +166,13 @@ reach**: `tgx-tg`'s wire-facing half and `tgx-app`.
   key to replay.
   **Fix:** give `thumbnails` its own entry in `layout` and `synth_prefix`.
 
-- [ ] **8. The media parity leg asserts nothing.**
+- [x] **8. The media parity leg asserts nothing.** *Fixed:
+  `crates/tgx-parity/tests/corpus.rs:77` is
+  `assert_eq!(failures, 0, "media names fell below the known ceiling")`, the
+  same shape the json and html legs already had. The floor is not restated in
+  the test: the leg already knows its own ceiling — 830 of 836, the six being
+  custom emoji — and returns `1` when a run falls below it, so the number lives
+  in one place instead of two that can drift.*
   `crates/tgx-parity/tests/corpus.rs:75` is
   `let _ = media_leg::run(&topics).expect(...)`. 830/836 could drop to 0/836 and
   `cargo test` stays green; the number lives in stdout, which cargo captures.
@@ -136,7 +184,18 @@ reach**: `tgx-tg`'s wire-facing half and `tgx-app`.
 
 ## Medium
 
-- [ ] **9. The live HTML is missing the entire presentation layer.**
+- [x] **9. The live HTML is missing the entire presentation layer.** *Fixed:
+  `convert::presentation` (`crates/tgx-tg/src/convert.rs:354`) builds the map
+  and `engine::payload` inserts it (`engine.rs:601`), last, because it reads
+  the finished map — the media paths and sizes the plan decided are what the
+  preview points at. It covers `from_name`, `forwarded_from_name`,
+  `forwarded_date`, `group`, `initials`, `colours`, `reactions_chosen` and
+  `preview`. The size of what it was costing was only measurable once a live
+  export existed: **zero `<img>` elements in the whole archive, against
+  Desktop's 649** over the same chat. `Output::close` still strips `_p` before
+  the JSON is written, so this reaches the HTML writer and nothing else. The
+  leg's own blind spot is unchanged and is now stated in ROADMAP — see the
+  2026-08-27 section below.*
   `grep '"_p"' crates/tgx-tg/src/` returns nothing — **the engine never emits
   the `_p` map**. `crates/tgx-tg/src/convert.rs:27-34`'s `NameBook` populates
   `.html`, `.initials` and `.colour` and *nothing reads them*;
@@ -164,13 +223,29 @@ reach**: `tgx-tg`'s wire-facing half and `tgx-app`.
   securing its credential store.
   **Fix:** `%SystemRoot%\System32\icacls.exe`, and an absolute `explorer.exe`.
 
-- [ ] **11. A rate limit during topic discovery silently collapses a forum into
-  one folder.** `crates/tgx-app/src/actions.rs:172-177` catches *any* error from
+- [x] **11. A rate limit during topic discovery silently collapses a forum into
+  one folder.** *Fixed: `actions::resolve_topics`
+  (`crates/tgx-app/src/actions.rs:336`) separates the two answers. A genuine
+  refusal has no shape left to preserve and still degrades to one folder; a
+  `Transient` waits and retries once, and if it is still rate-limited the chat
+  is failed rather than exported in the wrong shape. It takes `fetch` as a
+  parameter so the distinction can be driven with a canned `EnrichError` in a
+  test instead of a live socket (`actions.rs:713`).*
+  `crates/tgx-app/src/actions.rs:172-177` catches *any* error from
   `list_topics` — `Transient` included — and falls back to
   `vec![Topic::general()]`. Splitting by topic is the app's entire reason to
   exist; a FloodWait should defer, not silently change the output shape.
 
-- [ ] **12. `peer_ref_for` in the GUI swallows errors and hides rate limits.**
+- [x] **12. `peer_ref_for` in the GUI swallows errors and hides rate limits.**
+  *Fixed, both halves. It is now `dialogs::peer_refs_for`, plural: **one dialog
+  sweep for the whole queue** before any message is fetched
+  (`crates/tgx-app/src/actions.rs:416`), so a twenty-chat queue pages the
+  dialog list once rather than twenty times — the pattern that earns a flood
+  wait before the export has written a byte. It returns a `Result`, and a
+  transport failure fails the run with the error rather than telling the user
+  per chat to go looking for conversations they still have. "No longer in the
+  dialog list" is now said only when the sweep succeeded and the id was not in
+  it. `ChatInfo.access_hash` carries the real hash — see 5.*
   `crates/tgx-app/src/actions.rs:254`:
   `while let Ok(Some(d)) = iter.next().await` treats any error as end-of-list,
   then reports `"{chat} is no longer in the dialog list"` — a confidently wrong
@@ -181,7 +256,13 @@ reach**: `tgx-tg`'s wire-facing half and `tgx-app`.
   hardcoded to `0` in all three branches of
   `crates/tgx-tg/src/dialogs.rs:43-76` and read nowhere.
 
-- [ ] **13. Protocol-relative and UNC hrefs survive the allowlist.** Verified:
+- [x] **13. Protocol-relative and UNC hrefs survive the allowlist.** *Fixed:
+  the relative-URL branch of `crates/tgx-html/src/escape.rs:96` rejects a
+  leading `//` or `\\`, and line 101 rejects the mixed forms (`/\`, `\/`)
+  that Windows resolves the same way. A single leading slash is still an
+  ordinary relative path and still passes (`escape.rs:257`) — that case is
+  reachable from real media paths.*
+  Verified:
   `safe_href("//evil.example/x")` → `Some("//evil.example/x")` and
   `safe_href(r"\\evil.example\share")` → accepted. In an archive opened as
   `file://`, both resolve to `file://evil.example/…`, which on Windows is a UNC
@@ -190,13 +271,24 @@ reach**: `tgx-tg`'s wire-facing half and `tgx-app`.
   **Fix:** reject a leading `//` or `\\` in the relative-URL branch of
   `crates/tgx-html/src/escape.rs:96`.
 
-- [ ] **14. `list_topics` has no loop bound.**
+- [x] **14. `list_topics` has no loop bound.** *Fixed:
+  `MAX_TOPIC_PAGES = 200` (`crates/tgx-tg/src/dialogs.rs:402`), named after
+  `enrich`'s own cap, which this loop was the only one missing. The page is
+  also keyed on the topic id rather than merely appended
+  (`dialogs.rs:428`), so a server that ignores the offset stops adding rows
+  instead of growing `out.len()` every iteration.*
   `crates/tgx-tg/src/dialogs.rs:144` breaks only when a page adds nothing. If
   offsets are not honoured the same page is pushed repeatedly, `out.len()` grows
   every iteration, and the loop never terminates. `fetch_participants` has a
   cap; this does not.
 
-- [ ] **15. The panic hook blames the GPU for every panic.**
+- [x] **15. The panic hook blames the GPU for every panic.** *Fixed:
+  `panic_message(window_opened, panic)` (`crates/tgx-app/src/main.rs:70`)
+  chooses the text off a `WINDOW_OPENED` flag set the moment `open_window`
+  returns `Ok`. A panic before that still names the DirectX requirement; a
+  panic after it says the app stopped unexpectedly, because the renderer has
+  plainly been drawing and naming the GPU would send someone to fix a driver
+  that is fine. Three tests, including one asserting the flag starts `false`.*
   `crates/tgx-app/src/main.rs:41` installs a global hook whose message is always
   *"This build needs a GPU with working DirectX drivers."* A panic anywhere —
   including inside an export — is reported as a driver problem and overwrites
@@ -207,49 +299,56 @@ reach**: `tgx-tg`'s wire-facing half and `tgx-app`.
 
 ## Low / documentation
 
-- [ ] **`gpui-component` is not pinned.** `crates/tgx-app/Cargo.toml:22` is
-  `"0.5.1"` (caret). The workspace `Cargo.toml` comment says *"Pinned exactly,
-  not by caret… a routine `cargo update` can break the interface"*, and
-  ROADMAP's retired-risk table says *"Both are in and both are pinned exactly."*
-  Only `gpui = "=0.2.2"` actually is.
-- [ ] **The "enforced by the build" dependency rules do not exist.** README
-  claims `tgx-html` may not depend on `grammers-tl-types`, and the analyser may
-  not depend on `tgx-tg`, are *"enforced by the build rather than by
-  convention."* There is no `build.rs`, no `deny.toml`, no test and no CI step.
-  Either add the check or reword the claim.
-- [ ] **`topics::sanitize_component` truncates after trimming**
-  (`crates/tgx-media/src/topics.rs:51`), so a 120+ character topic title can end
-  on `.` or a space — Windows silently drops it, so the folder on disk stops
-  matching the recorded name. `names::sanitize_filename` documents and fixes
-  this exact bug; `topics.rs` does not.
-- [ ] **Message-block joining measures a duration in local wall-clock.**
-  `crates/tgx-html/src/join.rs:93` computes the 900 s / 3 s gap from the naive
-  `date` field. `crates/tgx-format/src/lib.rs:31` states the rule: *"anything
-  measuring a duration reads `date_unixtime`, which stays monotonic across a DST
-  change where `date` does not."* At a fall-back the gap goes negative and the
-  block splits. The corpus is a single December range, so it cannot catch this.
-  Parity impact unknown — Desktop may well use wall-clock too; measure before
-  changing.
-- [ ] **`save.bat --force` force-pushes with no prompt** (line 34 → 155 → 186),
-  uses `--force` rather than `--force-with-lease`, and is documented in neither
-  the menu nor the README.
-- [ ] **`peer.rs:105`'s doc contradicts its own test** — it says
-  "Nađa Gavrilović arh blokade fotograf" renders as `Nf`; the test at line 270
-  asserts `NG`.
-- [ ] **The CLI echoes the 2FA password** — `crates/tgx-tg/src/bin/tgx.rs:64`
-  uses a plain `read_line`, so the cloud password lands in terminal scrollback.
-- [ ] **Binary-size figures disagree across docs**: README 17.8 MB, ROADMAP
-  18.4 MB, `ci.yml` "~10 MB"; the Python baseline is 42 MB in `Cargo.toml` and
-  46.4 MB in README / `save.bat`.
-- [ ] **Minor overflow / truncation.** `Settings::size_limit_bytes` multiplies
-  an untrusted `i64` by 1 MiB without saturation; `client.rs:70` casts
-  `api_id as i32` silently; `json::header_prelude` byte-slices
-  `head.len() - 2` and emits invalid JSON for an empty header map (unreachable
-  today).
+- [x] **`gpui-component` is not pinned.** *Fixed:
+  `crates/tgx-app/Cargo.toml:28` is `gpui-component = "=0.5.1"`. Both are now
+  what the workspace comment and ROADMAP's retired-risk table always claimed.*
+- [x] **The "enforced by the build" dependency rules do not exist.** *Fixed:
+  `crates/tgx-parity/tests/layering.rs` reads the manifests and fails on
+  `tgx-html` reaching `grammers-tl-types`, or the analyser reaching `tgx-tg`.
+  It runs in `cargo test --all`, so the claim is now checked rather than
+  reworded.*
+- [x] **`topics::sanitize_component` truncates after trimming.** *Fixed:
+  `crates/tgx-media/src/topics.rs:58` cuts at 120 characters and **then**
+  trims `.` and ` ` again, mirroring `names::sanitize_filename`. Two tests
+  drive the two boundaries — a 120th character that is a dot and one that is a
+  space — and both assert the result is 119 characters, not 120.*
+- [x] **Message-block joining measures a duration in local wall-clock.**
+  *Fixed: `crates/tgx-html/src/join.rs:131` takes the gap from
+  `date_unixtime` whenever both messages carry it, falling back to `date`
+  only when one does not. Measured on the case the corpus cannot reach: at a
+  fall-back, two messages 90 s apart come out −3510 s off `date`, fall outside
+  `0..=900`, and Desktop's single sender block splits in two.*
+- [x] **`save.bat --force` force-pushes with no prompt.** *Fixed: every push
+  path is `--force-with-lease` (`save.bat:191`, `save.bat:402`), both prompts
+  say what that overwrites and what it does not, and `--force` is documented in
+  the menu (`save.bat:69`).*
+- [x] **`peer.rs:105`'s doc contradicts its own test.** *Fixed, and the doc was
+  the one that was right: Desktop paints `Nf` 281 times in the reference's
+  HTML and `NG` nowhere. The test had been handing the whole tail in as the
+  surname; it now splits the fields the way the export does
+  (`crates/tgx-format/src/peer.rs:278`).*
+- [x] **The CLI echoes the 2FA password.** *Fixed: `prompt_hidden`
+  (`crates/tgx-tg/src/bin/tgx.rs:80`) turns off console echo through
+  `windows-sys`, which is already a dependency — `rpassword` would have been a
+  new crate for three functions' worth of FFI.*
+- [x] **Binary-size figures disagree across docs.** *Fixed: 19.5 MB against the
+  Python build's 46.4 MB, everywhere — README, ROADMAP, `Cargo.toml`,
+  `ci.yml` and `save.bat`. `ci.yml` prints the measured number on every build
+  so the next disagreement is visible rather than archaeological.*
+- [x] **Minor overflow / truncation.** *All three fixed:
+  `Settings::size_limit_bytes` uses `saturating_mul`
+  (`crates/tgx-tg/src/config.rs:186`); `client.rs:113` is
+  `i32::try_from(settings.api_id)` with an error naming `settings.json`, not
+  an `as` cast; and `json::header_prelude` handles the empty map explicitly
+  (`crates/tgx-format/src/json.rs:92`) rather than cutting two bytes off `{}`
+  and opening the file on `,\n "messages": [`.*
 
 ---
 
 ## Suggested order
+
+*Discharged. Every box above is ticked; the order below is kept as the record of
+how it was worked, not as a plan.*
 
 1. **3** — Stop actually cancels. User-visible on day one, and the cancellation
    token it needs is a prerequisite for doing **11** properly.
@@ -258,3 +357,141 @@ reach**: `tgx-tg`'s wire-facing half and `tgx-app`.
 4. **4**, **5**, **6**, **7** — small, mechanical, one test each.
 5. **8** can jump the queue: until it asserts, the suite can go quietly green
    while the rest is in flight.
+
+---
+
+# What the first live export found — 2026-08-27
+
+The audit above was a **read** of the code plus a baseline that opened no
+sockets. This section is the other half: a real export was run, and its output
+was cross-examined against two other exports of the same supergroup — Telegram
+Desktop's own, and the Python original's. Three runs of one chat, diffed
+field by field.
+
+**Every finding here is wire-only, and none of them is catchable by the three
+replay legs.** That is not a coincidence and it is not a surprise: the legs
+replay a recorded `result.json`, so they can only judge what the converter
+already put in the map. A key the converter never writes is a key the reference
+JSON supplies for them, and they read green.
+
+The count that makes the point: reactions on 963 messages, actions on 63,
+7 polls, 3 locations, 206 names and one linked-to index page — **all of them
+present in the reference, all of them emitted by nothing at all, and 444 tests
+plus three green legs over the top.**
+
+### Fields the converter never emitted
+
+- [x] **`reactions` — 963 of 6,643 messages carry them in the reference; a live
+  export had none.** Now `convert::reactions_of`
+  (`crates/tgx-tg/src/convert.rs:516`). The over-indent invariant, the
+  `reactions_chosen` presentation key and the whole `enrich` path that fetches
+  the *full* reactor list when the three-name cap bites were all in place and
+  all downstream of a key nothing wrote.
+- [x] **Service `action` — 63 of 63, all nine kinds.** Now
+  `convert::service_action` (`convert.rs:662`), with the payload fields
+  Desktop carries beside them: `inviter`, `members`, `title`, `new_title`,
+  `message_id`, `new_icon_emoji_id`. A service message reached the JSON as a
+  typed row with no verb in it.
+- [x] **Polls — 7 of 7.** Now `convert::poll_of` (`convert.rs:584`), inserted
+  from `engine::payload` (`engine.rs:579`). `plan::classify` only answers
+  "what would we download", so a poll fell straight through it and the message
+  arrived as bare text.
+- [x] **Locations — 3 of 3.** Now `convert::location_of` (`convert.rs:630`),
+  same fall-through, plus `live_location_period_seconds` where the TL object
+  carries a period.
+
+### Names that resolved to the empty string
+
+- [x] **206 fields came out `""` in a live export** — 103 `from`, 96
+  `forwarded_from`, 7 `actor`. The `NameBook` was filled only from the
+  participant roster, and `learn_user` had **no caller at all**, so anybody who
+  posted and then left the group had no name anywhere to resolve from. Now
+  `engine::learn_peers` (`crates/tgx-tg/src/engine.rs:515`) harvests the sender
+  and the chat off every message as it arrives — the people who were missing
+  are by definition people who posted, so they arrive as the sender of their
+  own messages. The chat is learned too, because a migration notice's actor
+  *is* the chat and had no other source.
+  Worth stating plainly: 206 is the number **with `member_roster` on**. With it
+  off — a supported setting — it would have been every name in the export.
+
+### Files that were referenced and never written
+
+- [x] **`export_results.html` was never written, although all 9 topic pages
+  link to it.** Every page opens with `<a href="../export_results.html">` and
+  the target was absent on a real run. New `crates/tgx-html/src/index.rs`,
+  wired in `engine::write_index` (`engine.rs:693`) off the same `split` branch
+  that sets `back_href`, so the link and the file cannot drift apart. Only
+  topics that produced a folder are listed — an empty one had its directory
+  removed, and listing it would be the same dead link again.
+- [x] **The inline preview is a third artifact, and nothing planned it.**
+  `<full name>_thumb.jpg` (Telegram's thumbnail), the stripped thumbnail in
+  `thumbnails/`, and `<stem>_thumb<ext>` (the preview the HTML's `<img>` points
+  at) are three different files. `names::claim_rendered_preview`
+  (`crates/tgx-media/src/names.rs:289`) had existed since Phase 4 and was
+  **never called**. Now planned as `DownloadJob.preview_dest`
+  (`crates/tgx-tg/src/plan.rs:441`) and fetched by `download::fetch_preview`
+  (`crates/tgx-tg/src/download.rs:214`). The name is read off the job rather
+  than derived again in `engine::payload` (`engine.rs:563`), because deriving
+  it would miss a `(1)` collision suffix and point the `<img>` at a file the
+  pool never writes.
+  **A deviation worth recording rather than hiding:** Desktop renders this file
+  locally with an image scaler. We take Telegram's next size down, or copy the
+  full file when there is none. The path is Desktop's and the role is Desktop's;
+  the **bytes are not**. No leg compares them — the media leg diffs names — so
+  nothing here goes red, and that is exactly why it is written down.
+
+### A Desktop quirk that only three exports side by side could name
+
+- [x] **Desktop appends a trailing empty text segment when the message text is
+  not pure ASCII.** Over the whole reference, 98 messages end on an entity and
+  exactly 11 carry the empty tail — the same 11 whose text contains a
+  non-ASCII character. 98 of 98, no exceptions, no false positives. The entity
+  *type* plays no part: `mention` and `link` occur on both sides of the split,
+  so "always append when the text ends on an entity" would have been right 11
+  times and wrong 87.
+  This is the signature of a **UTF-16 end offset compared against a UTF-8 byte
+  length**: for ASCII the two numbers agree and Desktop's "is anything left?"
+  test comes out false; for anything else the byte length is larger and it
+  emits the leftover, which is empty. Reproduced in
+  `crates/tgx-format/src/text.rs:159`, with the reference message ids in the
+  tests.
+
+### The wire leg was broken three ways
+
+The one check written specifically to catch all of the above could not have.
+Each of these was found by running it and disbelieving the answer:
+
+- [x] **It paired topics by folder name.** Desktop uses the bare topic title
+  and we prefix the topic id, so `ćaskanje` and `0001 - ćaskanje` never met.
+  Eight folders came back "only in ours" / "we did not export this topic" —
+  a report that reads like a total export failure, having compared **zero**
+  messages. `topics_by_name` (`crates/tgx-parity/src/wire_leg.rs:463`) now
+  keys on the title, and pairs a lone topic a side outright, since a chat can
+  be renamed between two runs.
+- [x] **`MAY_DRIFT` let a field vanish entirely.** `reactions`, `edited`,
+  `views` and `forwards` genuinely move between two runs minutes or months
+  apart, so they are counted rather than raised — but "present with a different
+  value" and "absent from ours" were scored the same way. That is how 963
+  missing reactions read as *"two runs, two points in time"*. A field the
+  reference writes and we never do is now its own `absent` tally
+  (`wire_leg.rs:381`), outside the drift allowance.
+- [x] **It never checked that a media path had a file behind it.** 1,546
+  dangling thumbnail references in a live export were invisible to it. Paths
+  are now resolved against the tree and reported as `dangling`
+  (`wire_leg.rs:366`), with up to five examples — a dangling reference is worse
+  than a stated gap, which is the argument `download.rs` already made and the
+  leg was not enforcing.
+
+### Still open after all of it
+
+Stated rather than ticked, because neither is fixed:
+
+- **The html leg still synthesises `_p` itself.** `html_leg.rs:426` lifts the
+  presentation map out of Desktop's own pages and feeds it back in, so the leg
+  proves **the writer, not the pipeline** — which is precisely why finding 9
+  above could sit green for the whole of Phases 3–7. The pipeline half is now
+  covered by `crates/tgx-tg/tests/wire.rs` instead, converter in and map out.
+  The leg's blind spot itself is unchanged.
+- **`custom_emoji.document_id` stays a numeric id rather than a sticker path.**
+  This is the documented media-leg ceiling: 830 of 836, the six being custom
+  emoji, and a JSON replay cannot see them at all.

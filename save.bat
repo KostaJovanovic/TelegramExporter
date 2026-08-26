@@ -31,6 +31,9 @@ set FORCE_MODE=0
 set DO_BUILD=0
 set ACTION=%~1
 
+rem --force pushes with --force-with-lease, not a bare --force: it still
+rem overwrites origin/%BRANCH%, but refuses if origin moved since the last
+rem fetch, so it cannot silently clobber a push you have not seen yet.
 if /i "%ACTION%"=="--force"   (set FORCE_MODE=1 & set ACTION=save)
 if /i "%ACTION%"=="--commit"  (set COMMIT_ONLY=1 & set ACTION=save)
 if /i "%ACTION%"=="--no-push" (set COMMIT_ONLY=1 & set ACTION=save)
@@ -62,6 +65,8 @@ echo   8  parity   diff against a real Desktop export
 echo   9  corpus   cut the 7.8 MB parity corpus out of that export
 echo   10 wire     diff a live export against the reference run
 echo   11 quit
+echo.
+echo   save.bat --force  runs save and force-with-lease pushes without asking
 echo.
 set /p CHOICE=select [1-11]:
 if "%CHOICE%"=="1" goto save
@@ -167,7 +172,7 @@ echo.
 set /p FETCH=pull + merge remote first? (y/n):
 if /i "%FETCH%"=="y" goto fetch
 
-set /p FORCE=force push instead? overwrites the remote. (y/n):
+set /p FORCE=force-with-lease push instead? overwrites the remote unless it moved since your last fetch. (y/n):
 if /i "%FORCE%"=="y" goto forcepush
 
 echo [git]  skipped - nothing pushed
@@ -183,10 +188,10 @@ goto afterpush
 
 :forcepush
 call :branchname
-git push -u origin %BRANCH% --force
+git push -u origin %BRANCH% --force-with-lease
 if errorlevel 1 set SAVE_ERROR=1
 echo.
-echo [git]  force pushed origin/%BRANCH%
+echo [git]  force-with-lease pushed origin/%BRANCH%
 goto afterpush
 
 :pushed
@@ -392,9 +397,9 @@ if errorlevel 1 goto end
 git push -u origin %BRANCH%
 if not errorlevel 1 goto end
 echo.
-set /p FORCE=push failed. force push? overwrites the remote. (y/n):
+set /p FORCE=push failed. force-with-lease push? overwrites the remote unless it moved since your last fetch. (y/n):
 if /i not "%FORCE%"=="y" goto pushgaveup
-git push -u origin %BRANCH% --force
+git push -u origin %BRANCH% --force-with-lease
 if errorlevel 1 set SAVE_ERROR=1
 goto end
 
