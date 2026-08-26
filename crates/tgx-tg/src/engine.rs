@@ -16,8 +16,11 @@ use crate::client::ChatInfo;
 use crate::config::Settings;
 use crate::convert::{base_message, base_service, NameBook};
 use crate::dialogs::Topic;
+use crate::download::{self, PendingDownload};
+use crate::enrich::{self, Enrichment};
 use crate::error::{classify, EnrichError, ExportError};
 use crate::output::Output;
+use crate::plan;
 use grammers_client::session::types::PeerRef;
 use grammers_client::Client;
 use grammers_tl_types as tl;
@@ -55,6 +58,13 @@ pub struct ExportResult {
     pub extra_requests: usize,
     /// Type names the JSON encoder could not map.
     pub degraded: Vec<String>,
+    pub media_downloaded: usize,
+    pub media_failed: usize,
+    pub bytes_downloaded: i64,
+    pub members: usize,
+    /// **A short member list says so.** A truncated roster is
+    /// indistinguishable from a complete one, which makes it worse than none.
+    pub members_complete: bool,
 }
 
 impl ExportResult {
@@ -104,6 +114,9 @@ struct TopicSink {
     /// `photo_1`, `photo_2`, matching a standalone Desktop export.
     media: MediaNames,
     title: String,
+    /// Jobs this folder is waiting on. Filenames are already written into the
+    /// JSON and HTML; only the bytes are outstanding.
+    jobs: Vec<PendingDownload>,
 }
 
 pub struct ChatExporter<'a> {
@@ -199,6 +212,7 @@ impl<'a> ChatExporter<'a> {
                         output,
                         media: MediaNames::new(),
                         title: t.title.clone(),
+                        jobs: Vec::new(),
                     },
                 );
             }
@@ -218,9 +232,48 @@ impl<'a> ChatExporter<'a> {
                     output,
                     media: MediaNames::new(),
                     title: chat.title.clone(),
+                    jobs: Vec::new(),
                 },
             );
         }
+
+        // --- enrichment, before the read ------------------------------------
+        // **Before**, so the roster's names are available to the very first
+        // message rather than the last.
+        let mut tally = Enrichment::default();
+        if self.settings.member_roster {
+            let roster = enrich::fetch_participants(
+                self.client,
+                peer,
+                self.settings,
+                &mut tally,
+                |seconds| progress(Progress::FloodWait { seconds }),
+            )
+            .await;
+            result.members = roster.members.len();
+            result.members_complete = roster.complete;
+            for m in &roster.members {
+                if let Some(id) = m.get("id").and_then(Value::as_str) {
+                    if let Some(name) = m.get("name").and_then(Value::as_str) {
+                        self.names.names.insert(id.to_string(), name.to_string());
+                        self.names.html.insert(id.to_string(), name.to_string());
+                    }
+                }
+            }
+            if !roster.members.is_empty() {
+                let body =
+                    serde_json::to_string_pretty(&roster.to_json()).unwrap_or_else(|_| "{}".into());
+                std::fs::create_dir_all(root)?;
+                std::fs::write(root.join("participants.json"), body)?;
+            }
+            if !roster.complete {
+                progress(Progress::Log(
+                    "the member list is incomplete — Telegram stopped serving it".into(),
+                ));
+            }
+        }
+        result.extra_requests += tally.requests;
+        result.enrich_deferred += tally.deferred;
 
         // --- the single pass ------------------------------------------------
         let mut offset_id: i32 = 0;
@@ -253,7 +306,7 @@ impl<'a> ChatExporter<'a> {
                             GENERAL_TOPIC_ID
                         };
                         if let Some(sink) = sinks.get_mut(&key) {
-                            let payload = self.payload(&msg, &mut sink.media);
+                            let payload = self.payload(&msg, &mut sink.media, &mut sink.jobs);
                             sink.output.add(&payload)?;
                         }
                         done += 1;
@@ -291,6 +344,36 @@ impl<'a> ChatExporter<'a> {
             }
         }
 
+        // --- the media pass -------------------------------------------------
+        // After the read loop, not during it: the read is bounded by Telegram's
+        // paging and the downloads are bounded by the pool, so overlapping them
+        // buys little and costs a much harder cancel path.
+        for (_, sink) in sinks.iter_mut() {
+            let jobs = std::mem::take(&mut sink.jobs);
+            if jobs.is_empty() {
+                continue;
+            }
+            progress(Progress::Log(format!(
+                "{}: fetching {} files",
+                sink.title,
+                jobs.len()
+            )));
+            let tally = download::run_all(
+                self.client,
+                &sink.output.root,
+                jobs,
+                self.settings.download_concurrency,
+            )
+            .await;
+            result.media_downloaded += tally.downloaded;
+            result.media_failed += tally.failed;
+            result.bytes_downloaded += tally.bytes;
+            // A dangling reference is worse than a stated gap.
+            if let Err(e) = download::write_missing(&sink.output.root, &tally.missing) {
+                progress(Progress::Log(format!("missing_media.txt: {e}")));
+            }
+        }
+
         Self::close_all(&mut sinks, &mut result, progress);
         progress(Progress::Messages {
             chat_id: chat.id,
@@ -325,10 +408,35 @@ impl<'a> ChatExporter<'a> {
     fn payload(
         &mut self,
         msg: &grammers_client::message::Message,
-        _media: &mut MediaNames,
+        names: &mut MediaNames,
+        jobs: &mut Vec<PendingDownload>,
     ) -> Map<String, Value> {
         match &msg.raw {
-            tl::enums::Message::Message(m) => base_message(m, &self.names),
+            tl::enums::Message::Message(m) => {
+                let mut out = base_message(m, &self.names);
+                // Filenames are decided **before** bytes are fetched, so the
+                // JSON and HTML stream out now and the pool catches up later.
+                if let Some(media) = &m.media {
+                    if let Some(facts) = plan::classify(media, self.settings.link_previews) {
+                        let stamp = media_stamp(m.date);
+                        let (fields, job) =
+                            plan::plan(&facts, m.id as i64, &stamp, names, self.settings);
+                        for (k, v) in fields {
+                            out.insert(k, v);
+                        }
+                        if let Some(job) = job {
+                            let handle = if job.inline_bytes.is_some() {
+                                None
+                            } else {
+                                msg.media()
+                            };
+                            jobs.push(PendingDownload { job, media: handle });
+                        }
+                        out = tgx_format::order::ordered(&out);
+                    }
+                }
+                out
+            }
             tl::enums::Message::Service(s) => base_service(s, &self.names),
             tl::enums::Message::Empty(e) => {
                 let mut out = Map::new();
@@ -377,6 +485,15 @@ impl<'a> ChatExporter<'a> {
                 }
             }
         }
+    }
+}
+
+/// `DD-MM-YYYY_HH-MM-SS`, the stamp Desktop puts in a synthesised filename.
+fn media_stamp(ts: i32) -> String {
+    use chrono::{Local, TimeZone};
+    match Local.timestamp_opt(ts as i64, 0).single() {
+        Some(dt) => dt.format("%d-%m-%Y_%H-%M-%S").to_string(),
+        None => String::new(),
     }
 }
 
