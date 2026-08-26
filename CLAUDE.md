@@ -8,6 +8,10 @@ thing Desktop cannot do: forum supergroups split into one folder per topic.
 `ROADMAP.md` is the long-form design record and is kept current — read the phase
 you are touching before changing it.
 
+**`HANDOFF.md` says where the work actually stands**, which is not obvious from
+the phase list: the output is finished and proven, the window is barely started.
+Read it before touching `tgx-app`.
+
 ## Commands
 
 ```powershell
