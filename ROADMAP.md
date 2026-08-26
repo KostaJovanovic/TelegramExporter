@@ -67,6 +67,16 @@ The exit criterion — *a live export matching our own reference run on all
 account. Using them is the account holder's call, not mine, so this is a
 decision rather than a limitation of the code.
 
+**Vindicated on the first real attempt.** `SenderPool` hands back three
+things — a handle, a runner and an update channel — and `connect()` took the
+handle and dropped the runner. That compiles, connects, and then fails every
+request with `dropped (cancelled)`, because the requests go into a channel
+whose receiver no longer exists. Nothing downstream could catch it: all 357
+tests passed, and all three parity legs were green, because every one of them
+replays recorded JSON and none of them opens a socket. The sign-in dialog
+found it in one click. That is the whole argument for this phase — the wire is
+the only part of the pipeline that no replay can reach.
+
 The **check itself is written and tested**, so the run is the only missing
 part. Once an export exists:
 
