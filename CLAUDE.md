@@ -134,6 +134,20 @@ dropped its runner, so every request was cancelled before it was sent. All tests
 passed and all three legs were green. Treat green suites as saying nothing about
 the wire.
 
+## Porting from the Python original
+
+`C:\Users\Kosta\Projekti\telegram` is not just a reference for *what* to build;
+its comments are the record of what went wrong the first time. **Read the
+original implementation, not its docstring**, before writing the Rust
+equivalent — a paraphrase loses exactly the defensive details that were added
+after something broke.
+
+Concretely: `ensure_data_dir` was ported from its description and silently lost
+three guards the original had — `CREATE_NO_WINDOW`, a once-per-process flag, and
+an absolute `System32\icacls.exe` path (a portable exe invoking a bare name lets
+a planted `icacls.exe` beside it run with the user's rights). The first two were
+cosmetic-looking; the third was a security regression.
+
 ## Paths, state and credentials
 
 State lives **beside the executable** — never AppData, never the registry —
