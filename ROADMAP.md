@@ -23,9 +23,9 @@ A full-scope roadmap for rewriting `C:\Users\Kosta\Projekti\telegram` in Rust on
 | **3** `tgx-html` | **done** | HTML leg: **4 of 4 topics reproduced exactly, 256,780 lines** |
 | **4** `tgx-media` | **done** | Media leg: **830 of 836 filenames**, the six being the documented custom-emoji ceiling |
 | **5** `tgx-tg` | **built; verification deferred by decision** | compiles and runs; `tgx login \| chats \| export`. Exit criterion needs a live account — see below |
-| **6** `tgx-ui` | **done** | tokens from `analyser.css`, components, empty states; **gpui builds and renders on Windows** |
-| **7** `tgx-app` | **built** | window opens and stays up; nav bar, chat list, settings, queue, status bar all live |
-| **8** Packaging | **done** | release binary **18.4 MB** (Python: 46.4 MB), assets embedded, CI on `windows-latest` |
+| **6** `tgx-ui` | **partial** | tokens from `analyser.css`, components, empty states; **gpui builds and renders on Windows**. But `motion` is unreferenced, `rhythm::TRACK_*` is never applied, and several helpers are dead outside their own tests. |
+| **7** `tgx-app` | **barely started** | the window opens, signs in and exports. Everything else is painted, not wired: nothing scrolls, there is no filter input, settings are read-only text, Stop does not stop, and the UI does not repaint when a worker event lands. **Every box in the Phase 7 checklist below is still unchecked, and that is accurate.** See `HANDOFF.md`. |
+| **8** Packaging | **done** | release binary **18.5 MB** (Python: 46.4 MB), assets embedded, CI on `windows-latest` |
 
 ### Phase 5: verification deferred, by decision
 
@@ -610,6 +610,12 @@ list virtualization (`UniformList`) the Qt tree never had.
 The layout is a port; the *interaction rules* below are behaviour, hard-won, and
 survive the toolkit change unchanged. Treat them as a checklist, because every
 one of them is a bug that was found the expensive way.
+
+**None of these are done.** The window opens, signs in, lists chats and exports;
+that is the whole of it. `HANDOFF.md` has the verified defect list and a
+suggested order. The specification for this phase is the Python original —
+`app/ui/main_window.py` and `app/ui/widgets.py` — read the code, not a
+description of it.
 
 - [ ] **Async bridge.** Tokio runtime on a dedicated thread for the whole app
       lifetime (grammers requires it); GPUI owns the main thread. Submit
