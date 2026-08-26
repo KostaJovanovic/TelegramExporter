@@ -1,8 +1,16 @@
 name: CI
 
-# The full 6,643-message diff stays a local command against N:\; CI runs the
-# committed golden corpus, so a machine with no reference export still catches
-# a regression.
+# What CI can and cannot check.
+#
+# The three parity legs need a real Desktop export. `cargo run -p tgx-parity --
+# corpus <root>` cuts the text half of one into `reference/` — 7.8 MB instead of
+# 278 MB, and enough for all three legs to return the same numbers they return
+# against the drive. `cargo test --all` runs them from `tests/corpus.rs`.
+#
+# `reference/` is gitignored, because it is verbatim chat history and a push
+# publishes it. So on this repository as configured, the corpus test SKIPS here
+# and prints that it did — CI proves the unit tests, not the parity legs. A fork
+# that commits its own corpus gets the legs in CI with no change to this file.
 on:
   push:
     branches: [master, main]

@@ -8,3 +8,9 @@ Exports/
 
 # Local scratch
 *.log
+
+# The parity corpus: `result.json` and `messages*.html` cut straight out of a
+# real export by `tgx-parity corpus`. It is verbatim chat history from real
+# people, and this repository has a CI workflow — that is, a push publishes it.
+# Removing this line commits those messages, and git keeps them for good.
+/reference/
