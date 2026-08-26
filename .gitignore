@@ -1,0 +1,10 @@
+/target/
+
+# Portable by design: all state lives beside the executable. It holds the
+# api_hash and a Telegram session key, which is a *bearer credential* — anyone
+# who can read it can act as the account. It must never be committed.
+TelegramExporterData/
+Exports/
+
+# Local scratch
+*.log

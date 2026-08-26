@@ -1,0 +1,21 @@
+[package]
+name = "tgx-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The Telegram exporter."
+
+[[bin]]
+name = "TelegramExporter"
+path = "src/main.rs"
+
+[dependencies]
+tgx-ui = { path = "../tgx-ui" }
+tgx-tg = { path = "../tgx-tg" }
+
+gpui = "=0.2.2"
+grammers-client = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+anyhow = { workspace = true }
+log = { workspace = true }

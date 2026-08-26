@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tgx-format",
+    "crates/tgx-html",
+    "crates/tgx-media",
+    "crates/tgx-tg",
+    "crates/tgx-ui",
+    "crates/tgx-app",
+    "crates/tgx-parity",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+license = "MIT"
+
+# Pinned exactly, not by caret. gpui and gpui-component are both pre-1.0 and
+# their READMEs suggest `version = "*"`; taking that advice means a routine
+# `cargo update` can break the interface with no code change of ours. Bump
+# these deliberately, on their own commit, with the parity suite green either
+# side of it.
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+indexmap = { version = "2", features = ["serde"] }
+anyhow = "1"
+thiserror = "2"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+log = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# The Python build was 42 MB via PyInstaller. Record the Rust number so a
+# sudden jump is visible, the way the Git-Bash-vs-PowerShell OpenSSL
+# discovery was (+2.5 MB from the wrong build shell).

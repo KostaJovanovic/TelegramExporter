@@ -1,0 +1,57 @@
+name: CI
+
+# The full 6,643-message diff stays a local command against N:\; CI runs the
+# committed golden corpus, so a machine with no reference export still catches
+# a regression.
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features
+
+      - name: Test
+        run: cargo test --all
+
+      - name: Release build
+        run: cargo build --release -p tgx-app
+
+      # The Python build was 42 MB via PyInstaller and the Rust one is ~10 MB.
+      # Record it so a sudden jump is visible, the way the
+      # Git-Bash-vs-PowerShell OpenSSL discovery was (+2.5 MB from the wrong
+      # build shell).
+      - name: Binary size
+        shell: pwsh
+        run: |
+          $exe = "target/release/TelegramExporter.exe"
+          $mb = [math]::Round((Get-Item $exe).Length / 1MB, 1)
+          Write-Host "TelegramExporter.exe is $mb MB"
+          if ($mb -gt 25) {
+            Write-Error "binary grew past 25 MB — something large got linked in"
+            exit 1
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TelegramExporter
+          path: target/release/TelegramExporter.exe

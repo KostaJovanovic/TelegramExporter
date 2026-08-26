@@ -1,0 +1,15 @@
+[package]
+name = "tgx-html"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Desktop's export pages, written from serialised maps. No Telegram types anywhere."
+
+[dependencies]
+tgx-format = { path = "../tgx-format" }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

@@ -1,0 +1,29 @@
+[package]
+name = "tgx-tg"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The Telegram client and the export engine."
+
+[dependencies]
+tgx-format = { path = "../tgx-format" }
+tgx-html = { path = "../tgx-html" }
+tgx-media = { path = "../tgx-media" }
+
+grammers-client = "0.10"
+grammers-session = { version = "0.10", features = ["sqlite-storage"] }
+grammers-tl-types = "0.10"
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+futures-util = "0.3"
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
