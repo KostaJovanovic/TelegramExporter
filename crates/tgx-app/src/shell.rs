@@ -158,6 +158,51 @@ impl Shell {
                     .child(SharedString::from(dialog.stage.hint())),
             );
 
+        // Numbered, because these are steps taken on another site in order,
+        // and a paragraph of prose describing a five-step form is how someone
+        // ends up on the wrong page deciding what "platform" to pick.
+        let steps = dialog.stage.steps();
+        if !steps.is_empty() {
+            let mut list = div()
+                .px(px(20.0))
+                .pt(px(10.0))
+                .flex()
+                .flex_col()
+                .gap(px(6.0));
+            for (i, step) in steps.iter().enumerate() {
+                list = list.child(
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .text_size(type_scale::TINY)
+                        .text_color(p.muted)
+                        .child(
+                            div()
+                                .w(px(14.0))
+                                .flex_none()
+                                .text_color(p.rule)
+                                .child(SharedString::from(format!("{}", i + 1))),
+                        )
+                        .child(div().child(SharedString::from(*step))),
+                );
+            }
+            card = card.child(list);
+        }
+
+        if let Some(link) = dialog.stage.link() {
+            card = card.child(
+                div().px(px(20.0)).pt(px(12.0)).child(
+                    div()
+                        .id("login-link")
+                        .text_size(type_scale::TINY)
+                        .text_color(p.accent)
+                        .cursor_pointer()
+                        .child(SharedString::from(link.label))
+                        .on_click(cx.listener(move |_, _, _, cx| cx.open_url(link.url))),
+                ),
+            );
+        }
+
         for field in dialog.stage.fields() {
             card = card.child(
                 div()

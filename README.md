@@ -61,11 +61,16 @@ You need your own `api_id` / `api_hash` from
 window asks for them on first run; the CLI reads them from
 `TelegramExporterData/settings.json` or from `TG_API_ID` / `TG_API_HASH`.
 
-**Everything stays in this folder.** `TelegramExporterData/` holds the settings
-and the session; `Exports/` holds the output; both are gitignored. State lives
-beside the executable, so a copied exe carries its own data — except when the
-exe is in `target/`, where it climbs back to the repo root instead, because
-`cargo clean` would otherwise take the session key and the exports with it.
+**Everything stays in this folder.** `save.bat build` puts the exe in `dist/`,
+and the app keeps its state beside its own executable — so running
+`dist\TelegramExporter.exe` gives you `dist/TelegramExporterData/` (settings and
+session) and `dist/Exports/` (the output) next to it. That is what makes `dist/`
+portable: copy the folder anywhere and it still works, credentials and all.
+
+The one exception is an exe under `target/`, which climbs back to the repo root
+instead — `cargo clean` empties `target/`, and it would otherwise take the
+session key and every export with it. Everything written at runtime is
+gitignored.
 
 You sign in as *yourself*, not as a bot — bots cannot read chat history.
 
@@ -134,8 +139,8 @@ Revoke a session any time via Telegram → Settings → Devices.
 ## Building
 
 ```powershell
-cargo test --all
-cargo build --release -p tgx-app
+save.bat test               # fmt + clippy + every suite, the same as CI
+save.bat build              # -> dist\TelegramExporter.exe
 ```
 
 The release binary is **17.8 MB**, against the Python build's 46.4 MB. Desktop's

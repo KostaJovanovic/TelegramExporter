@@ -1,0 +1,9 @@
+The release exe lives here: `save.bat build` copies it out of target\release\.
+
+It sits in the repo rather than in target\ because target\ is a build
+directory — `cargo clean` empties it — and because the app keeps its state
+beside its executable. Running dist\TelegramExporter.exe therefore puts
+dist\TelegramExporterData\ and dist\Exports\ next to it, which is what makes
+the folder portable: copy dist\ anywhere and it works, credentials and all.
+
+Everything in here except this file is gitignored, for that last reason.

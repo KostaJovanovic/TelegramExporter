@@ -41,11 +41,64 @@ impl Stage {
         match self {
             Stage::Credentials => {
                 "Telegram requires your own credentials for any non-official \
-                 client. Get them from my.telegram.org → API development tools."
+                 client. They are free, they take about a minute, and you only \
+                 do this once."
             }
             Stage::Phone => "With the country code, e.g. +381…",
             Stage::Code => "Telegram sent a code to your other devices.",
             Stage::Password => "This account has two-factor authentication.",
+        }
+    }
+
+    /// The numbered instructions shown under the hint.
+    ///
+    /// The old hint was one sentence — "get them from my.telegram.org → API
+    /// development tools" — which is accurate and still leaves you on a page
+    /// asking for an app title, a short name, a URL and a platform, with no
+    /// indication that three of the four do not matter. Someone doing this for
+    /// the first time has no way to know that, and guessing wrong looks like a
+    /// permanent decision about their account.
+    pub fn steps(self) -> &'static [&'static str] {
+        match self {
+            Stage::Credentials => &[
+                "Open my.telegram.org and sign in with the phone number of the \
+                 account you want to export.",
+                "The confirmation code arrives in Telegram itself, not by SMS.",
+                "Choose API development tools.",
+                "Fill in any app title and short name. Platform and URL do not \
+                 matter, and nothing here is shown to anyone.",
+                "Copy api_id and api_hash from the App configuration box.",
+            ],
+            // The one thing worth saying here is the thing Telegram itself
+            // warns about, because this app looks exactly like what that
+            // warning is about: a program asking for your login code.
+            Stage::Code => &[
+                "The code is in your Telegram app, under Telegram Service \
+                 Notifications.",
+                "Never give this code to anyone who asks you for it — not by \
+                 message, not on a call. This app runs on your machine and \
+                 sends it only to Telegram.",
+            ],
+            Stage::Password => &[
+                "This is your Telegram cloud password, the one you set under \
+                 Settings → Privacy and Security → Two-Step Verification.",
+                "It is not your login code and not your device PIN.",
+            ],
+            Stage::Phone => &[],
+        }
+    }
+
+    /// A page this stage can open in the browser.
+    pub fn link(self) -> Option<Link> {
+        match self {
+            Stage::Credentials => Some(Link {
+                label: "Open my.telegram.org",
+                // The apps page directly, rather than the front page: it is
+                // where the credentials are, and it redirects to the sign-in
+                // first when you are not logged in, so it works either way.
+                url: "https://my.telegram.org/apps",
+            }),
+            _ => None,
         }
     }
 
@@ -67,6 +120,13 @@ impl Stage {
             Stage::Password => "Sign in",
         }
     }
+}
+
+/// A page the dialog can open in the system browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Link {
+    pub label: &'static str,
+    pub url: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,7 +266,69 @@ mod tests {
 
     #[test]
     fn the_credentials_stage_says_where_to_get_them() {
-        assert!(Stage::Credentials.hint().contains("my.telegram.org"));
+        let link = Stage::Credentials
+            .link()
+            .expect("no link to my.telegram.org");
+        assert!(link.url.starts_with("https://"), "{}", link.url);
+        assert!(link.url.contains("my.telegram.org"), "{}", link.url);
+        assert!(
+            Stage::Credentials
+                .steps()
+                .iter()
+                .any(|s| s.contains("API development tools")),
+            "the steps never name the page the credentials are on"
+        );
+        assert!(
+            Stage::Credentials
+                .steps()
+                .iter()
+                .any(|s| s.contains("api_id") && s.contains("api_hash")),
+            "the steps never say which two values to copy"
+        );
+    }
+
+    #[test]
+    fn the_credentials_steps_say_which_fields_do_not_matter() {
+        // The form asks for an app title, a short name, a URL and a platform.
+        // Three of those are irrelevant and there is nothing on the page that
+        // says so, which turns a one-minute task into a decision someone
+        // believes they are making permanently about their account.
+        let joined = Stage::Credentials.steps().join(" ");
+        assert!(
+            joined.contains("Platform") || joined.contains("platform"),
+            "{joined}"
+        );
+        assert!(joined.contains("do not matter"), "{joined}");
+    }
+
+    #[test]
+    fn the_code_stage_repeats_telegrams_own_warning() {
+        // This app is shaped exactly like the thing Telegram warns about: a
+        // program asking for your login code. Saying so is the difference
+        // between a user who is careful here and one who is careful nowhere.
+        let joined = Stage::Code.steps().join(" ");
+        assert!(
+            joined.contains("Never give this code to anyone"),
+            "{joined}"
+        );
+    }
+
+    #[test]
+    fn no_step_is_empty_and_only_the_first_stage_links_out() {
+        for stage in [
+            Stage::Credentials,
+            Stage::Phone,
+            Stage::Code,
+            Stage::Password,
+        ] {
+            for step in stage.steps() {
+                assert!(!step.trim().is_empty(), "{stage:?} has a blank step");
+            }
+            if let Some(link) = stage.link() {
+                assert_eq!(stage, Stage::Credentials, "{stage:?} should not link out");
+                assert!(!link.label.trim().is_empty());
+            }
+        }
     }
 
     #[test]
