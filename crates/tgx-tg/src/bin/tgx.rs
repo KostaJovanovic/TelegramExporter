@@ -186,11 +186,36 @@ async fn export(settings: &Settings, want: &str) -> Result<()> {
         "done: {} messages across {} topics ({} empty)",
         result.messages, result.topics, result.empty_topics
     );
+    if result.media_downloaded > 0 || result.media_failed > 0 {
+        println!(
+            "media: {} saved ({:.1} MB), {} could not be fetched",
+            result.media_downloaded,
+            result.bytes_downloaded as f64 / 1_048_576.0,
+            result.media_failed
+        );
+    }
     // A short export must not read like a complete one.
     if !result.complete() {
         println!(
             "INCOMPLETE: Telegram counted {}; {} came through",
             result.expected, result.messages
+        );
+    }
+    if result.members > 0 {
+        println!(
+            "members: {}{}",
+            result.members,
+            if result.members_complete {
+                ""
+            } else {
+                " (INCOMPLETE — Telegram stopped serving the list)"
+            }
+        );
+    }
+    if result.enrich_deferred > 0 {
+        println!(
+            "{} optional requests were lost to rate limits (the data was there)",
+            result.enrich_deferred
         );
     }
     if !result.degraded.is_empty() {
