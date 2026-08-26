@@ -263,14 +263,44 @@ pub fn ensure_data_dir() -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
+/// Why the last [`ensure_data_dir`] could not restrict the folder, or `None`.
+///
+/// **A silent failure leaves the session key at default permissions while the
+/// README says otherwise.** Logging it is not enough; a caller that shows the
+/// user a security claim needs to be able to check whether it is true.
+static LOCKDOWN_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn lockdown_error() -> Option<String> {
+    LOCKDOWN_ERROR.lock().ok().and_then(|e| e.clone())
+}
+
+fn set_lockdown_error(e: Option<String>) {
+    if let Ok(mut slot) = LOCKDOWN_ERROR.lock() {
+        *slot = e;
+    }
+}
+
+/// Absolute path to a Windows system binary.
+///
+/// **`CreateProcess` resolves a bare name by searching the calling process's
+/// own directory first.** This app is built to run from a USB stick with its
+/// data folder alongside it, so a planted `icacls.exe` next to the exe would
+/// run at startup with the user's rights. Never invoke a system tool by bare
+/// name from a portable binary.
+#[cfg(windows)]
+fn system32(exe: &str) -> PathBuf {
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    PathBuf::from(root).join("System32").join(exe)
+}
+
 #[cfg(windows)]
 fn restrict_to_current_user(dir: &std::path::Path) {
     use std::os::windows::process::CommandExt;
 
     // icacls is the documented way to do this without pulling in a Win32 ACL
-    // crate. A failure is logged rather than fatal: on FAT32/exFAT there are no
-    // ACLs at all, and the export must still run — but the user is told, since
-    // the folder holds a bearer credential.
+    // crate. A failure is recorded rather than fatal: on FAT32/exFAT there are
+    // no ACLs at all, and the export must still run — but the user is told,
+    // since the folder holds a bearer credential.
     //
     // CREATE_NO_WINDOW, because the app is a GUI binary and a console child
     // gets a console window of its own. Without this the user sees a black
@@ -278,32 +308,49 @@ fn restrict_to_current_user(dir: &std::path::Path) {
     // their phone number and a login code, looks exactly like malware.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    let out = std::process::Command::new("icacls")
+    let Some(grantee) = grantee() else {
+        // Better to say the folder is unprotected than to grant to a guessed
+        // name: a literal "%USERNAME%" is not a principal, and icacls would
+        // either fail obscurely or name something nobody intended.
+        set_lockdown_error(Some(
+            "USERNAME is not set, so there is no user to grant access to".into(),
+        ));
+        return;
+    };
+
+    let out = std::process::Command::new(system32("icacls.exe"))
         .arg(dir)
         .arg("/inheritance:r")
         .arg("/grant:r")
-        .arg(format!("{}:(OI)(CI)F", whoami()))
+        .arg(format!("{grantee}:(OI)(CI)F"))
         .creation_flags(CREATE_NO_WINDOW)
         .output();
-    match out {
-        Ok(o) if o.status.success() => {}
-        Ok(o) => log::warn!(
-            "could not restrict {} to your user: {}",
-            dir.display(),
-            String::from_utf8_lossy(&o.stderr).trim()
-        ),
-        Err(e) => log::warn!("could not restrict {}: {e}", dir.display()),
+    let failure = match out {
+        Ok(o) if o.status.success() => None,
+        Ok(o) => {
+            let said = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            Some(if said.is_empty() {
+                format!("icacls exited {}", o.status)
+            } else {
+                said
+            })
+        }
+        Err(e) => Some(e.to_string()),
+    };
+    if let Some(why) = &failure {
+        log::warn!("could not restrict {} to your user: {why}", dir.display());
     }
+    set_lockdown_error(failure);
 }
 
+/// The principal to grant, or `None` when Windows has not told us who we are.
 #[cfg(windows)]
-fn whoami() -> String {
-    std::env::var("USERDOMAIN")
-        .ok()
-        .zip(std::env::var("USERNAME").ok())
-        .map(|(d, u)| format!("{d}\\{u}"))
-        .or_else(|| std::env::var("USERNAME").ok())
-        .unwrap_or_else(|| "%USERNAME%".into())
+fn grantee() -> Option<String> {
+    let user = std::env::var("USERNAME").ok().filter(|u| !u.is_empty())?;
+    match std::env::var("USERDOMAIN") {
+        Ok(d) if !d.is_empty() => Some(format!("{d}\\{user}")),
+        _ => Some(user),
+    }
 }
 
 #[cfg(not(windows))]
@@ -311,7 +358,13 @@ fn restrict_to_current_user(dir: &std::path::Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+        let failure = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .err()
+            .map(|e| e.to_string());
+        if let Some(why) = &failure {
+            log::warn!("could not restrict {}: {why}", dir.display());
+        }
+        set_lockdown_error(failure);
     }
     let _ = dir;
 }
@@ -356,6 +409,35 @@ mod tests {
             "expected the workspace root, got {}",
             dir.display()
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn system_tools_are_invoked_by_absolute_path() {
+        // CreateProcess searches the calling process's own directory first, and
+        // this app is designed to run from a stick with its data folder beside
+        // it. A bare "icacls" would run a planted icacls.exe with the user's
+        // rights, at startup, before anything else happens.
+        let p = system32("icacls.exe");
+        assert!(p.is_absolute(), "{}", p.display());
+        assert!(p.ends_with("System32/icacls.exe") || p.ends_with(r"System32\icacls.exe"));
+        assert!(
+            p.is_file(),
+            "{} does not exist on this machine",
+            p.display()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_grantee_is_a_real_name_or_nothing() {
+        // The failure mode being excluded is granting to a literal
+        // "%USERNAME%": not a principal, so icacls either fails obscurely or
+        // names something nobody intended.
+        let g = grantee().expect("USERNAME is set when tests run");
+        assert!(!g.contains('%'), "{g}");
+        assert!(!g.is_empty());
+        assert!(!g.ends_with('\\'), "a domain with no user: {g}");
     }
 
     #[test]
