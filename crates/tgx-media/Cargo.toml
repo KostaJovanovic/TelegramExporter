@@ -1,0 +1,11 @@
+[package]
+name = "tgx-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Desktop's media naming, folder layout and stripped thumbnails. No Telegram types."
+
+[dependencies]
+tgx-format = { path = "../tgx-format" }
+serde_json = { workspace = true }

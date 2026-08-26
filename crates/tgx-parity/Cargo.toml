@@ -1,0 +1,19 @@
+[package]
+name = "tgx-parity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The oracle. Replays a real Telegram Desktop export through our writers and diffs."
+
+[[bin]]
+name = "tgx-parity"
+path = "src/main.rs"
+
+[dependencies]
+tgx-format = { path = "../tgx-format" }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+regex = "1"
+tgx-html = { path = "../tgx-html" }
+tgx-media = { path = "../tgx-media" }
