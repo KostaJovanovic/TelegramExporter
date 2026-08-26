@@ -67,7 +67,24 @@ The exit criterion — *a live export matching our own reference run on all
 account. Using them is the account holder's call, not mine, so this is a
 decision rather than a limitation of the code.
 
-**341 tests across 16 suites**; `cargo clippy` and `cargo fmt --check` clean.
+The **check itself is written and tested**, so the run is the only missing
+part. Once an export exists:
+
+```powershell
+cargo run -p tgx-parity -- wire "Exports\UA KOLAB TELEGRAM" "N:\telegram export\UA KOLAB TELEGRAM"
+```
+
+It answers the criterion in the order the answers matter: every id, then every
+size decision, then every field a converter bug would change. It deliberately
+does *not* demand two identical files — the runs are minutes or months apart,
+so `edited`, `reactions`, `views` and `forwards` are counted and reported
+separately rather than raised as failures, and burying real mismatches under
+those is exactly how a diff this size becomes unreadable. Run against the
+reference and itself it reports **6,643 ids, 3,135 size decisions** — of which
+`file` accounts for 1,786, the roadmap's headline number, with `thumbnail`
+(1,287) and `photo` (62) making up the rest.
+
+**350 tests across 19 suites**; `cargo clippy` and `cargo fmt --check` clean.
 
 ### Risks that are now retired
 

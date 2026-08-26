@@ -11,6 +11,7 @@ pub mod corpus;
 pub mod html_leg;
 pub mod json_leg;
 pub mod media_leg;
+pub mod wire_leg;
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};
