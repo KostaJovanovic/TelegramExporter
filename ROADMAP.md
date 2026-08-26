@@ -25,7 +25,7 @@ A full-scope roadmap for rewriting `C:\Users\Kosta\Projekti\telegram` in Rust on
 | **5** `tgx-tg` | **built; verification deferred by decision** | compiles and runs; `tgx login \| chats \| export`. Exit criterion needs a live account — see below |
 | **6** `tgx-ui` | **done** | tokens from `analyser.css`, components, empty states; **gpui builds and renders on Windows** |
 | **7** `tgx-app` | **built** | window opens and stays up; nav bar, chat list, settings, queue, status bar all live |
-| **8** Packaging | **done** | release binary **9.8 MB** (Python: 46.4 MB), assets embedded, CI on `windows-latest` |
+| **8** Packaging | **done** | release binary **17.8 MB** (Python: 46.4 MB), assets embedded, CI on `windows-latest` |
 
 ### Phase 5: verification deferred, by decision
 
@@ -52,39 +52,28 @@ size-skip decisions.
 
 ### Why it could not be signed off here
 
-The engine, the client, the converter, the topic routing and the streamed
-output are all in place, and a CLI drives them:
+The engine, the client, the converter, the topic routing, media planning,
+the download pool, the enrichment layer and the streamed output are all in
+place, and both a CLI and a window drive them:
 
 ```powershell
-$env:TG_API_ID="…"; $env:TG_API_HASH="…"
-cargo run -p tgx-tg --bin tgx -- login
-cargo run -p tgx-tg --bin tgx -- chats
-cargo run -p tgx-tg --bin tgx -- export "UA KOLAB TELEGRAM"
+cargo run -p tgx-app --bin TelegramExporter      # the window
+cargo run -p tgx-tg  --bin tgx -- chats
+cargo run -p tgx-tg  --bin tgx -- export "UA KOLAB TELEGRAM"
 ```
 
-Its exit criterion — *a live export matching our own reference run on all
+The exit criterion — *a live export matching our own reference run on all
 6,643 ids and 1,786 size-skip decisions* — needs credentials and a signed-in
-account, which I do not have. What that leaves unproven is **`convert.rs`
-only**: the TL-message → JSON-map mapping. Everything downstream of it is
-pinned byte for byte by the three harness legs, so a live run has a very
-narrow target to hit.
+account. Using them is the account holder's call, not mine, so this is a
+decision rather than a limitation of the code.
 
-Still outstanding inside Phase 5, all of it below the converter:
-
-- media planning wired to real TL objects (the naming rules are done and
-  pinned at 830/836; nothing calls them from the engine yet)
-- the bounded download pool, `missing_media.txt`, and the five retries
-- the enrichment layer (`full_reaction_list`, `refresh_poll`,
-  `fetch_participants`, invites, scheduled) on top of the typed errors
-- reactor-name and custom-emoji resolution
-
-297 tests across 14 suites; `cargo clippy` and `cargo fmt --check` clean.
+**341 tests across 16 suites**; `cargo clippy` and `cargo fmt --check` clean.
 
 ### Risks that are now retired
 
 | # | Risk | Outcome |
 |---|---|---|
-| 1 | gpui/gpui-component are pre-1.0 | Pinned with `=0.2.2`. `gpui-component` declares `gpui ^0.2.2`, so the pin holds if it is added. |
+| 1 | gpui/gpui-component are pre-1.0 | Both are in and both are pinned exactly. `gpui-component` 0.5.1 declares `gpui ^0.2.2`, so it builds against the pin. |
 | 3 | JSON escaping differs silently | Pinned by the json leg **and** by unit tests checked against CPython's actual output. |
 | 8 | **GPUI needs a working GPU** | **gpui builds on Windows in 1m45s and the window renders here** — launched for 10s with empty stderr. |
 
@@ -100,8 +89,9 @@ Still outstanding inside Phase 5, all of it below the converter:
 Run the legs with:
 
 ```powershell
-cargo run -p tgx-parity -- json "N:\telegram export\UA KOLAB TELEGRAM"
-cargo run -p tgx-parity -- html "N:\telegram export\UA KOLAB TELEGRAM"
+cargo run -p tgx-parity -- json  "N:\telegram export\UA KOLAB TELEGRAM"
+cargo run -p tgx-parity -- html  "N:\telegram export\UA KOLAB TELEGRAM"
+cargo run -p tgx-parity -- media "N:\telegram export\UA KOLAB TELEGRAM"
 ```
 
 ### What the harness caught that the Python suite could not
