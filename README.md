@@ -143,7 +143,7 @@ save.bat test               # fmt + clippy + every suite, the same as CI
 save.bat build              # -> dist\TelegramExporter.exe
 ```
 
-The release binary is **17.8 MB**, against the Python build's 46.4 MB. Desktop's
+The release binary is **18.4 MB**, against the Python build's 46.4 MB. Desktop's
 stylesheet, script and 42 icons are embedded in it, so there is no `_MEIPASS`
 branch, no spec file and no `datas` list.
 
