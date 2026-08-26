@@ -6,6 +6,7 @@
 
 mod actions;
 mod bridge;
+mod login;
 mod shell;
 
 use gpui::{px, size, App, AppContext, Application, Bounds, WindowBounds, WindowOptions};
@@ -23,6 +24,9 @@ fn main() {
     }));
 
     Application::new().run(|cx: &mut App| {
+        // Must run before any gpui-component feature is used.
+        gpui_component::init(cx);
+
         let (w, h) = metrics::MIN_WINDOW;
         let bounds = Bounds::centered(None, size(px(w + 260.0), px(h + 120.0)), cx);
         let opened = cx.open_window(
@@ -30,7 +34,12 @@ fn main() {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| shell::Shell::new()),
+            |window, cx| {
+                let view = cx.new(|cx| shell::Shell::new(window, cx));
+                // The first level in the window has to be a Root, so the
+                // component library's overlays have somewhere to go.
+                cx.new(|cx| gpui_component::Root::new(gpui::AnyView::from(view), window, cx))
+            },
         );
         if let Err(e) = opened {
             eprintln!("could not open a window: {e}");

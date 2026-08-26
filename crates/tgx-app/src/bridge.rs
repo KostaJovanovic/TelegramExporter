@@ -21,6 +21,10 @@ pub enum Event {
     Status(String),
     Log(String),
     SignedIn(String),
+    /// The sign-in advanced a step: a code was sent, or 2FA is wanted.
+    LoginStage(crate::login::Stage),
+    /// The step failed, and the dialog stays open saying why.
+    LoginFailed(String),
     /// The loaded chat list.
     Chats(Vec<tgx_tg::client::ChatInfo>),
     Progress {
