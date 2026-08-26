@@ -23,7 +23,7 @@ use crate::error::{classify, EnrichError};
 use grammers_client::session::types::PeerRef;
 use grammers_client::Client;
 use grammers_tl_types as tl;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::time::Duration;
 
 /// How long a single enrichment may wait out a rate limit.

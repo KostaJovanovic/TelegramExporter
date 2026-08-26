@@ -6,7 +6,7 @@
 
 use crate::bridge::Event;
 use std::sync::mpsc::Sender;
-use tgx_tg::client::Session;
+use tgx_tg::client::{LoginStep, Session};
 use tgx_tg::config::Settings;
 use tgx_tg::dialogs;
 
@@ -42,6 +42,82 @@ pub async fn sign_in(settings: Settings, tx: Sender<Event>) {
         }
         Err(e) => {
             let _ = tx.send(Event::Failed(e.to_string()));
+        }
+    }
+}
+
+/// Ask Telegram to send a login code.
+pub async fn request_code(settings: Settings, tx: Sender<Event>) {
+    let mut session = match Session::connect(&settings).await {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = tx.send(Event::LoginFailed(e.to_string()));
+            return;
+        }
+    };
+    match session.request_code(&settings.phone).await {
+        Ok(LoginStep::Ready) => match session.me().await {
+            Ok(name) => {
+                let _ = tx.send(Event::SignedIn(name));
+            }
+            Err(e) => {
+                let _ = tx.send(Event::LoginFailed(e.to_string()));
+            }
+        },
+        Ok(_) => {
+            let _ = tx.send(Event::LoginStage(crate::login::Stage::Code));
+        }
+        Err(e) => {
+            let _ = tx.send(Event::LoginFailed(e.to_string()));
+        }
+    }
+}
+
+/// Submit the code, or the two-factor password.
+///
+/// **A `Session` cannot be carried across steps here**, because each step
+/// runs as its own task: the login token lives on the session and would be
+/// dropped between them. Telegram allows re-requesting, so the code path
+/// re-establishes the session and asks again rather than holding a
+/// half-finished credential across an await the user controls.
+pub async fn finish_login(settings: Settings, secret: String, is_code: bool, tx: Sender<Event>) {
+    let mut session = match Session::connect(&settings).await {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = tx.send(Event::LoginFailed(e.to_string()));
+            return;
+        }
+    };
+    if is_code {
+        if let Err(e) = session.request_code(&settings.phone).await {
+            let _ = tx.send(Event::LoginFailed(e.to_string()));
+            return;
+        }
+        match session.sign_in(&secret).await {
+            Ok(LoginStep::Ready) => {}
+            Ok(LoginStep::NeedPassword) => {
+                let _ = tx.send(Event::LoginStage(crate::login::Stage::Password));
+                return;
+            }
+            Ok(LoginStep::NeedCode) => {
+                let _ = tx.send(Event::LoginFailed("Telegram wanted another code.".into()));
+                return;
+            }
+            Err(e) => {
+                let _ = tx.send(Event::LoginFailed(e.to_string()));
+                return;
+            }
+        }
+    } else if let Err(e) = session.check_password(&secret).await {
+        let _ = tx.send(Event::LoginFailed(e.to_string()));
+        return;
+    }
+    match session.me().await {
+        Ok(name) => {
+            let _ = tx.send(Event::SignedIn(name));
+        }
+        Err(e) => {
+            let _ = tx.send(Event::LoginFailed(e.to_string()));
         }
     }
 }

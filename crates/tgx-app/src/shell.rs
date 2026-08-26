@@ -1,7 +1,9 @@
 //! The window: nav bar, chat list, settings, queue, log.
 
+use crate::login::{Field, LoginDialog, Stage};
 use gpui::prelude::*;
 use gpui::{div, px, Context, Div, SharedString, Window};
+use gpui_component::input::Input;
 use tgx_tg::client::ChatInfo;
 use tgx_tg::config::Settings;
 use tgx_ui::components::{
@@ -28,10 +30,23 @@ pub struct Shell {
     status: SharedString,
     log: Vec<SharedString>,
     progress: Option<(usize, i64)>,
+    /// **One dialog, ever.** An `Option`, not a flag plus a stage, so
+    /// "is one open?" and "which one?" cannot disagree.
+    login: Option<LoginDialog>,
 }
 
 impl Shell {
-    pub fn new() -> Self {
+    /// Build the shell.
+    ///
+    /// The window is taken to match GPUI's constructor shape; nothing here
+    /// needs one, because the login dialog starts closed. [`Self::headless`]
+    /// is the same state without it, so the interaction rules below can be
+    /// tested without opening a window.
+    pub fn new(_window: &mut Window, _cx: &mut Context<Self>) -> Self {
+        Self::headless()
+    }
+
+    fn headless() -> Self {
         let settings = Settings::load();
         let palette = Palette::named(&settings.theme);
         let bridge = crate::bridge::Bridge::new()
@@ -49,7 +64,32 @@ impl Shell {
             status: "Not signed in".into(),
             log: Vec::new(),
             progress: None,
+            login: None,
         }
+    }
+
+    /// Open the sign-in dialog, or **raise the existing one**.
+    ///
+    /// Making a second dialog is what put two modals on top of each
+    /// other, which the user experienced as the app freezing the moment
+    /// it logged them in.
+    fn open_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.login.is_some() {
+            return;
+        }
+        let stage = if self.settings.api_id == 0 || self.settings.api_hash.is_empty() {
+            Stage::Credentials
+        } else {
+            Stage::Phone
+        };
+        let api_id = if self.settings.api_id == 0 {
+            String::new()
+        } else {
+            self.settings.api_id.to_string()
+        };
+        let hash = self.settings.api_hash.clone();
+        let phone = self.settings.phone.clone();
+        self.login = Some(LoginDialog::new(stage, window, cx, &api_id, &hash, &phone));
     }
 
     /// The rows a filter leaves visible.
@@ -93,6 +133,206 @@ impl Shell {
         (total, any_uncounted)
     }
 
+    fn login_panel(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let dialog = self.login.as_ref()?;
+        let p = &self.palette;
+
+        let mut card = div()
+            .w(px(420.0))
+            .bg(p.bg)
+            .border_1()
+            .border_color(p.hairline)
+            .child(
+                div()
+                    .px(px(20.0))
+                    .py(px(16.0))
+                    .child(eyebrow(dialog.stage.title(), p)),
+            )
+            .child(rule(p))
+            .child(
+                div()
+                    .px(px(20.0))
+                    .pt(px(14.0))
+                    .text_size(type_scale::TINY)
+                    .text_color(p.muted)
+                    .child(SharedString::from(dialog.stage.hint())),
+            );
+
+        for field in dialog.stage.fields() {
+            card = card.child(
+                div()
+                    .px(px(20.0))
+                    .pt(px(12.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .text_size(type_scale::MICRO)
+                            .text_color(p.muted)
+                            .child(tgx_ui::components::uppercase(field.label())),
+                    )
+                    .child(Input::new(dialog.state_for(*field))),
+            );
+        }
+
+        if let Some(err) = &dialog.error {
+            card = card.child(
+                div()
+                    .px(px(20.0))
+                    .pt(px(10.0))
+                    .text_size(type_scale::TINY)
+                    .text_color(p.accent)
+                    .child(err.clone()),
+            );
+        }
+
+        let action = dialog.stage.action();
+        let busy = dialog.busy;
+        card = card.child(
+            div()
+                .flex()
+                .justify_between()
+                .px(px(20.0))
+                .py(px(16.0))
+                .child(
+                    div()
+                        .id("login-cancel")
+                        .text_size(type_scale::SMALL)
+                        .text_color(p.muted)
+                        .cursor_pointer()
+                        .child(SharedString::from("Cancel"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.login = None;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
+                        .id("login-go")
+                        .text_size(type_scale::SMALL)
+                        .text_color(if busy { p.muted } else { p.fg })
+                        .cursor_pointer()
+                        .child(SharedString::from(if busy {
+                            "Working\u{2026}"
+                        } else {
+                            action
+                        }))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.submit_login(cx);
+                            cx.notify();
+                        })),
+                ),
+        );
+
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                // A scrim, not a second window. A real second window is what
+                // could end up ordered behind the first while still holding
+                // every click in the application.
+                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.55))
+                .child(card),
+        )
+    }
+
+    /// Advance the sign-in by one step.
+    fn submit_login(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.login.as_ref() else {
+            return;
+        };
+        if dialog.busy {
+            return;
+        }
+        let stage = dialog.stage;
+        let values: Vec<(Field, String)> = stage
+            .fields()
+            .iter()
+            .map(|f| (*f, dialog.value(*f, cx)))
+            .collect();
+        let get = |want: Field| -> String {
+            values
+                .iter()
+                .find(|(f, _)| *f == want)
+                .map(|(_, v)| v.trim().to_string())
+                .unwrap_or_default()
+        };
+
+        // A stale failure must not sit under a fresh attempt.
+        if let Some(d) = self.login.as_mut() {
+            d.error = None;
+        }
+
+        match stage {
+            Stage::Credentials => {
+                let (id, hash) = (get(Field::ApiId), get(Field::ApiHash));
+                match id.parse::<i64>() {
+                    Ok(n) if n > 0 && !hash.is_empty() => {
+                        self.settings.api_id = n;
+                        self.settings.api_hash = hash;
+                        let _ = self.settings.save();
+                        if let Some(d) = self.login.as_mut() {
+                            d.stage = Stage::Phone;
+                        }
+                    }
+                    _ => {
+                        if let Some(d) = self.login.as_mut() {
+                            d.error = Some(
+                                "An api_id is a number, and an api_hash cannot be blank.".into(),
+                            );
+                        }
+                    }
+                }
+            }
+            Stage::Phone => {
+                let phone = get(Field::Phone);
+                if phone.is_empty() {
+                    if let Some(d) = self.login.as_mut() {
+                        d.error = Some("A phone number is needed, with its country code.".into());
+                    }
+                    return;
+                }
+                self.settings.phone = phone;
+                let _ = self.settings.save();
+                if let Some(d) = self.login.as_mut() {
+                    d.busy = true;
+                }
+                let tx = self.bridge.sender();
+                let settings = self.settings.clone();
+                self.bridge
+                    .spawn(async move { crate::actions::request_code(settings, tx).await });
+            }
+            Stage::Code | Stage::Password => {
+                let is_code = stage == Stage::Code;
+                let secret = get(if is_code {
+                    Field::Code
+                } else {
+                    Field::Password
+                });
+                if secret.is_empty() {
+                    if let Some(d) = self.login.as_mut() {
+                        d.error = Some("This cannot be blank.".into());
+                    }
+                    return;
+                }
+                if let Some(d) = self.login.as_mut() {
+                    d.busy = true;
+                }
+                let tx = self.bridge.sender();
+                let settings = self.settings.clone();
+                self.bridge.spawn(async move {
+                    crate::actions::finish_login(settings, secret, is_code, tx).await
+                });
+            }
+        }
+    }
+
     // -- painting ----------------------------------------------------------
 
     fn nav_bar(&self, cx: &mut Context<Self>) -> Div {
@@ -124,9 +364,9 @@ impl Shell {
             if live {
                 slot = slot
                     .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         match i {
-                            0 => this.start_sign_in(),
+                            0 => this.start_sign_in(window, cx),
                             1 => this.start_refresh(),
                             2 => this.start_export(),
                             _ => {}
@@ -161,11 +401,16 @@ impl Shell {
 
     // -- actions -----------------------------------------------------------
 
-    fn start_sign_in(&mut self) {
+    fn start_sign_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Probe the session on disk first: if it is already good, the
+        // dialog never opens and the status bar just says who you are.
         let tx = self.bridge.sender();
         let settings = self.settings.clone();
         self.bridge
             .spawn(async move { crate::actions::sign_in(settings, tx).await });
+        if !self.signed_in {
+            self.open_login(window, cx);
+        }
     }
 
     fn start_refresh(&mut self) {
@@ -503,7 +748,24 @@ impl Shell {
                 Event::Log(s) => self.log.push(s.into()),
                 Event::SignedIn(name) => {
                     self.signed_in = true;
+                    // Success just closes the dialog: the status bar
+                    // already reads "Signed in: <name>", and a modal box
+                    // saying it again is exactly what could end up
+                    // ordered behind the window.
+                    self.login = None;
                     self.status = format!("Signed in: {name}").into();
+                }
+                Event::LoginStage(stage) => {
+                    if let Some(d) = self.login.as_mut() {
+                        d.busy = false;
+                        d.stage = stage;
+                    }
+                }
+                Event::LoginFailed(msg) => {
+                    if let Some(d) = self.login.as_mut() {
+                        d.busy = false;
+                        d.error = Some(msg.into());
+                    }
                 }
                 Event::Chats(chats) => {
                     self.loaded = true;
@@ -546,7 +808,7 @@ impl Render for Shell {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         self.pump();
         let p = self.palette;
-        div()
+        let body = div()
             .flex()
             .flex_col()
             .size_full()
@@ -570,7 +832,12 @@ impl Render for Shell {
                     ),
             )
             .child(rule(&p))
-            .child(self.status_bar())
+            .child(self.status_bar());
+
+        match self.login_panel(_cx) {
+            Some(dialog) => body.child(dialog),
+            None => body,
+        }
     }
 }
 
@@ -592,7 +859,7 @@ mod tests {
     }
 
     fn shell_with(chats: Vec<ChatInfo>) -> Shell {
-        let mut s = Shell::new();
+        let mut s = Shell::headless();
         s.signed_in = true;
         s.loaded = true;
         s.chats = chats;
@@ -603,14 +870,14 @@ mod tests {
     fn the_list_opens_on_not_signed_in() {
         // An empty list is the state this app opens on, and blank is not
         // neutral: it reads as broken.
-        let s = Shell::new();
+        let s = Shell::headless();
         assert_eq!(s.list_state(), ListState::NotSignedIn);
         assert!(s.list_state().empty_state("").is_some());
     }
 
     #[test]
     fn signed_in_with_nothing_loaded_says_so() {
-        let mut s = Shell::new();
+        let mut s = Shell::headless();
         s.signed_in = true;
         assert_eq!(s.list_state(), ListState::SignedInNothingLoaded);
     }
@@ -627,7 +894,7 @@ mod tests {
     #[test]
     fn selection_actions_are_disabled_over_an_empty_list() {
         // Nothing offers to do what it cannot.
-        let s = Shell::new();
+        let s = Shell::headless();
         assert!(!s.selection_actions_enabled());
         let populated = shell_with(vec![chat(1, "a", None)]);
         assert!(populated.selection_actions_enabled());
@@ -670,7 +937,7 @@ mod tests {
 
     #[test]
     fn start_export_needs_a_signed_in_account_and_a_selection() {
-        let mut s = Shell::new();
+        let mut s = Shell::headless();
         assert!(!(s.signed_in && !s.selected.is_empty()));
         s.signed_in = true;
         assert!(!(s.signed_in && !s.selected.is_empty()));

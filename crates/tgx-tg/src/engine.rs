@@ -348,7 +348,7 @@ impl<'a> ChatExporter<'a> {
         // After the read loop, not during it: the read is bounded by Telegram's
         // paging and the downloads are bounded by the pool, so overlapping them
         // buys little and costs a much harder cancel path.
-        for (_, sink) in sinks.iter_mut() {
+        for sink in sinks.values_mut() {
             let jobs = std::mem::take(&mut sink.jobs);
             if jobs.is_empty() {
                 continue;

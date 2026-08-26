@@ -12,7 +12,7 @@
 use crate::config::Settings;
 use grammers_tl_types as tl;
 use serde_json::{json, Map, Value};
-use tgx_media::names::{kind_for, layout, media_type, sanitize_extension, NameBook};
+use tgx_media::names::{kind_for, layout, sanitize_extension, NameBook};
 
 /// A file to fetch once the message has already been written out.
 #[derive(Debug, Clone)]
@@ -62,13 +62,6 @@ pub struct MediaFacts {
     /// The ~180-byte blur preview embedded in the message itself.
     pub stripped: Option<Vec<u8>>,
     pub spoiler: bool,
-}
-
-fn doc_attr<'a>(
-    doc: &'a tl::types::Document,
-    pick: impl Fn(&tl::enums::DocumentAttribute) -> bool,
-) -> Option<&'a tl::enums::DocumentAttribute> {
-    doc.attributes.iter().find(|a| pick(a))
 }
 
 /// The largest `(width, height, bytes)` a photo advertises.
@@ -617,6 +610,9 @@ mod tests {
         // The measured case the media leg caught: folder and media_type
         // deliberately disagree.
         assert_eq!(kind_for("sticker", "video/webm"), "video_files");
-        assert_eq!(media_type("video_files"), Some("video_file"));
+        assert_eq!(
+            tgx_media::names::media_type("video_files"),
+            Some("video_file")
+        );
     }
 }
