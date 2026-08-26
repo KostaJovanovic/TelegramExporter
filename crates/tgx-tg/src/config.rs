@@ -1,7 +1,9 @@
 //! Portable paths and persisted settings.
 //!
 //! **All state lives beside the executable**, never in AppData and never in the
-//! registry. `TelegramExporterData/` holds the session — which is a *bearer
+//! registry — with one exception: a binary running out of `target/` climbs back
+//! to the workspace root, because `cargo clean` would otherwise delete the
+//! session key and every export with it. `TelegramExporterData/` holds the session — which is a *bearer
 //! credential*: anyone who can read it can act as the account — so the folder
 //! is ACL-restricted to the current user on creation, and the app says so in
 //! the log when that fails rather than leaving you to assume it worked.
@@ -16,11 +18,39 @@ use std::path::PathBuf;
 
 /// The directory the app keeps its state in: beside the exe when built, the
 /// repo root when run from source.
+///
+/// The second half of that sentence is not a nicety. "Beside the exe" during
+/// development means `target\release\`, and `cargo clean` deletes `target` —
+/// which would take the session key and every export with it. A build artefact
+/// directory is the one place state must never live, so a binary running out
+/// of one climbs back to the workspace root instead.
 pub fn app_dir() -> PathBuf {
-    std::env::current_exe()
+    let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("."))
+        .unwrap_or_else(|| PathBuf::from("."));
+    match workspace_above_target(&exe_dir) {
+        Some(root) if root.join("Cargo.toml").is_file() => root,
+        _ => exe_dir,
+    }
+}
+
+/// The directory holding `target/`, if `dir` is inside one.
+///
+/// Covers `target/debug`, `target/release` and the cross-compilation shape
+/// `target/<triple>/release`. Takes the *last* `target` component rather than
+/// the first, so a project that happens to live under a folder called `target`
+/// is not mistaken for its own build directory.
+fn workspace_above_target(dir: &std::path::Path) -> Option<PathBuf> {
+    let mut found = None;
+    let mut prefix = PathBuf::new();
+    for part in dir.components() {
+        prefix.push(part);
+        if part.as_os_str() == "target" {
+            found = prefix.parent().map(PathBuf::from);
+        }
+    }
+    found
 }
 
 pub fn data_dir() -> PathBuf {
@@ -267,6 +297,65 @@ fn restrict_to_current_user(dir: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn a_binary_run_from_target_keeps_its_state_in_the_repo() {
+        // cargo clean deletes target. If the session key and the exports live
+        // under it, a routine clean logs you out and takes the exports too.
+        assert_eq!(
+            workspace_above_target(Path::new("C:/proj/telegram_rust/target/release")),
+            Some(PathBuf::from("C:/proj/telegram_rust"))
+        );
+        assert_eq!(
+            workspace_above_target(Path::new("C:/proj/telegram_rust/target/debug")),
+            Some(PathBuf::from("C:/proj/telegram_rust"))
+        );
+        // Cross-compiled: target/<triple>/release.
+        assert_eq!(
+            workspace_above_target(Path::new("/p/app/target/x86_64-pc-windows-msvc/release")),
+            Some(PathBuf::from("/p/app"))
+        );
+    }
+
+    #[test]
+    fn the_real_state_directory_is_never_inside_target() {
+        // Not a unit test of the helper: this one runs from
+        // target/debug/deps/, so it checks the answer app_dir() actually
+        // gives on this machine, through current_exe and the Cargo.toml probe.
+        let dir = data_dir();
+        assert!(
+            !dir.components().any(|c| c.as_os_str() == "target"),
+            "state would be destroyed by cargo clean: {}",
+            dir.display()
+        );
+        assert!(
+            dir.parent().is_some_and(|p| p.join("Cargo.toml").is_file()),
+            "expected the workspace root, got {}",
+            dir.display()
+        );
+    }
+
+    #[test]
+    fn a_shipped_binary_stays_beside_itself() {
+        // The portable design is the point everywhere else: an exe on a stick
+        // keeps its data on the stick. Only a build directory is special.
+        assert_eq!(
+            workspace_above_target(Path::new("D:/TelegramExporter")),
+            None
+        );
+        assert_eq!(workspace_above_target(Path::new("/usr/local/bin")), None);
+    }
+
+    #[test]
+    fn the_last_target_wins() {
+        // A project that happens to live under a folder called `target` is not
+        // its own build directory.
+        assert_eq!(
+            workspace_above_target(Path::new("/target/myapp/target/release")),
+            Some(PathBuf::from("/target/myapp"))
+        );
+    }
 
     #[test]
     fn an_unknown_key_is_dropped_not_fatal() {

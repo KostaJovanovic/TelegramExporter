@@ -57,9 +57,15 @@ cargo run -p tgx-tg  --bin tgx -- export "Dev Team"
 ```
 
 You need your own `api_id` / `api_hash` from
-[my.telegram.org](https://my.telegram.org) → **API development tools**. Put
-them in `TelegramExporterData/settings.json`, or pass them as `TG_API_ID` and
-`TG_API_HASH`.
+[my.telegram.org](https://my.telegram.org) → **API development tools**. The
+window asks for them on first run; the CLI reads them from
+`TelegramExporterData/settings.json` or from `TG_API_ID` / `TG_API_HASH`.
+
+**Everything stays in this folder.** `TelegramExporterData/` holds the settings
+and the session; `Exports/` holds the output; both are gitignored. State lives
+beside the executable, so a copied exe carries its own data — except when the
+exe is in `target/`, where it climbs back to the repo root instead, because
+`cargo clean` would otherwise take the session key and the exports with it.
 
 You sign in as *yourself*, not as a bot — bots cannot read chat history.
 
@@ -132,7 +138,7 @@ cargo test --all
 cargo build --release -p tgx-app
 ```
 
-The release binary is **~9.8 MB**, against the Python build's 46.4 MB. Desktop's
+The release binary is **17.8 MB**, against the Python build's 46.4 MB. Desktop's
 stylesheet, script and 42 icons are embedded in it, so there is no `_MEIPASS`
 branch, no spec file and no `datas` list.
 
