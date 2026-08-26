@@ -68,9 +68,11 @@ fn every_html_page_is_reproduced_exactly() {
 fn media_names_land_where_desktop_put_them() {
     let Some(dir) = corpus_dir() else { return };
     let topics = topic_folders(&dir).expect("reading the corpus");
-    // Not asserted at zero. The media leg's known ceiling is the custom-emoji
-    // repeats documented in ROADMAP.md — 830 of 836 names on the reference —
-    // so this guards the *shape* of the run, and the burn-down number stays in
-    // the leg's own printed output where a change to it is visible.
-    let _ = media_leg::run(&topics).expect("running the media leg");
+    // The leg already knows its own ceiling — 830 of 836 on the reference, the
+    // six being custom emoji a JSON replay cannot see — and returns 1 when the
+    // run falls below it. Discarding that made the assertion decorative: the
+    // count could go to 0 of 836 and the suite would stay green, because the
+    // number lives in stdout and cargo captures it.
+    let failures = media_leg::run(&topics).expect("running the media leg");
+    assert_eq!(failures, 0, "media names fell below the known ceiling");
 }

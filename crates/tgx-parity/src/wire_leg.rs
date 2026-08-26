@@ -71,10 +71,23 @@ const MAY_DRIFT: &[&str] = &[
 ];
 
 pub fn run(ours: &Path, theirs: &Path) -> Result<u32> {
-    let mine = topics_by_name(ours)?;
+    let mut mine = topics_by_name(ours)?;
     let ref_ = topics_by_name(theirs)?;
     anyhow::ensure!(!mine.is_empty(), "no topics under {}", ours.display());
     anyhow::ensure!(!ref_.is_empty(), "no topics under {}", theirs.display());
+
+    // A non-forum chat is one folder named after the chat, and a chat can be
+    // renamed between two runs. With exactly one topic a side there is nothing
+    // to be ambiguous about, so pair them and say so rather than reporting two
+    // half-empty topics that are plainly the same one.
+    if mine.len() == 1 && ref_.len() == 1 {
+        let (a, b) = (mine.keys().next().unwrap(), ref_.keys().next().unwrap());
+        if a != b {
+            println!("  pairing {a:?} with {b:?} — one topic a side");
+            let only = mine.remove(&a.clone()).expect("just read the key");
+            mine.insert(b.clone(), only);
+        }
+    }
 
     let mut failures = 0u32;
     let names: BTreeSet<&String> = mine.keys().chain(ref_.keys()).collect();
@@ -129,6 +142,20 @@ pub fn run(ours: &Path, theirs: &Path) -> Result<u32> {
             MAY_DRIFT.join("/")
         );
     }
+    if !totals.absent.is_empty() {
+        let n: usize = totals.absent.values().sum();
+        println!("absent:       {n} fields the reference writes and we never do");
+        for (key, n) in &totals.absent {
+            println!("              {key}: {n}");
+        }
+    }
+    if !totals.dangling.is_empty() {
+        let n: usize = totals.dangling.values().sum();
+        println!("dangling:     {n} media paths in our JSON with no file behind them");
+        for (key, n) in &totals.dangling {
+            println!("              {key}: {n}");
+        }
+    }
     Ok(failures)
 }
 
@@ -142,6 +169,8 @@ struct Totals {
     field_mismatches: usize,
     drifted: usize,
     skips_by_key: BTreeMap<String, (usize, usize)>,
+    absent: BTreeMap<String, usize>,
+    dangling: BTreeMap<String, usize>,
 }
 
 impl Totals {
@@ -150,6 +179,12 @@ impl Totals {
             let slot = self.skips_by_key.entry(key.clone()).or_default();
             slot.0 += n;
             slot.1 += agreed;
+        }
+        for (key, n) in &r.absent {
+            *self.absent.entry(key.clone()).or_default() += n;
+        }
+        for (key, n) in &r.dangling {
+            *self.dangling.entry(key.clone()).or_default() += n;
         }
         self.shared += r.shared;
         self.missing += r.missing.len();
@@ -173,6 +208,9 @@ struct Report {
     by_field: BTreeMap<String, usize>,
     examples: Vec<String>,
     drifted: usize,
+    absent: BTreeMap<String, usize>,
+    dangling: BTreeMap<String, usize>,
+    dangling_examples: Vec<String>,
 }
 
 impl Report {
@@ -181,6 +219,8 @@ impl Report {
             && self.extra.is_empty()
             && self.mismatched_messages == 0
             && self.skips == self.skips_agreed
+            && self.absent.is_empty()
+            && self.dangling.is_empty()
     }
 
     fn print(&self) {
@@ -230,6 +270,21 @@ impl Report {
                 println!("      {e}");
             }
         }
+        if !self.absent.is_empty() {
+            println!("    fields the reference writes and we never do:");
+            for (field, n) in &self.absent {
+                println!("      {field}: {n}");
+            }
+        }
+        if !self.dangling.is_empty() {
+            println!("    media we name in the JSON but did not put on disk:");
+            for (field, n) in &self.dangling {
+                println!("      {field}: {n}");
+            }
+            for e in &self.dangling_examples {
+                println!("      {e}");
+            }
+        }
     }
 }
 
@@ -242,8 +297,8 @@ fn head(ids: &[i64]) -> String {
     }
 }
 
-fn compare(ours: &Path, theirs: &Path) -> Result<Report> {
-    let a = messages_by_id(ours)?;
+fn compare(ours_root: &Path, theirs: &Path) -> Result<Report> {
+    let a = messages_by_id(ours_root)?;
     let b = messages_by_id(theirs)?;
 
     let ids_a: BTreeSet<i64> = a.keys().copied().collect();
@@ -261,6 +316,9 @@ fn compare(ours: &Path, theirs: &Path) -> Result<Report> {
         by_field: BTreeMap::new(),
         examples: Vec::new(),
         drifted: 0,
+        absent: BTreeMap::new(),
+        dangling: BTreeMap::new(),
+        dangling_examples: Vec::new(),
     };
 
     for id in ids_a.intersection(&ids_b) {
@@ -288,6 +346,39 @@ fn compare(ours: &Path, theirs: &Path) -> Result<Report> {
                         y.unwrap_or("downloaded")
                     ));
                 }
+            }
+        }
+
+        // --- a path we wrote down but never wrote out -----------------------
+        // Only ours is checked: the reference may legitimately be the text-only
+        // corpus, whose media tree was never copied. A name in the JSON with no
+        // file behind it is a broken image in the HTML and a lost attachment,
+        // and no replay leg can see it — the three that diff names all diff
+        // *names*, and a name matches whether or not the bytes arrived.
+        for key in ["photo", "file", "thumbnail", "stripped_thumbnail"] {
+            let Some(v) = m.get(key).and_then(Value::as_str) else {
+                continue;
+            };
+            // Desktop's size-limit note occupies the field a path would.
+            if v.starts_with('(') || ours_root.join(v).is_file() {
+                continue;
+            }
+            *report.dangling.entry(key.to_string()).or_default() += 1;
+            if report.dangling_examples.len() < 5 {
+                report.dangling_examples.push(format!("{id} {key}: {v}"));
+            }
+        }
+
+        // --- a field the reference writes and we never do -------------------
+        // `reactions` sits in MAY_DRIFT because its *value* moves between two
+        // runs. That licence must not extend to its absence: an exporter that
+        // emits no reactions at all would otherwise score as honest drift,
+        // which is exactly what happened — 963 messages carried reactions in
+        // the reference, none in ours, and the leg called it "differ only in
+        // time-varying fields".
+        for key in n.keys() {
+            if !m.contains_key(key) {
+                *report.absent.entry(key.clone()).or_default() += 1;
             }
         }
 
@@ -359,20 +450,29 @@ fn messages_by_id(topic: &Path) -> Result<BTreeMap<i64, Map<String, Value>>> {
     Ok(out)
 }
 
-/// Topic folders keyed by folder name, so two trees pair up by topic.
+/// Topic folders keyed by the `name` **inside** `result.json`, not by folder.
 ///
-/// A forum export is one folder per topic and the names come from the topic
-/// titles, so they line up across runs. When both sides hold exactly one topic
-/// they are paired regardless of name — a non-forum chat is named after the
-/// chat, and the two runs may have used different output roots.
+/// A forum export is one folder per topic, but the two sides do not name those
+/// folders alike: Desktop uses the bare topic title, we prefix the topic id, so
+/// `ćaskanje` and `0001 - ćaskanje` are one topic under two names. Keying on the
+/// folder made every real comparison degenerate — against the reference run all
+/// eight folders came back "only in ours" and "we did not export this topic",
+/// so the leg reported eight failures having compared no message at all. That
+/// reads like a total export failure rather than a harness that cannot pair its
+/// inputs. The title inside the file is the thing both sides agree on.
 fn topics_by_name(root: &Path) -> Result<BTreeMap<String, PathBuf>> {
     let folders = crate::topic_folders(root)?;
     let mut out = BTreeMap::new();
     for f in &folders {
-        let name = f
+        let folder = f
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
+        let name = std::fs::read_to_string(f.join("result.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+            .and_then(|v| v.get("name")?.as_str().map(str::to_string))
+            .unwrap_or(folder);
         out.insert(name, f.clone());
     }
     Ok(out)
@@ -385,6 +485,82 @@ mod tests {
 
     fn map(v: Value) -> Map<String, Value> {
         v.as_object().unwrap().clone()
+    }
+
+    /// Write a one-topic export tree and hand back its root.
+    fn tree(tag: &str, folder: &str, name: &str, messages: Value) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("tgx-wire-{tag}-{}", std::process::id()));
+        let topic = root.join(folder);
+        std::fs::create_dir_all(&topic).unwrap();
+        let body = json!({"name": name, "type": "public_supergroup", "id": 1,
+                          "messages": messages});
+        std::fs::write(topic.join("result.json"), body.to_string()).unwrap();
+        root
+    }
+
+    #[test]
+    fn a_topic_is_paired_by_its_title_not_its_folder() {
+        // Desktop writes `ćaskanje`; we write `0001 - ćaskanje`. Keyed on the
+        // folder these never met, and the leg called a clean export eight
+        // failures without comparing one message.
+        let ours = tree("ours", "0001 - ćaskanje", "ćaskanje", json!([]));
+        let theirs = tree("theirs", "ćaskanje", "ćaskanje", json!([]));
+        let a = topics_by_name(&ours).unwrap();
+        let b = topics_by_name(&theirs).unwrap();
+        assert_eq!(a.keys().collect::<Vec<_>>(), b.keys().collect::<Vec<_>>());
+        let _ = std::fs::remove_dir_all(&ours);
+        let _ = std::fs::remove_dir_all(&theirs);
+    }
+
+    #[test]
+    fn a_field_we_never_write_is_not_scored_as_drift() {
+        // `reactions` may drift in *value* between two runs. It may not go
+        // missing: an exporter that emits none at all scored 963 messages as
+        // "differ only in time-varying fields" and the leg stayed green.
+        let msg = |extra: Value| {
+            let mut m = map(json!({"id": 1, "type": "message", "text": ""}));
+            for (k, v) in extra.as_object().unwrap() {
+                m.insert(k.clone(), v.clone());
+            }
+            Value::Array(vec![Value::Object(m)])
+        };
+        let ours = tree("drift-ours", "t", "t", msg(json!({})));
+        let theirs = tree(
+            "drift-theirs",
+            "t",
+            "t",
+            msg(json!({"reactions": [{"type": "emoji", "count": 1}]})),
+        );
+        let r = compare(&ours.join("t"), &theirs.join("t")).unwrap();
+        assert_eq!(r.absent.get("reactions"), Some(&1), "absence went unseen");
+        assert!(!r.clean(), "a field we never write must fail the leg");
+        let _ = std::fs::remove_dir_all(&ours);
+        let _ = std::fs::remove_dir_all(&theirs);
+    }
+
+    #[test]
+    fn a_media_path_with_no_file_behind_it_is_caught() {
+        // Every replay leg diffs *names*, and a name matches whether or not the
+        // bytes arrived. 1,546 thumbnail paths in a live export pointed at
+        // nothing and all three legs were green.
+        let one = |v: Value| Value::Array(vec![v]);
+        let ours = tree(
+            "dangle-ours",
+            "t",
+            "t",
+            one(json!({"id": 1, "type": "message", "thumbnail": "files/a.jpg_thumb.jpg"})),
+        );
+        let theirs = tree(
+            "dangle-theirs",
+            "t",
+            "t",
+            one(json!({"id": 1, "type": "message", "thumbnail": "files/a.jpg_thumb.jpg"})),
+        );
+        let r = compare(&ours.join("t"), &theirs.join("t")).unwrap();
+        assert_eq!(r.dangling.get("thumbnail"), Some(&1));
+        assert!(!r.clean());
+        let _ = std::fs::remove_dir_all(&ours);
+        let _ = std::fs::remove_dir_all(&theirs);
     }
 
     #[test]

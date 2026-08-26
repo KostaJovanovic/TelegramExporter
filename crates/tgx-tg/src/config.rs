@@ -128,6 +128,14 @@ pub struct Settings {
     // Chat list presentation
     pub sort_mode: String,
     pub group_by_type: bool,
+    /// Category buckets the user has folded away.
+    ///
+    /// Remembered for the same reason the sort is: someone who folds Bots away
+    /// has said something about how they want the list to look, and making them
+    /// say it again on every launch is the interface forgetting on purpose. An
+    /// unknown name here is simply a category that no longer exists and is
+    /// ignored, so a file written by another build still opens.
+    pub folded_categories: Vec<String>,
 
     /// "dark" or "light". Anything else falls back to the default, so an edited
     /// settings file cannot leave the app unreadable.
@@ -160,6 +168,7 @@ impl Default for Settings {
             page_size: 1000,
             sort_mode: "recent".into(),
             group_by_type: true,
+            folded_categories: Vec::new(),
             theme: "dark".into(),
         }
     }
@@ -168,7 +177,13 @@ impl Default for Settings {
 impl Settings {
     pub fn size_limit_bytes(&self) -> Option<i64> {
         if self.size_limit_mb > 0 {
-            Some(self.size_limit_mb * 1024 * 1024)
+            // Saturating, because this number comes out of `settings.json` and
+            // is therefore untrusted: `9223372036854775807` would wrap to a
+            // *negative* limit, and every file in the chat would compare as
+            // "larger than the limit" and be skipped. A limit too big to
+            // represent is the same intent as no limit at all, so it clamps to
+            // the largest one instead of inverting the test.
+            Some(self.size_limit_mb.saturating_mul(1024 * 1024))
         } else {
             None
         }
@@ -373,6 +388,33 @@ fn restrict_to_current_user(dir: &std::path::Path) {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn an_absurd_size_limit_does_not_wrap_into_a_negative_one() {
+        // `settings.json` is untrusted input. Multiplying by 1 MiB overflowed,
+        // and a negative limit compares *every* file as too large — an export
+        // that silently downloads nothing while reporting a 20 MB limit.
+        let s = Settings {
+            size_limit_mb: i64::MAX,
+            ..Settings::default()
+        };
+        let limit = s.size_limit_bytes().expect("a positive limit");
+        assert!(limit > 0, "the limit wrapped: {limit}");
+        assert_eq!(limit, i64::MAX);
+
+        // And the ordinary case still means what it says.
+        let s = Settings {
+            size_limit_mb: 20,
+            ..Settings::default()
+        };
+        assert_eq!(s.size_limit_bytes(), Some(20 * 1024 * 1024));
+        // Zero is "no limit", not "skip everything".
+        let s = Settings {
+            size_limit_mb: 0,
+            ..Settings::default()
+        };
+        assert_eq!(s.size_limit_bytes(), None);
+    }
 
     #[test]
     fn a_binary_run_from_target_keeps_its_state_in_the_repo() {

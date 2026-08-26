@@ -20,7 +20,17 @@ pub struct DownloadJob {
     /// Relative to the output root.
     pub dest: String,
     /// Telegram's own thumbnail, if this item has one.
+    ///
+    /// `<full name>_thumb.jpg`, and the value the JSON's `thumbnail` carries.
     pub thumb_dest: Option<String>,
+    /// The inline preview, which is a **different file**: `<stem>_thumb<ext>`.
+    ///
+    /// Desktop renders this one itself and references it only from the HTML —
+    /// it appears in no JSON field, which is why it is easy to miss that a real
+    /// export has both `clip.mp4_thumb.jpg` and `clip_thumb.mp4` sitting beside
+    /// `clip.mp4`. `names::claim_rendered_preview` has always known how to name
+    /// it and nothing ever called it.
+    pub preview_dest: Option<String>,
     pub size: i64,
     /// Bytes to write straight out instead of downloading anything.
     ///
@@ -107,19 +117,29 @@ fn stripped_of(sizes: &[tl::enums::PhotoSize]) -> Option<Vec<u8>> {
 }
 
 /// Byte size of the thumbnail a download would fetch.
+///
+/// **Selected on byte size, and so is the download.** `download::largest_thumb`
+/// has to pick the same entry out of grammers' `PhotoSize`, which exposes
+/// `size()` but no dimensions — so choosing here by area and there by bytes
+/// would let `thumbnail_file_size` describe a different file from the one on
+/// disk. One observable, used by both.
+///
+/// Stripped sizes are excluded outright rather than merely not setting `any`:
+/// they report `0 × 0`, so under an area comparison a stripped entry could win
+/// against a real thumbnail and report the blur preview's length as the
+/// thumbnail's size.
 fn thumb_bytes(thumbs: &[tl::enums::PhotoSize]) -> (i64, bool) {
-    let mut best = (0i64, 0i64);
+    let mut best = 0i64;
     let mut any = false;
     for s in thumbs {
-        let (w, h, size) = size_entry(s);
-        if !matches!(s, tl::enums::PhotoSize::PhotoStrippedSize(_)) {
-            any = true;
+        if matches!(s, tl::enums::PhotoSize::PhotoStrippedSize(_)) {
+            continue;
         }
-        if w * h >= best.0 {
-            best = (w * h, size);
-        }
+        any = true;
+        let (_, _, size) = size_entry(s);
+        best = best.max(size);
     }
-    (best.1, any)
+    (best, any)
 }
 
 /// Read a message's media into [`MediaFacts`].
@@ -359,19 +379,32 @@ pub fn plan(
     }
 
     // Telegram's own thumbnail. **A file skipped for size keeps its thumbnail
-    // record** — 1,287 of the 1,786 skipped files in the reference carry both,
-    // and the 499 that do not are exactly those with no thumbnail. A skipped
-    // *photo* never gets one, 62 of 62.
+    // *key*, but not a path** — 1,287 of the 1,786 skipped files in the
+    // reference carry `"thumbnail": "(File exceeds maximum size…)"`, the same
+    // placeholder as the file itself, and the 499 that do not are exactly those
+    // with no thumbnail. A skipped *photo* never gets one, 62 of 62.
+    //
+    // This read the reference as "keeps its thumbnail record" and wrote a real
+    // path for all 1,287. That is wrong twice: it disagrees with Desktop, and
+    // it promises a file the skip means we are never going to fetch — the
+    // dangling-reference failure `download.rs` argues against, and invisible to
+    // `missing_media.txt` because no job was ever queued to fail.
     let mut thumb_dest = None;
     if facts.has_thumb && !is_photo {
-        let base = path.clone().unwrap_or_else(|| format!("{subdir}/{name}"));
-        let claimed = book.claim_telegram_thumb(&base);
-        fields.insert("thumbnail".into(), json!(claimed.clone()));
-        if facts.thumb_size > 0 {
-            fields.insert("thumbnail_file_size".into(), json!(facts.thumb_size));
-        }
-        if write {
-            thumb_dest = Some(claimed);
+        match &path {
+            Some(dest) => {
+                let claimed = book.claim_telegram_thumb(dest);
+                fields.insert("thumbnail".into(), json!(claimed.clone()));
+                if facts.thumb_size > 0 {
+                    fields.insert("thumbnail_file_size".into(), json!(facts.thumb_size));
+                }
+                thumb_dest = Some(claimed);
+            }
+            // Skipped. Desktop still records that a thumbnail exists, with the
+            // same note it put in `file`, and reserves no name for it.
+            None => {
+                fields.insert("thumbnail".into(), json!(placeholder));
+            }
         }
     }
 
@@ -399,10 +432,22 @@ pub fn plan(
     }
 
     // --- the download ------------------------------------------------------
+    // The inline preview, for the two kinds Desktop shows one for that are not
+    // videos. A video's inline image is Telegram's own thumbnail, already
+    // claimed above; a photo's and a sticker's is a downscale of the file
+    // itself, on its own name. Claimed here rather than derived later because
+    // `claim` may add a `(1)` on collision, and a preview computed from the
+    // path afterwards would miss it and point at nothing.
+    let preview_dest = match (&path, facts.kind) {
+        (Some(dest), "photos" | "stickers") => Some(book.claim_rendered_preview(dest)),
+        _ => None,
+    };
+
     let job = match &path {
         Some(dest) => Some(DownloadJob {
             dest: dest.clone(),
             thumb_dest,
+            preview_dest,
             size: facts.size,
             inline_bytes: None,
             message_id,
@@ -417,6 +462,7 @@ pub fn plan(
             DownloadJob {
                 dest,
                 thumb_dest: None,
+                preview_dest: None,
                 size: bytes.len() as i64,
                 inline_bytes: Some(bytes.clone()),
                 message_id,
@@ -558,9 +604,19 @@ mod tests {
     }
 
     #[test]
-    fn a_skipped_document_keeps_its_thumbnail_record() {
-        // 1,287 of the reference's 1,786 skipped files carry both `thumbnail`
-        // and `thumbnail_file_size`.
+    fn a_skipped_document_records_its_thumbnail_as_skipped_too() {
+        // 1,287 of the reference's 1,786 skipped files carry a `thumbnail`
+        // key — and its value is the *placeholder*, the same note Desktop put
+        // in `file`, not a path. Re-measured against the reference:
+        //
+        //   1287  file skipped, thumbnail = placeholder
+        //    499  file skipped, no thumbnail key
+        //      0  file skipped, thumbnail = a path
+        //
+        // This test previously asserted the path, which is where the belief
+        // came from that a skipped file "keeps its thumbnail record". It kept
+        // the key, not the file — and asserting the path made the export
+        // promise 1,287 thumbnails it had no job queued to fetch.
         let mut book = NameBook::new();
         let s = Settings {
             size_limit_mb: 1,
@@ -585,9 +641,49 @@ mod tests {
         };
         let (f, job) = plan(&facts, 1, "s", &mut book, &s);
         assert_eq!(f["file"], TOO_LARGE);
+        assert_eq!(f["thumbnail"], TOO_LARGE);
+        // No size either: there is no file for it to be the size of.
+        assert!(f.get("thumbnail_file_size").is_none());
+        assert!(job.is_none(), "the file itself is not fetched");
+        // And no name was reserved for a thumbnail nobody will fetch.
+        assert_eq!(book.counter("thumb"), 0);
+    }
+
+    #[test]
+    fn a_saved_document_queues_its_thumbnail_for_download() {
+        // The other half of the same bug: `thumb_dest` was written by the plan
+        // and read by nothing, so a `thumbnail` path reached `result.json` with
+        // no download behind it — 1,559 dangling references in the last live
+        // export, none of them in `missing_media.txt` because no job existed to
+        // fail. The plan's job must carry the destination.
+        let mut book = NameBook::new();
+        let facts = MediaFacts {
+            kind: "video_files",
+            media_type: Some("video_file"),
+            file_name: Some("clip.mp4".into()),
+            mime_type: "video/mp4".into(),
+            size: 1024,
+            width: 1920,
+            height: 1080,
+            duration: 30,
+            sticker_emoji: None,
+            performer: None,
+            title: None,
+            thumb_size: 4096,
+            has_thumb: true,
+            stripped: None,
+            spoiler: false,
+        };
+        let (f, job) = plan(&facts, 1, "s", &mut book, &settings());
+        assert_eq!(f["file"], "video_files/clip.mp4");
         assert_eq!(f["thumbnail"], "video_files/clip.mp4_thumb.jpg");
         assert_eq!(f["thumbnail_file_size"], 4096);
-        assert!(job.is_none(), "the file itself is not fetched");
+        let job = job.expect("a saved file is fetched");
+        assert_eq!(
+            job.thumb_dest.as_deref(),
+            Some("video_files/clip.mp4_thumb.jpg"),
+            "the JSON named a thumbnail the pool was never told to fetch"
+        );
     }
 
     #[test]

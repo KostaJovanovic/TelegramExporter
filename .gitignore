@@ -20,3 +20,7 @@ Exports/
 # people, and this repository has a CI workflow — that is, a push publishes it.
 # Removing this line commits those messages, and git keeps them for good.
 /reference/
+
+# Bytecode from the scripts in tools/. Regenerated on every run and specific to
+# one interpreter version, so committing it only ever produces conflicts.
+__pycache__/

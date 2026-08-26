@@ -14,6 +14,7 @@
 
 use anyhow::{anyhow, Result};
 use std::io::Write;
+use tgx_tg::cancel::Cancel;
 use tgx_tg::client::Session;
 use tgx_tg::config::Settings;
 use tgx_tg::dialogs;
@@ -21,6 +22,14 @@ use tgx_tg::engine::{ChatExporter, Progress};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // The same file the window writes, for the same reason: this binary exists
+    // to exercise the wire, and the wire is the one part of the pipeline with
+    // no parity leg over it. `RUST_LOG=debug` here is the closest thing to a
+    // trace of what Telegram actually sent.
+    if let Err(e) = tgx_tg::logging::init() {
+        eprintln!("could not open the log: {e}");
+    }
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("help");
 
@@ -68,6 +77,64 @@ fn prompt(label: &str) -> Result<String> {
     Ok(line.trim().to_string())
 }
 
+/// Like `prompt`, but for the two-factor password: it must not land in
+/// terminal scrollback, so the console's echo is turned off for the read.
+/// Windows-only — this project targets Windows first (see CLAUDE.md) — and
+/// implemented with a direct `kernel32` call rather than pulling in a crate
+/// like `rpassword` for three functions worth of FFI. `windows-sys` is
+/// already in the dependency tree transitively, but not as a dependency of
+/// this crate, so declaring it here would still be a new line in
+/// `Cargo.toml` for one feature; a hand-written `extern "system"` block is
+/// smaller than that.
+#[cfg(windows)]
+fn prompt_hidden(label: &str) -> Result<String> {
+    use std::os::raw::c_void;
+
+    const STD_INPUT_HANDLE: i32 = -10;
+    const ENABLE_ECHO_INPUT: u32 = 0x0004;
+    const INVALID_HANDLE_VALUE: *mut c_void = -1isize as *mut c_void;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(std_handle: i32) -> *mut c_void;
+        fn GetConsoleMode(console_handle: *mut c_void, mode: *mut u32) -> i32;
+        fn SetConsoleMode(console_handle: *mut c_void, mode: u32) -> i32;
+    }
+
+    print!("{label}: ");
+    std::io::stdout().flush()?;
+
+    // Piped input (no console attached, e.g. under CI) has no mode to read —
+    // fall through and read normally rather than failing the login.
+    let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) };
+    let mut original_mode: u32 = 0;
+    let echo_was_disabled = handle != INVALID_HANDLE_VALUE
+        && !handle.is_null()
+        && unsafe { GetConsoleMode(handle, &mut original_mode) } != 0
+        && unsafe { SetConsoleMode(handle, original_mode & !ENABLE_ECHO_INPUT) } != 0;
+
+    let mut line = String::new();
+    let read = std::io::stdin().read_line(&mut line);
+
+    // Restore before the `?` below, so a read error cannot leave the console
+    // permanently silent.
+    if echo_was_disabled {
+        unsafe { SetConsoleMode(handle, original_mode) };
+    }
+    // The console never saw the Enter key's newline echoed, since echo was
+    // off for the whole line — print it ourselves so the next prompt does
+    // not run on the same line.
+    println!();
+
+    read?;
+    Ok(line.trim().to_string())
+}
+
+#[cfg(not(windows))]
+fn prompt_hidden(label: &str) -> Result<String> {
+    prompt(label)
+}
+
 async fn login(settings: &Settings) -> Result<()> {
     let mut session = Session::connect(settings).await?;
     if session.is_authorized().await? {
@@ -85,7 +152,7 @@ async fn login(settings: &Settings) -> Result<()> {
     match session.sign_in(&code).await? {
         LoginStep::Ready => {}
         LoginStep::NeedPassword => {
-            let password = prompt("two-factor password")?;
+            let password = prompt_hidden("two-factor password")?;
             session.check_password(&password).await?;
         }
         LoginStep::NeedCode => return Err(anyhow!("Telegram wanted another code")),
@@ -139,7 +206,14 @@ async fn export(settings: &Settings, want: &str) -> Result<()> {
 
     println!("exporting {} ({})", chat.title, chat.kind.label());
 
-    let peer = peer_ref_for(&session, chat).await?;
+    // Two failures, two messages: a chat that has left the dialog list is a
+    // fact about the account, a sweep that did not finish is a fact about the
+    // connection, and telling the user the first when the second happened sends
+    // them looking for a chat they still have.
+    let peer = dialogs::peer_ref_for(&session.client, chat.id)
+        .await
+        .map_err(|e| anyhow!("looking up {}: {e}", chat.title))?
+        .ok_or_else(|| anyhow!("{} is no longer in the dialog list", chat.title))?;
 
     let topics = if chat.is_forum && settings.split_topics {
         let t = dialogs::list_topics(&session.client, peer)
@@ -177,8 +251,29 @@ async fn export(settings: &Settings, want: &str) -> Result<()> {
         Progress::Log(msg) => println!("\n  {msg}"),
     };
 
+    // Ctrl-C stops the export the way the window's Stop button does, rather
+    // than killing the process: the JSON is streamed, so a run torn down
+    // mid-write leaves a **zero-byte** file, not a partial one. Everything
+    // fetched up to the key press is closed and kept.
+    let cancel = Cancel::new();
+    {
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!("\nstopping — closing the export so nothing is left empty");
+                cancel.cancel();
+            }
+            // A second Ctrl-C is the user saying they meant it. tokio's handler
+            // suppresses the default terminate, so without this the key does
+            // nothing at all the second time and the wait looks like a hang.
+            if tokio::signal::ctrl_c().await.is_ok() {
+                std::process::exit(130);
+            }
+        });
+    }
+
     let result = exporter
-        .run(chat, peer, &topics, &root, &mut on_progress)
+        .run(chat, peer, &topics, &root, &mut on_progress, &cancel)
         .await?;
 
     println!();
@@ -225,22 +320,4 @@ async fn export(settings: &Settings, want: &str) -> Result<()> {
         );
     }
     Ok(())
-}
-
-/// Find the peer reference for a chat we listed.
-async fn peer_ref_for(
-    session: &Session,
-    chat: &tgx_tg::client::ChatInfo,
-) -> Result<grammers_client::session::types::PeerRef> {
-    let mut iter = session.client.iter_dialogs();
-    while let Some(d) = iter
-        .next()
-        .await
-        .map_err(|e| anyhow!("listing chats: {e}"))?
-    {
-        if d.peer.id().bare_id() == Some(chat.id) {
-            return Ok(d.peer_ref());
-        }
-    }
-    Err(anyhow!("{} is no longer in the dialog list", chat.title))
 }

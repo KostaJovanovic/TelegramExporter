@@ -254,7 +254,17 @@ pub fn base_message(m: &tl::types::Message, names: &NameBook) -> Map<String, Val
         let tl::enums::MessageFwdHeader::Header(fwd) = fwd;
         if let Some(peer) = &fwd.from_id {
             let key = peer_key(peer);
-            out.insert("forwarded_from".into(), json!(names.get(&key.to_string())));
+            // `from_name` is the fallback, not only the hidden-forward case:
+            // Telegram sends both when the source is a peer we may not know,
+            // and preferring the empty lookup over a name we were handed wrote
+            // `"forwarded_from": ""` on 96 messages in a live export.
+            let known = names.get(&key.to_string());
+            let name = if known.is_empty() {
+                fwd.from_name.as_deref().unwrap_or("")
+            } else {
+                known
+            };
+            out.insert("forwarded_from".into(), json!(name));
             out.insert("forwarded_from_id".into(), json!(key.to_string()));
         } else if let Some(name) = &fwd.from_name {
             // A forward from someone who hides their account: a name and
@@ -293,7 +303,12 @@ pub fn base_service(m: &tl::types::MessageService, names: &NameBook) -> Map<Stri
     out.insert("id".into(), json!(m.id));
     out.insert("type".into(), json!("service"));
     put_date(&mut out, "date", "date_unixtime", m.date);
-    if let Some(from) = &m.from_id {
+    // **Falls back to the chat.** A migration notice has no sender — the group
+    // itself did it — and Desktop still writes an actor: the reference's one
+    // `migrate_from_group` carries `"actor": "UA KOLAB"`,
+    // `"actor_id": "channel3586682625"`. Keying only on `from_id` dropped both
+    // keys from that message.
+    if let Some(from) = m.from_id.as_ref().or(Some(&m.peer_id)) {
         let key = peer_key(from);
         out.insert("actor".into(), json!(names.get(&key.to_string())));
         out.insert("actor_id".into(), json!(key.to_string()));
@@ -301,7 +316,417 @@ pub fn base_service(m: &tl::types::MessageService, names: &NameBook) -> Map<Stri
     // Desktop writes these even on a service message, always empty.
     out.insert("text".into(), json!(""));
     out.insert("text_entities".into(), json!([]));
+    if let Some((action, payload)) = service_action(&m.action, m, names) {
+        out.insert("action".into(), json!(action));
+        for (k, v) in payload {
+            out.insert(k, v);
+        }
+    }
     ordered(&out)
+}
+
+/// The presentation-only map the HTML writer reads and `result.json` never
+/// sees.
+///
+/// **The engine never built this.** `grep '"_p"' crates/tgx-tg/src/` returned
+/// nothing, so every key below was absent from every live export, and the
+/// writer took its fallback path each time. What that cost, measured on a real
+/// run against the same chat Desktop exported:
+///
+/// * **Zero `<img>` elements in the entire archive** — 649 in Desktop's, 0 in
+///   ours. `render_media` gates every inline preview on `_p.preview`, so every
+///   photo, sticker, animation and video came out as a coloured placeholder
+///   row: 129 `photo_wrap` and 77 `sticker_wrap` in one topic became 0 and 0,
+///   and `class="fill"` went from 47 to 306.
+/// * Userpic letters derived from the display *string* rather than the name
+///   fields, no self-chosen name colours, no forward-date tooltips, no
+///   `reaction active`, and the `stripped_thumbnail` files we do write on disk
+///   referenced by nothing.
+///
+/// **The html leg reads 4 of 4 anyway**, because `html_leg.rs` lifts `_p` out
+/// of Desktop's own HTML before replaying — it proves the writer, not the
+/// pipeline. This function is the pipeline's half, and `tests/wire.rs` is where
+/// it is held to the same shape.
+///
+/// `out` is the message map as it will be written, so the media paths and
+/// dimensions the plan already decided are read back from it rather than
+/// recomputed from the TL object and allowed to disagree.
+pub fn presentation(
+    m: &tl::types::Message,
+    out: &Map<String, Value>,
+    names: &NameBook,
+    preview_src: Option<&str>,
+) -> Option<Map<String, Value>> {
+    let mut p = Map::new();
+    let s = |k: &str| out.get(k).and_then(Value::as_str).unwrap_or("");
+
+    // Desktop's HTML name is `first + " " + last` **untrimmed**, which is not
+    // the name `result.json` carries — hence a second table rather than a reuse.
+    if let Some(from) = &m.from_id {
+        let key = peer_key(from).to_string();
+        let html = names.html_name(&key);
+        if !html.is_empty() {
+            p.insert("from_name".into(), json!(html));
+        }
+    }
+    if let Some(fwd) = &m.fwd_from {
+        let tl::enums::MessageFwdHeader::Header(fwd) = fwd;
+        if let Some(peer) = &fwd.from_id {
+            let html = names.html_name(&peer_key(peer).to_string());
+            if !html.is_empty() {
+                p.insert("forwarded_from_name".into(), json!(html));
+            }
+        }
+        if let Some((date, _)) = tgx_format::date_pair(fwd.date as i64) {
+            p.insert("forwarded_date".into(), json!(date));
+        }
+    }
+    // Albums are one block in the HTML and separate messages in the JSON.
+    if let Some(g) = m.grouped_id {
+        p.insert("group".into(), json!(g.to_string()));
+    }
+
+    // The avatars Desktop paints, keyed by the peer each belongs to. A hidden
+    // forward has no peer of its own, so Desktop keys it off the message id.
+    let mut initials = Map::new();
+    let mut colours = Map::new();
+    let mut learn = |key: &str| {
+        if key.is_empty() {
+            return;
+        }
+        if let Some(v) = names.initials.get(key) {
+            initials.insert(key.to_string(), json!(v));
+        }
+        if let Some(c) = names.colour.get(key) {
+            // Zero-based here, one-based in the palette: `userpic_class` adds
+            // the one back. The harness records it the same way.
+            colours.insert(key.to_string(), json!(*c - 1));
+        }
+    };
+    learn(s("from_id"));
+    if out.contains_key("forwarded_from") {
+        let fwd_peer = s("forwarded_from_id");
+        let own = m.id.to_string();
+        learn(if fwd_peer.is_empty() { &own } else { fwd_peer });
+    }
+    // Everyone Desktop names under a reaction gets an avatar too.
+    if let Some(Value::Array(rs)) = out.get("reactions") {
+        for r in rs {
+            for who in r
+                .get("recent")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                learn(who.get("from_id").and_then(Value::as_str).unwrap_or(""));
+            }
+        }
+    }
+    if !initials.is_empty() {
+        p.insert("initials".into(), Value::Object(initials));
+    }
+    if !colours.is_empty() {
+        p.insert("colours".into(), Value::Object(colours));
+    }
+
+    // Which reactions *we* pressed, in the order they appear.
+    if let Some(r) = &m.reactions {
+        let tl::enums::MessageReactions::Reactions(r) = r;
+        let chosen: Vec<Value> = r
+            .results
+            .iter()
+            .map(|e| {
+                let tl::enums::ReactionCount::Count(e) = e;
+                json!(e.chosen_order.is_some())
+            })
+            .collect();
+        if chosen.iter().any(|v| v == &json!(true)) {
+            p.insert("reactions_chosen".into(), Value::Array(chosen));
+        }
+    }
+
+    if let Some(pv) = preview_of(out, preview_src) {
+        p.insert("preview".into(), pv);
+    }
+    (!p.is_empty()).then_some(p)
+}
+
+/// The `<img>` Desktop would put inline for this message, and its CSS size.
+///
+/// Reads the paths the plan already wrote, so the preview cannot point
+/// somewhere the media does not. A placeholder — a file skipped for size — has
+/// no preview, which is what makes those messages render as a row.
+fn preview_of(out: &Map<String, Value>, preview_src: Option<&str>) -> Option<Value> {
+    let s = |k: &str| out.get(k).and_then(Value::as_str).unwrap_or("");
+    let n = |k: &str| out.get(k).and_then(Value::as_i64).unwrap_or(0);
+    let is_ph = |v: &str| v.starts_with("(File");
+
+    let sized = |src: &str, box_size: i64| {
+        let (_, css) = tgx_html::preview::preview_size(n("width"), n("height"), box_size);
+        Some(json!({ "src": src, "width": css.0, "height": css.1 }))
+    };
+
+    // **The planner's name, never one derived here.** `claim` adds a `(1)` on
+    // collision, so a path recomputed from `photo` would silently differ from
+    // the file the pool is going to write — the dangling reference this whole
+    // change exists to remove, reintroduced one layer up.
+    let photo = s("photo");
+    if !photo.is_empty() && !is_ph(photo) {
+        return sized(preview_src?, tgx_html::preview::PREVIEW_BOX);
+    }
+    let file = s("file");
+    if file.is_empty() || is_ph(file) {
+        return None;
+    }
+    let kind = s("media_type");
+    let lower = file.to_lowercase();
+    if kind == "sticker" && (lower.ends_with(".webp") || lower.ends_with(".png")) {
+        return sized(preview_src?, tgx_html::preview::STICKER_BOX);
+    }
+    if matches!(kind, "video_file" | "video_message" | "animation") {
+        // A video's inline image is Telegram's own thumbnail — the `thumbnail`
+        // key, already on the map — not a rendered downscale, and only when we
+        // actually saved one.
+        let thumb = s("thumbnail");
+        if !thumb.is_empty() && !is_ph(thumb) {
+            return sized(thumb, tgx_html::preview::PREVIEW_BOX);
+        }
+    }
+    None
+}
+
+/// Desktop's `reactions` array for a message that has any.
+///
+/// **This did not exist either.** 963 of the reference's 6,643 messages carry
+/// reactions and a live export carried none, on any message, ever — and the
+/// wire leg scored it as *honest drift*, because `reactions` is on its
+/// may-differ list. That licence is about a reaction added between two runs
+/// changing a *count*; it was reading a field we never wrote at all as two runs
+/// at two moments. `enrich.rs` has had `reactions_are_truncated` since the
+/// beginning, so the decision about whether to re-fetch was built before the
+/// thing that emits them.
+///
+/// Shape measured from the reference: `{type, count, emoji | document_id}` plus
+/// `recent` when Telegram named anyone — 1,056 of the 1,085 entries have it.
+///
+/// `document_id` stays the numeric id rather than becoming a sticker path. That
+/// is the documented custom-emoji ceiling: Desktop downloads the emoji's
+/// document and rewrites the field to point at it, and the media leg's 830 of
+/// 836 is the same six files.
+pub fn reactions_of(r: &tl::types::MessageReactions, names: &NameBook) -> Option<Value> {
+    let recent = r.recent_reactions.as_deref().unwrap_or(&[]);
+    let mut out = Vec::new();
+    for entry in &r.results {
+        let tl::enums::ReactionCount::Count(entry) = entry;
+        let mut one = Map::new();
+        let (kind, key, value) = match &entry.reaction {
+            tl::enums::Reaction::Emoji(e) => ("emoji", "emoji", json!(e.emoticon)),
+            tl::enums::Reaction::CustomEmoji(e) => (
+                "custom_emoji",
+                "document_id",
+                json!(e.document_id.to_string()),
+            ),
+            // `reactionEmpty` and anything Telegram adds later. Skipped rather
+            // than written as a reaction with no identity.
+            _ => continue,
+        };
+        one.insert("type".into(), json!(kind));
+        one.insert("count".into(), json!(entry.count));
+        one.insert(key.into(), value);
+
+        // Telegram names at most a few reactors per *message*, not per
+        // reaction, so each entry takes the ones whose reaction matches it.
+        let named: Vec<Value> = recent
+            .iter()
+            .filter_map(|p| {
+                let tl::enums::MessagePeerReaction::Reaction(p) = p;
+                if !same_reaction(&p.reaction, &entry.reaction) {
+                    return None;
+                }
+                let key = peer_key(&p.peer_id);
+                let mut m = Map::new();
+                m.insert("from".into(), json!(names.get(&key.to_string())));
+                m.insert("from_id".into(), json!(key.to_string()));
+                if let Some((date, _)) = tgx_format::date_pair(p.date as i64) {
+                    m.insert("date".into(), json!(date));
+                }
+                Some(Value::Object(m))
+            })
+            .collect();
+        if !named.is_empty() {
+            one.insert("recent".into(), Value::Array(named));
+        }
+        out.push(Value::Object(one));
+    }
+    (!out.is_empty()).then(|| Value::Array(out))
+}
+
+fn same_reaction(a: &tl::enums::Reaction, b: &tl::enums::Reaction) -> bool {
+    use tl::enums::Reaction as R;
+    match (a, b) {
+        (R::Emoji(x), R::Emoji(y)) => x.emoticon == y.emoticon,
+        (R::CustomEmoji(x), R::CustomEmoji(y)) => x.document_id == y.document_id,
+        _ => false,
+    }
+}
+
+/// Desktop's `poll` object.
+///
+/// All seven polls in the reference came out of a live export as an ordinary
+/// text message with no `poll` key: `plan::classify` has no `Poll` arm, so the
+/// media was simply not recognised. Shape is fixed — `question`, `closed`,
+/// `total_voters`, `answers[{text, voters, chosen}]` — with no variation across
+/// the seven.
+///
+/// `voters` and `chosen` come from `results`, which Telegram omits entirely
+/// before anyone has voted; a poll in that state reports every answer at zero
+/// rather than losing its answers.
+pub fn poll_of(m: &tl::types::MessageMediaPoll) -> Value {
+    let tl::enums::Poll::Poll(poll) = &m.poll;
+    let tl::enums::PollResults::Results(results) = &m.results;
+    let tallies = results.results.as_deref().unwrap_or(&[]);
+
+    let answers: Vec<Value> = poll
+        .answers
+        .iter()
+        .filter_map(|a| {
+            let tl::enums::PollAnswer::Answer(a) = a else {
+                return None;
+            };
+            let tally = tallies.iter().find_map(|t| {
+                let tl::enums::PollAnswerVoters::Voters(t) = t;
+                (t.option == a.option).then_some(t)
+            });
+            let tl::enums::TextWithEntities::Entities(text) = &a.text;
+            let mut one = Map::new();
+            one.insert("text".into(), json!(text.text));
+            one.insert(
+                "voters".into(),
+                json!(tally.and_then(|t| t.voters).unwrap_or(0)),
+            );
+            one.insert("chosen".into(), json!(tally.is_some_and(|t| t.chosen)));
+            Some(Value::Object(one))
+        })
+        .collect();
+
+    let tl::enums::TextWithEntities::Entities(question) = &poll.question;
+    let mut out = Map::new();
+    out.insert("question".into(), json!(question.text));
+    out.insert("closed".into(), json!(poll.closed));
+    out.insert(
+        "total_voters".into(),
+        json!(results.total_voters.unwrap_or(0)),
+    );
+    out.insert("answers".into(), Value::Array(answers));
+    Value::Object(out)
+}
+
+/// Desktop's `location_information`, and the live-location period beside it.
+///
+/// Two messages in the reference carry a plain point and one carries a live
+/// one; a live export wrote neither, for the same reason as the poll — no arm
+/// in `classify`, so the media went unrecognised and the message came out as
+/// bare text.
+pub fn location_of(media: &tl::enums::MessageMedia) -> Option<(Value, Option<i32>)> {
+    let (geo, period) = match media {
+        tl::enums::MessageMedia::Geo(g) => (&g.geo, None),
+        tl::enums::MessageMedia::GeoLive(g) => (&g.geo, Some(g.period)),
+        _ => return None,
+    };
+    let tl::enums::GeoPoint::Point(p) = geo else {
+        return None;
+    };
+    let mut out = Map::new();
+    // Desktop writes latitude first, and `order.rs` does not reach inside a
+    // nested object, so the insertion order here is the file's order.
+    out.insert("latitude".into(), json!(p.lat));
+    out.insert("longitude".into(), json!(p.long));
+    Some((Value::Object(out), period))
+}
+
+/// Desktop's `action` name for a service message, and the fields it carries.
+///
+/// **This did not exist.** `base_service` wrote id/type/date/actor/text and
+/// stopped, so all 63 service messages in a live export came out as
+/// `"type": "service"` with no `action` at all — and with it went `inviter`,
+/// `members`, `title`, `new_title`, `message_id` and `new_icon_emoji_id`. No
+/// replay leg can see this: all three start from a Desktop `result.json` that
+/// already *has* the action, so they exercise the writers and never the
+/// converter.
+///
+/// The vocabulary is measured, not invented — every name and payload key below
+/// is one the reference export actually contains, and the nine kinds here are
+/// the nine it holds. Anything else returns `None` rather than guessing at a
+/// spelling, which keeps an unmapped action a message with no `action` key
+/// instead of a wrong one.
+fn service_action(
+    action: &tl::enums::MessageAction,
+    m: &tl::types::MessageService,
+    names: &NameBook,
+) -> Option<(&'static str, Vec<(String, Value)>)> {
+    use tl::enums::MessageAction as A;
+
+    let name_of = |id: i64| json!(names.get(&PeerKey::user(id).to_string()));
+    let no_payload = |n: &'static str| Some((n, Vec::new()));
+
+    match action {
+        A::ChatEditTitle(a) => Some(("edit_group_title", vec![("title".into(), json!(a.title))])),
+        A::ChatAddUser(a) => Some((
+            "invite_members",
+            vec![(
+                "members".into(),
+                Value::Array(a.users.iter().map(|u| name_of(*u)).collect()),
+            )],
+        )),
+        // Desktop files a self-removal under the same name as a kick; the
+        // reference's six are all one user apiece, always as a one-element
+        // array rather than a bare string.
+        A::ChatDeleteUser(a) => Some((
+            "remove_members",
+            vec![("members".into(), json!([name_of(a.user_id)]))],
+        )),
+        A::ChatJoinedByLink(a) => Some((
+            "join_group_by_link",
+            vec![("inviter".into(), name_of(a.inviter_id))],
+        )),
+        // The migrated-from title, not the current one.
+        A::ChannelMigrateFrom(a) => {
+            Some(("migrate_from_group", vec![("title".into(), json!(a.title))]))
+        }
+        // The pinned id rides in `reply_to`, which is the only place it exists:
+        // the action itself is a bare constructor with no fields.
+        A::PinMessage => {
+            let id = match m.reply_to.as_ref() {
+                Some(tl::enums::MessageReplyHeader::Header(h)) => h.reply_to_msg_id,
+                _ => None,
+            };
+            Some((
+                "pin_message",
+                id.map(|v| vec![("message_id".into(), json!(v))])
+                    .unwrap_or_default(),
+            ))
+        }
+        A::TopicCreate(a) => Some(("topic_created", vec![("title".into(), json!(a.title))])),
+        // Both keys are written whenever either changed, and the reference's
+        // `new_icon_emoji_id` is the integer `0` — not a string, and not
+        // omitted — when the icon was cleared.
+        A::TopicEdit(a) => {
+            let mut p = Vec::new();
+            if let Some(t) = &a.title {
+                p.push(("new_title".into(), json!(t)));
+            }
+            p.push((
+                "new_icon_emoji_id".into(),
+                json!(a.icon_emoji_id.unwrap_or(0)),
+            ));
+            Some(("topic_edit", p))
+        }
+        // Telegram's checklists travel as `todo` on the wire and as the poll
+        // vocabulary in Desktop's export. The reference's three carry no
+        // payload beyond the actor, so nothing is inferred but the name.
+        A::TodoAppendTasks(_) => no_payload("poll_append_answer"),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -471,6 +896,392 @@ mod tests {
         assert_eq!(out["text"], "");
         assert_eq!(out["text_entities"], json!([]));
         assert_eq!(out["actor_id"], "user9");
+    }
+
+    fn service_with(action: tl::enums::MessageAction) -> tl::types::MessageService {
+        tl::types::MessageService {
+            out: false,
+            mentioned: false,
+            media_unread: false,
+            reactions_are_possible: false,
+            silent: false,
+            post: false,
+            legacy: false,
+            id: 66,
+            from_id: Some(peer_user(9)),
+            peer_id: tl::enums::Peer::Channel(tl::types::PeerChannel {
+                channel_id: 3_586_682_625,
+            }),
+            saved_peer_id: None,
+            reply_to: None,
+            date: 1_766_071_072,
+            action,
+            reactions: None,
+            ttl_period: None,
+        }
+    }
+
+    #[test]
+    fn every_action_the_reference_holds_is_named_the_way_desktop_names_it() {
+        // All 63 service messages in a live export came out with no `action`
+        // key whatsoever, because `base_service` never looked at `m.action`.
+        // The nine names below are exactly the nine the reference export
+        // contains, with the payload keys it carries for each.
+        let mut names = NameBook::default();
+        names.learn_user_parts(11, "Nađa", "Gavrilović", "", false, None);
+        names.learn_user_parts(12, "Group", "", "", false, None);
+
+        /// One action, the name Desktop gives it, and the payload it carries.
+        type Case = (
+            tl::enums::MessageAction,
+            &'static str,
+            Vec<(&'static str, Value)>,
+        );
+
+        let cases: Vec<Case> = vec![
+            (
+                tl::enums::MessageAction::ChatEditTitle(tl::types::MessageActionChatEditTitle {
+                    title: "UA KOLAB".into(),
+                }),
+                "edit_group_title",
+                vec![("title", json!("UA KOLAB"))],
+            ),
+            (
+                tl::enums::MessageAction::ChatAddUser(tl::types::MessageActionChatAddUser {
+                    users: vec![11],
+                }),
+                "invite_members",
+                vec![("members", json!(["Nađa Gavrilović"]))],
+            ),
+            (
+                tl::enums::MessageAction::ChatDeleteUser(tl::types::MessageActionChatDeleteUser {
+                    user_id: 11,
+                }),
+                "remove_members",
+                // A one-element array, never a bare string.
+                vec![("members", json!(["Nađa Gavrilović"]))],
+            ),
+            (
+                tl::enums::MessageAction::ChatJoinedByLink(
+                    tl::types::MessageActionChatJoinedByLink { inviter_id: 12 },
+                ),
+                "join_group_by_link",
+                vec![("inviter", json!("Group"))],
+            ),
+            (
+                tl::enums::MessageAction::ChannelMigrateFrom(
+                    tl::types::MessageActionChannelMigrateFrom {
+                        title: "samo jos jedna grupa i gotov je".into(),
+                        chat_id: 7,
+                    },
+                ),
+                "migrate_from_group",
+                vec![("title", json!("samo jos jedna grupa i gotov je"))],
+            ),
+            (
+                tl::enums::MessageAction::TopicCreate(tl::types::MessageActionTopicCreate {
+                    title_missing: false,
+                    title: "bitno pročitaj".into(),
+                    icon_color: 7_322_096,
+                    icon_emoji_id: None,
+                }),
+                "topic_created",
+                vec![("title", json!("bitno pročitaj"))],
+            ),
+            (
+                tl::enums::MessageAction::TopicEdit(tl::types::MessageActionTopicEdit {
+                    title: Some("foto video".into()),
+                    icon_emoji_id: None,
+                    closed: None,
+                    hidden: None,
+                }),
+                "topic_edit",
+                // The reference writes the integer 0, not a string and not
+                // nothing, when the icon was cleared.
+                vec![
+                    ("new_title", json!("foto video")),
+                    ("new_icon_emoji_id", json!(0)),
+                ],
+            ),
+            (
+                tl::enums::MessageAction::TodoAppendTasks(
+                    tl::types::MessageActionTodoAppendTasks { list: vec![] },
+                ),
+                "poll_append_answer",
+                vec![],
+            ),
+        ];
+
+        for (action, expected, payload) in cases {
+            let out = base_service(&service_with(action), &names);
+            assert_eq!(out["action"], expected, "wrong name for {expected}");
+            for (k, v) in payload {
+                assert_eq!(out.get(k), Some(&v), "{expected} lost {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_pinned_message_takes_its_id_from_the_reply_header() {
+        // `messageActionPinMessage` is a bare constructor — the id it refers to
+        // exists nowhere but `reply_to`, so reading only the action yields an
+        // action with no `message_id`.
+        let mut s = service_with(tl::enums::MessageAction::PinMessage);
+        s.reply_to = Some(tl::enums::MessageReplyHeader::Header(
+            tl::types::MessageReplyHeader {
+                reply_to_scheduled: false,
+                forum_topic: false,
+                quote: false,
+                reply_to_msg_id: Some(6),
+                reply_to_peer_id: None,
+                reply_from: None,
+                reply_media: None,
+                reply_to_top_id: None,
+                quote_text: None,
+                quote_entities: None,
+                quote_offset: None,
+                todo_item_id: None,
+                reply_to_ephemeral: false,
+                poll_option: None,
+            },
+        ));
+        let out = base_service(&s, &NameBook::default());
+        assert_eq!(out["action"], "pin_message");
+        assert_eq!(out["message_id"], 6);
+    }
+
+    #[test]
+    fn a_migration_notice_still_has_an_actor() {
+        // It has no sender — the group did it — so keying the actor on
+        // `from_id` alone dropped `actor` and `actor_id` from the one message
+        // in the reference that has neither a `from` nor a `text`.
+        let mut s = service_with(tl::enums::MessageAction::ChannelMigrateFrom(
+            tl::types::MessageActionChannelMigrateFrom {
+                title: "old".into(),
+                chat_id: 7,
+            },
+        ));
+        s.from_id = None;
+        let mut names = NameBook::default();
+        names
+            .names
+            .insert("channel3586682625".into(), "UA KOLAB".into());
+        let out = base_service(&s, &names);
+        assert_eq!(out["actor"], "UA KOLAB");
+        assert_eq!(out["actor_id"], "channel3586682625");
+    }
+
+    #[test]
+    fn an_action_we_have_not_mapped_leaves_the_key_off_rather_than_guessing() {
+        let out = base_service(
+            &service_with(tl::enums::MessageAction::HistoryClear),
+            &NameBook::default(),
+        );
+        assert!(out.get("action").is_none());
+        assert_eq!(out["type"], "service");
+    }
+
+    fn emoji_reaction(emoticon: &str, count: i32) -> tl::enums::ReactionCount {
+        tl::enums::ReactionCount::Count(tl::types::ReactionCount {
+            chosen_order: None,
+            reaction: tl::enums::Reaction::Emoji(tl::types::ReactionEmoji {
+                emoticon: emoticon.into(),
+            }),
+            count,
+        })
+    }
+
+    #[test]
+    fn a_reaction_carries_its_count_and_the_people_telegram_named() {
+        // 963 of the reference's messages carry reactions and a live export
+        // carried none on any message — and the wire leg called it drift,
+        // because `reactions` is allowed to *differ* between two runs and the
+        // check never asked whether it was there at all.
+        let mut names = NameBook::default();
+        names.learn_user_parts(1401106198, "Petar", "Markov", "", false, None);
+
+        let r = tl::types::MessageReactions {
+            min: false,
+            can_see_list: true,
+            reactions_as_tags: false,
+            results: vec![emoji_reaction("❤", 6), emoji_reaction("👍", 2)],
+            recent_reactions: Some(vec![tl::enums::MessagePeerReaction::Reaction(
+                tl::types::MessagePeerReaction {
+                    big: false,
+                    unread: false,
+                    my: false,
+                    peer_id: peer_user(1401106198),
+                    date: 1_766_071_072,
+                    reaction: tl::enums::Reaction::Emoji(tl::types::ReactionEmoji {
+                        emoticon: "❤".into(),
+                    }),
+                },
+            )]),
+            top_reactors: None,
+        };
+        let out = reactions_of(&r, &names).expect("two reactions");
+        let a = &out[0];
+        assert_eq!(a["type"], "emoji");
+        assert_eq!(a["emoji"], "❤");
+        assert_eq!(a["count"], 6);
+        assert_eq!(a["recent"][0]["from"], "Petar Markov");
+        assert_eq!(a["recent"][0]["from_id"], "user1401106198");
+        // The named reactor belongs to the reaction they actually pressed, not
+        // to every entry on the message.
+        assert!(
+            out[1].get("recent").is_none(),
+            "the ❤ reactor leaked onto 👍"
+        );
+    }
+
+    #[test]
+    fn a_custom_emoji_reaction_reports_a_document_id_not_an_emoji() {
+        let r = tl::types::MessageReactions {
+            min: false,
+            can_see_list: true,
+            reactions_as_tags: false,
+            results: vec![tl::enums::ReactionCount::Count(tl::types::ReactionCount {
+                chosen_order: None,
+                reaction: tl::enums::Reaction::CustomEmoji(tl::types::ReactionCustomEmoji {
+                    document_id: 5_296_383_305_254_459_545,
+                }),
+                count: 1,
+            })],
+            recent_reactions: None,
+            top_reactors: None,
+        };
+        let out = reactions_of(&r, &NameBook::default()).expect("one reaction");
+        assert_eq!(out[0]["type"], "custom_emoji");
+        assert_eq!(out[0]["document_id"], "5296383305254459545");
+        assert!(out[0].get("emoji").is_none());
+    }
+
+    fn poll_media(
+        closed: bool,
+        tallies: Option<Vec<(u8, i32, bool)>>,
+    ) -> tl::types::MessageMediaPoll {
+        let answer = |b: u8, t: &str| {
+            tl::enums::PollAnswer::Answer(tl::types::PollAnswer {
+                text: tl::enums::TextWithEntities::Entities(tl::types::TextWithEntities {
+                    text: t.into(),
+                    entities: vec![],
+                }),
+                option: vec![b],
+                media: None,
+                added_by: None,
+                date: None,
+            })
+        };
+        tl::types::MessageMediaPoll {
+            poll: tl::enums::Poll::Poll(tl::types::Poll {
+                id: 1,
+                closed,
+                public_voters: false,
+                multiple_choice: false,
+                quiz: false,
+                open_answers: false,
+                revoting_disabled: false,
+                shuffle_answers: false,
+                hide_results_until_close: false,
+                creator: false,
+                subscribers_only: false,
+                question: tl::enums::TextWithEntities::Entities(tl::types::TextWithEntities {
+                    text: "klip".into(),
+                    entities: vec![],
+                }),
+                answers: vec![answer(0, "da"), answer(1, "ne")],
+                close_period: None,
+                close_date: None,
+                countries_iso2: None,
+                hash: 0,
+            }),
+            results: tl::enums::PollResults::Results(Box::new(tl::types::PollResults {
+                min: false,
+                has_unread_votes: false,
+                can_view_stats: false,
+                results: tallies.map(|ts| {
+                    ts.into_iter()
+                        .map(|(opt, voters, chosen)| {
+                            tl::enums::PollAnswerVoters::Voters(tl::types::PollAnswerVoters {
+                                chosen,
+                                correct: false,
+                                option: vec![opt],
+                                voters: Some(voters),
+                                recent_voters: None,
+                            })
+                        })
+                        .collect()
+                }),
+                total_voters: Some(8),
+                recent_voters: None,
+                solution: None,
+                solution_entities: None,
+                solution_media: None,
+            })),
+            attached_media: None,
+        }
+    }
+
+    #[test]
+    fn a_poll_reports_its_question_answers_and_tallies() {
+        // All seven polls in the reference came out of a live export as plain
+        // text: `plan::classify` answers "what would we download", and a poll
+        // is not a file, so nothing recognised it.
+        let out = poll_of(&poll_media(false, Some(vec![(0, 5, true), (1, 3, false)])));
+        assert_eq!(out["question"], "klip");
+        assert_eq!(out["closed"], false);
+        assert_eq!(out["total_voters"], 8);
+        assert_eq!(out["answers"][0]["text"], "da");
+        assert_eq!(out["answers"][0]["voters"], 5);
+        assert_eq!(out["answers"][0]["chosen"], true);
+        assert_eq!(out["answers"][1]["chosen"], false);
+    }
+
+    #[test]
+    fn a_poll_nobody_has_voted_in_keeps_its_answers() {
+        // Telegram omits `results` entirely before the first vote. Reading it
+        // as "no answers" would drop the question's options.
+        let out = poll_of(&poll_media(false, None));
+        assert_eq!(out["answers"].as_array().map(Vec::len), Some(2));
+        assert_eq!(out["answers"][0]["voters"], 0);
+        assert_eq!(out["answers"][0]["chosen"], false);
+    }
+
+    #[test]
+    fn a_location_is_latitude_then_longitude_and_a_live_one_carries_its_period() {
+        let point = tl::enums::GeoPoint::Point(tl::types::GeoPoint {
+            long: 20.370197,
+            lat: 44.857507,
+            access_hash: 0,
+            accuracy_radius: None,
+        });
+        let (place, period) =
+            location_of(&tl::enums::MessageMedia::Geo(tl::types::MessageMediaGeo {
+                geo: point.clone(),
+            }))
+            .expect("a point");
+        assert_eq!(place["latitude"], 44.857507);
+        assert_eq!(place["longitude"], 20.370197);
+        assert_eq!(period, None);
+        // Desktop writes latitude first and `order.rs` does not reach inside a
+        // nested object, so insertion order is the file's order.
+        assert_eq!(
+            place
+                .as_object()
+                .map(|m| m.keys().next().map(String::as_str)),
+            Some(Some("latitude"))
+        );
+
+        let (_, period) = location_of(&tl::enums::MessageMedia::GeoLive(
+            tl::types::MessageMediaGeoLive {
+                geo: point,
+                heading: None,
+                period: 28_800,
+                proximity_notification_radius: None,
+            },
+        ))
+        .expect("a live point");
+        assert_eq!(period, Some(28_800));
     }
 
     #[test]

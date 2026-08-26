@@ -12,7 +12,49 @@ use crate::error::{classify, EnrichError};
 use anyhow::{anyhow, Context, Result};
 use grammers_client::{Client, SenderPool};
 use grammers_session::storages::SqliteSession;
-use std::sync::Arc;
+use std::future::Future;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+use tokio::sync::Mutex;
+
+/// How long establishing the connection may take before it is called a failure.
+///
+/// **There was no timeout at all, at any layer.** `NetStream::connect` in
+/// `grammers-mtsender` is a bare `TcpStream::connect`, and nothing in this
+/// crate wrapped it. An address that is *filtered* rather than refused — which
+/// is what Telegram looks like on a network that blocks it — therefore sat in
+/// Windows' own SYN retry for about twenty-one seconds, per attempt, with the
+/// sign-in button reading "Working…" throughout and no way for the user to
+/// tell a slow link from a blocked one.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How long one authorisation step may take.
+///
+/// Three times [`CONNECT_TIMEOUT`] because an authorisation step can *contain*
+/// a connection: `auth.sendCode` answers `PHONE_MIGRATE` when the account does
+/// not live on the datacentre we reached, and grammers handles that by dropping
+/// that connection, generating a fresh authorisation key against the home one —
+/// a full Diffie-Hellman exchange — and sending the code again.
+pub const AUTH_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Fail a step rather than let it hang, and say which step it was.
+///
+/// Returns the future's own output untouched, so a caller that has to tell
+/// `PasswordRequired` from a real error still can. Only the *waiting* is this
+/// function's business.
+async fn within<F: Future>(what: &str, limit: Duration, fut: F) -> Result<F::Output> {
+    match tokio::time::timeout(limit, fut).await {
+        Ok(v) => Ok(v),
+        Err(_) => {
+            log::warn!("{what}: no answer within {}s", limit.as_secs());
+            Err(anyhow!(
+                "{what}: gave up after {}s — Telegram did not answer. The \
+                 connection may be blocked rather than merely slow.",
+                limit.as_secs()
+            ))
+        }
+    }
+}
 
 /// Where a sign-in got to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,8 +67,9 @@ pub enum LoginStep {
     NeedPassword,
 }
 
-pub struct Session {
-    pub client: Client,
+/// The live connection to Telegram, shared by every action.
+struct Connection {
+    client: Client,
     /// The task driving the connection pool's I/O.
     ///
     /// **A `Client` is only a handle.** `SenderPool` hands back three things —
@@ -35,10 +78,103 @@ pub struct Session {
     /// compiles, connects, and then fails every single request with
     /// `dropped (cancelled)`: the requests go into a channel whose receiver no
     /// longer exists. Held here so it lives exactly as long as the client that
-    /// depends on it, and no longer — each action makes its own `Session`, so
-    /// a detached runner per action would be a leak.
+    /// depends on it, and [`Drop`] below closes it when the last user goes.
     runner: tokio::task::JoinHandle<()>,
+    /// The session store the pool writes authorisation keys and datacentre
+    /// addresses into. Held because dropping it closes the database underneath
+    /// the runner.
     session: Arc<SqliteSession>,
+    /// Which credentials this was built with. A different `api_id` is a
+    /// different application as far as Telegram is concerned, so a connection
+    /// made with one cannot be handed to the other.
+    api_id: i64,
+    /// `None` until something has asked.
+    ///
+    /// Cached because the answer costs a round trip and the sign-in path asked
+    /// for it twice: once from the "Sign in" button's probe, and again inside
+    /// [`Session::request_code`] on a second connection, to answer a question
+    /// whose answer had just been used to open the dialog.
+    authorized: Mutex<Option<bool>>,
+}
+
+impl Connection {
+    async fn open(settings: &Settings) -> Result<Self> {
+        ensure_data_dir().context("creating the data directory")?;
+        let path = session_file();
+        let session = Arc::new(
+            SqliteSession::open(&path)
+                .await
+                .map_err(|e| anyhow!("opening {}: {e}", path.display()))?,
+        );
+        // Checked, not `as i32`. The api id comes from `settings.json`, and a
+        // silent truncation would hand Telegram a *different, valid-looking*
+        // id — which fails as an authorisation error at the far end of a
+        // connection, nowhere near the typo that caused it.
+        let api_id = i32::try_from(settings.api_id).map_err(|_| {
+            anyhow!(
+                "api_id {} is not a Telegram api id — check settings.json",
+                settings.api_id
+            )
+        })?;
+        let pool = SenderPool::new(session.clone(), api_id);
+        let client = Client::new(pool.handle);
+        // `pool.updates` is deliberately dropped. Nothing here reacts to live
+        // updates — an export reads history — and the runner sends them with
+        // `let _ = tx.send(..)`, so a dropped receiver makes each send a
+        // no-op. Holding the receiver without draining it would instead grow
+        // an unbounded queue for the length of an export.
+        let runner = tokio::spawn(pool.runner.run());
+        log::info!("connection pool started for api_id {}", settings.api_id);
+        Ok(Self {
+            client,
+            runner,
+            session,
+            api_id: settings.api_id,
+            authorized: Mutex::new(None),
+        })
+    }
+}
+
+impl Drop for Connection {
+    /// Stop driving the pool when the last holder goes.
+    ///
+    /// Without this the runner outlives everything that depended on it for as
+    /// long as the runtime does — a socket and a task nothing will ever close.
+    fn drop(&mut self) {
+        self.runner.abort();
+    }
+}
+
+/// The one connection, for the life of the process.
+///
+/// **Every action used to build its own.** Each new one paid a TCP connect, an
+/// `InvokeWithLayer(InitConnection(help.getConfig))` and a write of every
+/// datacentre address that answer carries, before its first useful request —
+/// twice over a single sign-in, and again for each of refresh, count and
+/// export. None of it bought anything: the pool multiplexes requests over one
+/// connection per datacentre, which is what a pool is for, and opening a second
+/// `SqliteSession` on the same file meant two writers contending for the store
+/// the first one was still using.
+static SHARED: OnceLock<Mutex<Option<Arc<Connection>>>> = OnceLock::new();
+
+fn shared() -> &'static Mutex<Option<Arc<Connection>>> {
+    SHARED.get_or_init(|| Mutex::new(None))
+}
+
+/// Close the shared connection; the next [`Session::connect`] builds a fresh one.
+///
+/// Nothing in the app needs this during a run — the point of the connection is
+/// that it persists — but a signed-out or revoked session has to be able to
+/// start over without restarting the process.
+pub async fn disconnect() {
+    if shared().lock().await.take().is_some() {
+        log::info!("shared connection closed");
+    }
+}
+
+pub struct Session {
+    pub client: Client,
+    conn: Arc<Connection>,
     api_hash: String,
     token: Option<grammers_client::client::LoginToken>,
     /// Held only between `sign_in` answering `NeedPassword` and
@@ -48,7 +184,13 @@ pub struct Session {
 }
 
 impl Session {
-    /// Connect, creating the session file if it is not there yet.
+    /// Take a handle on the connection, opening it if this is the first caller.
+    ///
+    /// **No I/O happens here, and none ever did.** The pool connects on demand,
+    /// when the first request to a datacentre is made, so the cost this call
+    /// looks like it pays is really paid by whatever asks first — which is why
+    /// [`Session::ensure_connected`] exists and why it is the thing with a
+    /// timeout on it.
     ///
     /// Answering "connected but not signed in" is a *success*, not an error:
     /// the caller opens the sign-in dialog on it. Conflating the two is what
@@ -60,36 +202,73 @@ impl Session {
                 "no API credentials yet — get an api_id and api_hash from my.telegram.org"
             ));
         }
-        ensure_data_dir().context("creating the data directory")?;
-        let path = session_file();
-        let session = Arc::new(
-            SqliteSession::open(&path)
-                .await
-                .map_err(|e| anyhow!("opening {}: {e}", path.display()))?,
-        );
-        let pool = SenderPool::new(session.clone(), settings.api_id as i32);
-        let client = Client::new(pool.handle);
-        // `pool.updates` is deliberately dropped. Nothing here reacts to live
-        // updates — an export reads history — and the runner sends them with
-        // `let _ = tx.send(..)`, so a dropped receiver makes each send a
-        // no-op. Holding the receiver without draining it would instead grow
-        // an unbounded queue for the length of an export.
-        let runner = tokio::spawn(pool.runner.run());
+        // The lock is held across `open` on purpose: two actions starting at
+        // once would otherwise each build a connection and one would be thrown
+        // away, having already done the handshake.
+        let mut held = shared().lock().await;
+        let usable = held
+            .as_ref()
+            .is_some_and(|c| c.api_id == settings.api_id && !c.runner.is_finished());
+        if !usable {
+            *held = Some(Arc::new(Connection::open(settings).await?));
+        }
+        let conn = held.as_ref().expect("just set").clone();
+        drop(held);
         Ok(Self {
-            client,
-            runner,
-            session,
+            client: conn.client.clone(),
+            conn,
             api_hash: settings.api_hash.clone(),
             token: None,
             password: None,
         })
     }
 
+    /// Ask Telegram whether this account is signed in, and remember the answer.
+    ///
+    /// This is the call that actually establishes the socket, so it is the one
+    /// carrying [`CONNECT_TIMEOUT`].
     pub async fn is_authorized(&self) -> Result<bool> {
-        self.client
-            .is_authorized()
-            .await
-            .map_err(|e| anyhow!("checking authorisation: {e}"))
+        let answer = within(
+            "connecting to Telegram",
+            CONNECT_TIMEOUT,
+            self.client.is_authorized(),
+        )
+        .await?
+        .map_err(|e| anyhow!("checking authorisation: {e}"))?;
+        self.remember_authorized(answer).await;
+        Ok(answer)
+    }
+
+    /// The same question, asked over the wire at most once per connection.
+    ///
+    /// Every action calls this before its real work, so a blocked network fails
+    /// in [`CONNECT_TIMEOUT`] with a sentence about it rather than in whatever
+    /// the operating system's TCP retry happens to be, and so an unauthorised
+    /// account is told it is unauthorised instead of being handed a wire error
+    /// from the middle of a chat listing.
+    pub async fn ensure_connected(&self) -> Result<bool> {
+        // Bound in a `let` first: the temporary guard of an `if let` scrutinee
+        // lives for the whole `if let`, and `is_authorized` takes the same
+        // lock. That would deadlock on the cold path only — the shape of bug
+        // that passes every warm test.
+        let known = *self.conn.authorized.lock().await;
+        match known {
+            Some(known) => Ok(known),
+            None => self.is_authorized().await,
+        }
+    }
+
+    /// Ask again rather than trust the cache.
+    ///
+    /// For the "Sign in" button, whose entire job is to re-check the stored
+    /// session — a cached answer there would make the button do nothing.
+    pub async fn refresh_authorization(&self) -> Result<bool> {
+        *self.conn.authorized.lock().await = None;
+        self.is_authorized().await
+    }
+
+    async fn remember_authorized(&self, yes: bool) {
+        *self.conn.authorized.lock().await = Some(yes);
     }
 
     /// Ask Telegram to send a login code.
@@ -99,10 +278,16 @@ impl Session {
     /// user's hand stops working. Request once per attempt and keep the
     /// `Session` alive until the code is submitted.
     pub async fn request_code(&mut self, phone: &str) -> Result<LoginStep> {
-        if self.is_authorized().await? {
+        if self.ensure_connected().await? {
             return Ok(LoginStep::Ready);
         }
-        let token = match self.client.request_login_code(phone, &self.api_hash).await {
+        let sent = within(
+            "requesting a login code",
+            AUTH_TIMEOUT,
+            self.client.request_login_code(phone, &self.api_hash),
+        )
+        .await?;
+        let token = match sent {
             Ok(t) => t,
             // AUTH_RESTART means "an earlier authorisation was left half
             // finished; begin again" — and beginning again is this same call.
@@ -111,10 +296,13 @@ impl Session {
             // do differently.
             Err(e) if is_auth_restart(&e) => {
                 log::warn!("Telegram asked to restart the login; retrying once");
-                self.client
-                    .request_login_code(phone, &self.api_hash)
-                    .await
-                    .map_err(|e| anyhow!("requesting a login code: {e}"))?
+                within(
+                    "requesting a login code",
+                    AUTH_TIMEOUT,
+                    self.client.request_login_code(phone, &self.api_hash),
+                )
+                .await?
+                .map_err(|e| anyhow!("requesting a login code: {e}"))?
             }
             Err(e) => return Err(anyhow!("requesting a login code: {e}")),
         };
@@ -124,12 +312,18 @@ impl Session {
 
     /// Complete sign-in with the code that arrived.
     pub async fn sign_in(&mut self, code: &str) -> Result<LoginStep> {
-        let token = self
-            .token
-            .as_ref()
-            .ok_or_else(|| anyhow!("no login code was requested"))?;
-        match self.client.sign_in(token, code).await {
-            Ok(_) => Ok(LoginStep::Ready),
+        let outcome = {
+            let token = self
+                .token
+                .as_ref()
+                .ok_or_else(|| anyhow!("no login code was requested"))?;
+            within("signing in", AUTH_TIMEOUT, self.client.sign_in(token, code)).await?
+        };
+        match outcome {
+            Ok(_) => {
+                self.remember_authorized(true).await;
+                Ok(LoginStep::Ready)
+            }
             Err(grammers_client::SignInError::PasswordRequired(token)) => {
                 // The error *carries* the token check_password needs. Dropping
                 // it here is what made two-factor sign-in impossible to
@@ -151,8 +345,17 @@ impl Session {
             .password
             .take()
             .ok_or_else(|| anyhow!("two-factor sign-in is not pending"))?;
-        match self.client.check_password(token, password).await {
-            Ok(_) => Ok(LoginStep::Ready),
+        let outcome = within(
+            "checking the password",
+            AUTH_TIMEOUT,
+            self.client.check_password(token, password),
+        )
+        .await?;
+        match outcome {
+            Ok(_) => {
+                self.remember_authorized(true).await;
+                Ok(LoginStep::Ready)
+            }
             Err(grammers_client::SignInError::PasswordRequired(token)) => {
                 self.password = Some(token);
                 Err(anyhow!("that password was not accepted"))
@@ -168,16 +371,14 @@ impl Session {
 
     /// The signed-in account's own display name.
     pub async fn me(&self) -> Result<String> {
-        let me = self
-            .client
-            .get_me()
-            .await
+        let me = within("fetching your account", AUTH_TIMEOUT, self.client.get_me())
+            .await?
             .map_err(|e| anyhow!("fetching your account: {e}"))?;
         Ok(me.full_name())
     }
 
     pub fn session(&self) -> Arc<SqliteSession> {
-        self.session.clone()
+        self.conn.session.clone()
     }
 }
 
@@ -192,6 +393,14 @@ pub struct ChatInfo {
     pub last_activity: i64,
     /// A forum supergroup — its topics become separate folders.
     pub is_forum: bool,
+    /// Reachable by a public `t.me/name` link, which is the whole of Desktop's
+    /// `public_*` / `private_*` distinction in `result.json`'s `type`.
+    ///
+    /// This field is why that header is now ever written as `private_*`: the
+    /// export hardcoded `export_type(true)`, so a private supergroup — which is
+    /// what an invite-link-only group is — claimed to be public in every export
+    /// this program had ever produced.
+    pub public: bool,
     /// `None` means *not counted*, which is **not** the same as zero. It paints
     /// blank, sorts last, and every place that sums has to tell the two apart.
     pub message_count: Option<i64>,
@@ -239,17 +448,15 @@ pub fn is_auth_restart(e: &grammers_client::InvocationError) -> bool {
     e.to_string().contains("AUTH_RESTART")
 }
 
-impl Drop for Session {
-    /// Stop driving the pool when the session goes.
-    ///
-    /// The runner would otherwise outlive its `Session` for as long as the
-    /// runtime does, and the app builds one per action — connect, list chats,
-    /// list topics, export — so a detached runner each time is a socket and a
-    /// task that nothing will ever close.
-    fn drop(&mut self) {
-        self.runner.abort();
-    }
-}
+// **`Session` has no `Drop`.** It used to abort the runner, because it owned
+// it; now it holds an `Arc<Connection>` shared with every other action, and
+// closing the socket when one action finished would tear the connection out
+// from under the others. `Connection::drop` does the aborting, when the last
+// holder — including [`SHARED`] — is gone.
+//
+// What dropping a `Session` still does, and is still relied on, is discard the
+// login and password tokens it is carrying: an abandoned sign-in leaves no
+// half-finished credential in memory.
 
 /// Turn a grammers error into our vocabulary. Re-exported so callers never
 /// reach for the raw type.
@@ -272,6 +479,7 @@ mod tests {
             kind: ChatKind::Private,
             last_activity: 0,
             is_forum: false,
+            public: false,
             message_count: None,
             access_hash: 0,
         };
@@ -303,6 +511,48 @@ mod tests {
         // be forums, and only they carry history a new member can read.
         assert_ne!(ChatKind::Group, ChatKind::Supergroup);
         assert_ne!(ChatKind::Group.label(), ChatKind::Supergroup.label());
+    }
+
+    #[tokio::test]
+    async fn a_step_that_never_answers_is_given_up_on_rather_than_waited_out() {
+        // The failure this exists for: with no timeout anywhere, a filtered
+        // address sat in the OS's SYN retry and the button read "Working…" for
+        // twenty-one seconds with nothing to say why.
+        let err = within(
+            "connecting to Telegram",
+            Duration::from_millis(10),
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("gave up"), "got {err}");
+        assert!(err.contains("connecting to Telegram"), "got {err}");
+    }
+
+    #[tokio::test]
+    async fn a_step_that_answers_in_time_is_handed_back_untouched() {
+        // Including its own error. `sign_in` has to tell `PasswordRequired`
+        // from a real failure, so `within` must wrap the waiting and nothing
+        // else — flattening the result here would make two-factor sign-in
+        // indistinguishable from a wrong code.
+        let inner: std::result::Result<i32, &str> = Err("password required");
+        let got = within("signing in", Duration::from_secs(5), async move { inner })
+            .await
+            .unwrap();
+        assert_eq!(got, Err("password required"));
+    }
+
+    #[test]
+    fn an_authorisation_step_is_allowed_longer_than_a_connection() {
+        // `auth.sendCode` can contain a whole second connection: PHONE_MIGRATE
+        // means dropping the datacentre we reached and generating a fresh
+        // authorisation key against the home one before the code is sent.
+        assert!(AUTH_TIMEOUT > CONNECT_TIMEOUT);
+        // And the connect cap has to beat Windows' own SYN retry, or a blocked
+        // address is still diagnosed by the operating system rather than by us
+        // and the timeout buys nothing.
+        assert!(CONNECT_TIMEOUT < Duration::from_secs(21));
     }
 
     #[tokio::test]

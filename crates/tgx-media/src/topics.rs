@@ -41,14 +41,27 @@ pub fn sanitize_component(name: &str, fallback: &str) -> String {
     // Collapse runs of whitespace, then trim.
     let collapsed = replaced.split_whitespace().collect::<Vec<_>>().join(" ");
     let trimmed = collapsed.trim().trim_end_matches(['.', ' ']);
-    let base = if trimmed.is_empty() {
-        fallback.to_string()
-    } else if is_reserved(trimmed) {
+    if trimmed.is_empty() {
+        return fallback.to_string();
+    }
+    let base = if is_reserved(trimmed) {
         format!("_{trimmed}")
     } else {
         trimmed.to_string()
     };
-    base.chars().take(120).collect()
+    // Trimmed *after* the cut, not only before it — mirrors
+    // names::sanitize_filename. A 120+ character topic title can land the
+    // truncation boundary on a trailing dot or space, and Windows silently
+    // drops a trailing one, so the folder on disk would be "abc" while
+    // result.json's topic name still read "abc." or "abc ": a folder that no
+    // longer matches the name recorded for it.
+    let cut: String = base.chars().take(120).collect();
+    let out = cut.trim_end_matches(['.', ' ']).to_string();
+    if out.is_empty() {
+        fallback.to_string()
+    } else {
+        out
+    }
 }
 
 /// `0042 - Backend` — id-prefixed so retitles and duplicates never collide.
@@ -207,6 +220,25 @@ mod tests {
         let long = "🎨".repeat(200);
         let out = sanitize_component(&long, "x");
         assert_eq!(out.chars().count(), 120);
+    }
+
+    #[test]
+    fn a_long_title_truncated_onto_a_dot_drops_it() {
+        // Windows silently drops a trailing dot, so if truncation lands on
+        // one the folder on disk stops matching the title result.json
+        // records for the topic.
+        let long = format!("{}.{}", "a".repeat(119), "b".repeat(50));
+        let out = sanitize_component(&long, "x");
+        assert!(!out.ends_with('.'), "got {out}");
+        assert_eq!(out.chars().count(), 119);
+    }
+
+    #[test]
+    fn a_long_title_truncated_onto_a_space_drops_it() {
+        let long = format!("{} {}", "a".repeat(119), "b".repeat(50));
+        let out = sanitize_component(&long, "x");
+        assert!(!out.ends_with(' '), "got {out}");
+        assert_eq!(out.chars().count(), 119);
     }
 
     #[test]

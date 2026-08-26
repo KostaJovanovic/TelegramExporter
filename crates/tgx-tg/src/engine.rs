@@ -12,9 +12,10 @@
 //! aborting, and gives up only after [`MAX_STALLED_WAITS`] waits with **no
 //! progress** — a wait that moved the cursor forward resets the counter.
 
+use crate::cancel::Cancel;
 use crate::client::ChatInfo;
 use crate::config::Settings;
-use crate::convert::{base_message, base_service, NameBook};
+use crate::convert::{self, base_message, base_service, NameBook};
 use crate::dialogs::Topic;
 use crate::download::{self, PendingDownload};
 use crate::enrich::{self, Enrichment};
@@ -27,6 +28,7 @@ use grammers_tl_types as tl;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use tgx_format::peer::PeerKey;
 use tgx_media::names::NameBook as MediaNames;
 use tgx_media::topics::{topic_id_for, ReplyHeader, GENERAL_TOPIC_ID};
 
@@ -77,8 +79,10 @@ impl ExportResult {
 /// Progress, reported as the run goes.
 #[derive(Debug, Clone)]
 pub enum Progress {
-    /// Telegram's own total for this chat, published so the list can fill the
-    /// row in for a chat the user never counted.
+    /// How many messages this chat holds, published for **every** chat whose
+    /// total the run knows — the one it looked up and the one the list had
+    /// counted already alike. A row that never hears this has no denominator,
+    /// so its progress bar stays empty for the whole export.
     Total {
         chat_id: i64,
         total: i64,
@@ -142,6 +146,12 @@ impl<'a> ChatExporter<'a> {
     /// the second run to start would overwrite a field, and the first would go
     /// on asking Telegram about the wrong conversation and writing the answers
     /// into its own export as fact.
+    ///
+    /// **`cancel` is honoured, not obeyed instantly.** Every exit it takes goes
+    /// through [`Self::close_all`] before returning [`ExportError::Cancelled`],
+    /// because the JSON is streamed: an output dropped at the point of the
+    /// click leaves a *zero-byte* file, which is worse than the partial export
+    /// the user asked to keep.
     pub async fn run(
         &mut self,
         chat: &ChatInfo,
@@ -149,6 +159,7 @@ impl<'a> ChatExporter<'a> {
         topics: &[Topic],
         root: &Path,
         progress: ProgressFn<'_>,
+        cancel: &Cancel,
     ) -> Result<ExportResult, ExportError> {
         let mut result = ExportResult {
             root: root.to_path_buf(),
@@ -158,19 +169,12 @@ impl<'a> ChatExporter<'a> {
         // A chat the list already counted costs no extra request. `0` is a
         // count — an empty chat — hence the `is_none` test rather than a falsy
         // one.
-        let total = match chat.message_count {
-            Some(n) => n,
+        let known = match chat.message_count {
+            Some(n) => Some(n),
             None => {
                 let mut probe = self.client.iter_messages(peer);
                 match probe.total().await {
-                    Ok(n) => {
-                        let n = n as i64;
-                        progress(Progress::Total {
-                            chat_id: chat.id,
-                            total: n,
-                        });
-                        n
-                    }
+                    Ok(n) => Some(n as i64),
                     Err(e) => {
                         // A count we could not get is not a reason to abandon
                         // the export; it only costs the progress bar.
@@ -179,16 +183,34 @@ impl<'a> ChatExporter<'a> {
                             chat.title,
                             classify(&e)
                         )));
-                        0
+                        None
                     }
                 }
             }
         };
+        // **The request is what is conditional, not the report.** A chat whose
+        // count the list already knew used to skip this too, so the queue row
+        // never learnt its size and its progress bar contributed nothing for
+        // the whole of the chat in flight — with the number sitting right there
+        // in the parameter. A count we *failed* to get is still not published:
+        // it is `None` here, not `0`, and sending `Total { total: 0 }` would
+        // paint "0 messages" over a channel of ten thousand that rate-limited.
+        if let Some(n) = known {
+            progress(Progress::Total {
+                chat_id: chat.id,
+                total: n,
+            });
+        }
+        let total = known.unwrap_or(0);
         result.expected = total;
 
         let split = self.settings.split_topics && chat.is_forum;
         let mut sinks: HashMap<i64, TopicSink> = HashMap::new();
-        let export_type = chat.kind.export_type(true);
+        // `chat.public`, not `true`. Hardcoding it made the `false` arm of
+        // `export_type` unreachable in production, so every export claimed
+        // `public_supergroup` — including the invite-link-only groups this tool
+        // is mostly used on.
+        let export_type = chat.kind.export_type(chat.public);
 
         // Pre-create a sink per topic so the folder names are stable and the
         // index can list them even if a topic turns out empty.
@@ -279,8 +301,18 @@ impl<'a> ChatExporter<'a> {
         let mut offset_id: i32 = 0;
         let mut stalled: u32 = 0;
         let mut done = 0usize;
+        let stride = progress_stride(total);
 
         'resume: loop {
+            // Checked here as well as per message so a cancel during a rate
+            // limit is not held until the next message arrives — after a
+            // two-minute wait the loop comes back to the top of `'resume`, not
+            // to the top of a message.
+            if cancel.is_cancelled() {
+                Self::close_all(&mut sinks, root, chat, topics, split, &mut result, progress);
+                return Err(ExportError::Cancelled);
+            }
+
             let mut iter = self
                 .client
                 .iter_messages(peer)
@@ -288,11 +320,31 @@ impl<'a> ChatExporter<'a> {
                 .offset_id(offset_id);
 
             loop {
+                // Per message, because a chat can hold tens of thousands and
+                // anything coarser makes Stop take as long as a page fetch.
+                // The partial export is kept, closed and complete as far as it
+                // goes; `result.complete()` is what tells it apart from a whole
+                // one.
+                if cancel.is_cancelled() {
+                    Self::close_all(&mut sinks, root, chat, topics, split, &mut result, progress);
+                    return Err(ExportError::Cancelled);
+                }
                 match iter.next().await {
                     Ok(Some(msg)) => {
                         // Progress: a wait that moved the cursor is not a stall.
                         stalled = 0;
                         offset_id = msg.id();
+                        // **Learn the sender before converting the message.**
+                        // The roster was the only source of names, so anyone
+                        // who posted and then left the group had no name at
+                        // all: 206 fields across a live export came out as the
+                        // empty string, with a perfectly correct `from_id`
+                        // beside them. Telegram sends the sender's user object
+                        // with the page that carries their message — grammers
+                        // keeps it on `Message` — and we were discarding it.
+                        // With the roster switched off this was every name in
+                        // the export, not merely the ex-members'.
+                        self.learn_peers(&msg);
                         let sink_id = if split {
                             self.route(&msg, topics)
                         } else {
@@ -311,7 +363,7 @@ impl<'a> ChatExporter<'a> {
                         }
                         done += 1;
                         result.messages += 1;
-                        if done.is_multiple_of(100) {
+                        if done.is_multiple_of(stride) {
                             progress(Progress::Messages {
                                 chat_id: chat.id,
                                 done,
@@ -326,17 +378,33 @@ impl<'a> ChatExporter<'a> {
                             if stalled >= MAX_STALLED_WAITS {
                                 // Close what we have before giving up, or the
                                 // buffered writes are lost entirely.
-                                Self::close_all(&mut sinks, &mut result, progress);
+                                Self::close_all(
+                                    &mut sinks,
+                                    root,
+                                    chat,
+                                    topics,
+                                    split,
+                                    &mut result,
+                                    progress,
+                                );
                                 return Err(ExportError::Stalled { waits: stalled });
                             }
                             progress(Progress::FloodWait {
                                 seconds: d.as_secs(),
                             });
-                            sleep_in_slices(d).await;
+                            sleep_in_slices_until(d, cancel).await;
                             continue 'resume;
                         }
                         other => {
-                            Self::close_all(&mut sinks, &mut result, progress);
+                            Self::close_all(
+                                &mut sinks,
+                                root,
+                                chat,
+                                topics,
+                                split,
+                                &mut result,
+                                progress,
+                            );
                             return Err(ExportError::Invocation(other.to_string()));
                         }
                     },
@@ -348,33 +416,63 @@ impl<'a> ChatExporter<'a> {
         // After the read loop, not during it: the read is bounded by Telegram's
         // paging and the downloads are bounded by the pool, so overlapping them
         // buys little and costs a much harder cancel path.
-        for sink in sinks.values_mut() {
-            let jobs = std::mem::take(&mut sink.jobs);
+        //
+        // Cancelled before the first byte is fetched, the text export is
+        // already whole — so this returns the JSON and HTML rather than
+        // throwing them away for the sake of the media nobody waited for.
+        if cancel.is_cancelled() {
+            Self::close_all(&mut sinks, root, chat, topics, split, &mut result, progress);
+            return Err(ExportError::Cancelled);
+        }
+        // Keyed rather than `values_mut`: the cancel path below has to hand the
+        // whole map to `close_all`, which it cannot do while an iterator holds
+        // it borrowed.
+        let media_order: Vec<i64> = {
+            let mut ids: Vec<i64> = sinks.keys().copied().collect();
+            ids.sort();
+            ids
+        };
+        for id in media_order {
+            // The folder's name and root are lifted out of the map so the
+            // borrow ends here: the cancel check below needs the map back.
+            let Some((dir, title, jobs)) = sinks.get_mut(&id).map(|sink| {
+                (
+                    sink.output.root.clone(),
+                    sink.title.clone(),
+                    std::mem::take(&mut sink.jobs),
+                )
+            }) else {
+                continue;
+            };
             if jobs.is_empty() {
                 continue;
             }
+            // Between batches, which is as fine-grained as a cancel gets here:
+            // `run_all` puts the whole folder onto the pool at once, and
+            // interrupting it mid-flight would leave part-written files that
+            // the HTML already links to.
+            if cancel.is_cancelled() {
+                Self::close_all(&mut sinks, root, chat, topics, split, &mut result, progress);
+                return Err(ExportError::Cancelled);
+            }
             progress(Progress::Log(format!(
                 "{}: fetching {} files",
-                sink.title,
+                title,
                 jobs.len()
             )));
-            let tally = download::run_all(
-                self.client,
-                &sink.output.root,
-                jobs,
-                self.settings.download_concurrency,
-            )
-            .await;
+            let tally =
+                download::run_all(self.client, &dir, jobs, self.settings.download_concurrency)
+                    .await;
             result.media_downloaded += tally.downloaded;
             result.media_failed += tally.failed;
             result.bytes_downloaded += tally.bytes;
             // A dangling reference is worse than a stated gap.
-            if let Err(e) = download::write_missing(&sink.output.root, &tally.missing) {
+            if let Err(e) = download::write_missing(&dir, &tally.missing) {
                 progress(Progress::Log(format!("missing_media.txt: {e}")));
             }
         }
 
-        Self::close_all(&mut sinks, &mut result, progress);
+        Self::close_all(&mut sinks, root, chat, topics, split, &mut result, progress);
         progress(Progress::Messages {
             chat_id: chat.id,
             done,
@@ -405,6 +503,39 @@ impl<'a> ChatExporter<'a> {
         }
     }
 
+    /// Add whatever peers this message brought with it to the name book.
+    ///
+    /// grammers keeps the whole peer set a response carried, but only the
+    /// sender and the chat are reachable from outside the crate — which is
+    /// enough: the names that were missing belonged to people who had posted,
+    /// so they arrive as the sender of their own messages.
+    ///
+    /// The chat is learned too, because a migration notice's actor *is* the
+    /// chat and had no other source.
+    fn learn_peers(&mut self, msg: &grammers_client::message::Message) {
+        for peer in [msg.sender(), msg.peer()].into_iter().flatten() {
+            match peer {
+                grammers_client::peer::Peer::User(u) => {
+                    if let tl::enums::User::User(raw) = &u.raw {
+                        self.names.learn_user(raw);
+                    }
+                }
+                grammers_client::peer::Peer::Group(g) => {
+                    let key = match &g.raw {
+                        tl::enums::Chat::Channel(c) => PeerKey::channel(c.id),
+                        _ => PeerKey::chat(g.id().bare_id().unwrap_or(0)),
+                    };
+                    self.names
+                        .learn_chat_title(key, g.title().unwrap_or_default());
+                }
+                grammers_client::peer::Peer::Channel(c) => {
+                    self.names
+                        .learn_chat_title(PeerKey::channel(c.raw.id), c.title());
+                }
+            }
+        }
+    }
+
     fn payload(
         &mut self,
         msg: &grammers_client::message::Message,
@@ -414,6 +545,7 @@ impl<'a> ChatExporter<'a> {
         match &msg.raw {
             tl::enums::Message::Message(m) => {
                 let mut out = base_message(m, &self.names);
+                let mut preview_src: Option<String> = None;
                 // Filenames are decided **before** bytes are fetched, so the
                 // JSON and HTML stream out now and the pool catches up later.
                 if let Some(media) = &m.media {
@@ -424,6 +556,11 @@ impl<'a> ChatExporter<'a> {
                         for (k, v) in fields {
                             out.insert(k, v);
                         }
+                        // Read before the job is moved: the preview's name was
+                        // claimed by the planner, and deriving it again here
+                        // would miss any `(1)` collision suffix and point the
+                        // `<img>` at a file the pool never writes.
+                        preview_src = job.as_ref().and_then(|j| j.preview_dest.clone());
                         if let Some(job) = job {
                             let handle = if job.inline_bytes.is_some() {
                                 None
@@ -434,10 +571,51 @@ impl<'a> ChatExporter<'a> {
                         }
                         out = tgx_format::order::ordered(&out);
                     }
+                    // Media that is not a *file*. `classify` only answers "what
+                    // would we download", so a poll and a location fell through
+                    // it and the message reached the JSON as bare text — all
+                    // seven polls and all three locations in the reference.
+                    if let tl::enums::MessageMedia::Poll(p) = media {
+                        out.insert("poll".into(), convert::poll_of(p));
+                        out = tgx_format::order::ordered(&out);
+                    }
+                    if let Some((place, period)) = convert::location_of(media) {
+                        out.insert("location_information".into(), place);
+                        if let Some(seconds) = period {
+                            out.insert("live_location_period_seconds".into(), json!(seconds));
+                        }
+                        out = tgx_format::order::ordered(&out);
+                    }
+                }
+                if let Some(r) = &m.reactions {
+                    let tl::enums::MessageReactions::Reactions(r) = r;
+                    if let Some(v) = convert::reactions_of(r, &self.names) {
+                        out.insert("reactions".into(), v);
+                        out = tgx_format::order::ordered(&out);
+                    }
+                }
+                // Last, because it reads the finished map: the media paths and
+                // sizes the plan decided are what the preview points at.
+                // `Output::close` strips `_p` before the JSON is written, so
+                // this reaches the HTML writer and nothing else.
+                if let Some(p) = convert::presentation(m, &out, &self.names, preview_src.as_deref())
+                {
+                    out.insert("_p".into(), Value::Object(p));
                 }
                 out
             }
-            tl::enums::Message::Service(s) => base_service(s, &self.names),
+            tl::enums::Message::Service(s) => {
+                let mut out = base_service(s, &self.names);
+                // A service message can be reacted to like any other.
+                if let Some(r) = &s.reactions {
+                    let tl::enums::MessageReactions::Reactions(r) = r;
+                    if let Some(v) = convert::reactions_of(r, &self.names) {
+                        out.insert("reactions".into(), v);
+                        out = tgx_format::order::ordered(&out);
+                    }
+                }
+                out
+            }
             tl::enums::Message::Empty(e) => {
                 let mut out = Map::new();
                 out.insert("id".into(), json!(e.id));
@@ -454,9 +632,14 @@ impl<'a> ChatExporter<'a> {
     /// abandoned output is a *zero-byte* file, not a truncated one.
     fn close_all(
         sinks: &mut HashMap<i64, TopicSink>,
+        root: &Path,
+        chat: &ChatInfo,
+        topics: &[Topic],
+        split: bool,
         result: &mut ExportResult,
         progress: ProgressFn<'_>,
     ) {
+        let mut written: HashMap<i64, usize> = HashMap::new();
         let mut ids: Vec<i64> = sinks.keys().copied().collect();
         ids.sort();
         for id in ids {
@@ -471,9 +654,18 @@ impl<'a> ChatExporter<'a> {
                 // Topics with no messages are skipped rather than producing
                 // empty folders; the count is reported when the job finishes.
                 result.empty_topics += 1;
-                let _ = std::fs::remove_dir_all(&sink.output.root);
+                // **Only a topic subfolder.** When the chat is not split by
+                // topic, `Output::new` was handed `root` itself, so
+                // `sink.output.root == root` — and pruning it deleted the whole
+                // chat directory, taking `participants.json` (written before
+                // the read) with it and releasing the `unique_dir` reservation.
+                // An empty chat should leave an empty export, not no export.
+                if sink.output.root != root {
+                    let _ = std::fs::remove_dir_all(&sink.output.root);
+                }
             } else {
                 result.topics += 1;
+                written.insert(id, n);
                 progress(Progress::Topic {
                     title: sink.title.clone(),
                     messages: n,
@@ -485,7 +677,76 @@ impl<'a> ChatExporter<'a> {
                 }
             }
         }
+
+        // **The page every topic page links back to.** Each one opens with
+        // `<a href="../export_results.html">`, and nothing ever wrote that
+        // file — verified on a real export, where all nine pages carried the
+        // link and the target was absent. The link comes from the same `split`
+        // branch that sets `back_href`, so the two cannot drift apart.
+        if split {
+            if let Err(e) = Self::write_index(root, chat, topics, &written, result) {
+                progress(Progress::Log(format!("writing the index: {e}")));
+            }
+        }
     }
+
+    fn write_index(
+        root: &Path,
+        chat: &ChatInfo,
+        topics: &[Topic],
+        written: &HashMap<i64, usize>,
+        result: &ExportResult,
+    ) -> std::io::Result<()> {
+        // Only topics that produced a folder: an empty one had its directory
+        // removed above, so listing it would be the same dead link again.
+        let entries: Vec<tgx_html::index::IndexEntry> = topics
+            .iter()
+            .filter_map(|t| {
+                let messages = *written.get(&t.id)?;
+                let detail = match (t.pinned, t.closed) {
+                    (true, _) => Some("pinned".to_string()),
+                    (false, true) => Some("closed".to_string()),
+                    _ => None,
+                };
+                Some(tgx_html::index::IndexEntry {
+                    href: format!("{}/messages.html", t.dirname()),
+                    title: t.title.clone(),
+                    initials: tgx_format::peer::initials_from_title(&t.title).unwrap_or_default(),
+                    colour: tgx_html::userpic::userpic_class(&t.id.to_string(), None),
+                    detail,
+                    subname: tgx_format::date_pair(t.created_date)
+                        .map(|(d, _)| format!("opened {}", &d[..10])),
+                    messages,
+                })
+            })
+            .collect();
+
+        let mut parts = vec![
+            tgx_html::index::plural(entries.len(), "topic"),
+            tgx_html::index::plural(result.messages, "message"),
+        ];
+        if result.members > 0 {
+            parts.push(tgx_html::index::plural(result.members, "member"));
+        }
+        tgx_html::index::write_index(root, &chat.title, &parts.join(", "), None, &entries)
+    }
+}
+
+/// How often a read pass reports the messages it has written.
+///
+/// **One report per percent, and never less often than every ten messages.** A
+/// flat every-hundredth told a 60-message chat's row nothing at all: it showed
+/// `0` for the entire export and jumped straight to its final count. Reporting
+/// every message instead puts one channel send per message on the bridge — 6,643
+/// of them for one chat, each one repainting the window — to move a bar by a
+/// fraction of a pixel.
+///
+/// A percent is the finest step a progress bar can actually show, so that is
+/// the step. The floor of ten is what keeps a short chat moving, and is the
+/// whole rule when `total` is `0` — a count we never got, where there is no bar
+/// to fill and only a counter to advance.
+fn progress_stride(total: i64) -> usize {
+    (total / 100).max(10) as usize
 }
 
 /// `DD-MM-YYYY_HH-MM-SS`, the stamp Desktop puts in a synthesised filename.
@@ -508,21 +769,36 @@ fn reply_header(h: Option<&tl::enums::MessageReplyHeader>) -> Option<ReplyHeader
     }
 }
 
-/// Sleep in one-second slices.
+/// Sleep in one-second slices, giving up early if `cancel` fires.
 ///
 /// **Not a flat sleep.** The cap is two minutes, and a flat
 /// `sleep(Duration::from_secs(120))` swallows a click on Cancel for the whole
 /// two minutes. Both this and the progress event above were survivable at the
 /// original 20s cap and are not at 120s; raising the cap without them trades a
 /// silent data loss for an apparent freeze.
-pub async fn sleep_in_slices(total: std::time::Duration) {
+///
+/// The slicing is what makes the check possible at all: the flag is read
+/// between slices, so Stop costs at most one second here instead of the whole
+/// wait. That is the entire reason the loop is not a single `sleep`.
+pub async fn sleep_in_slices_until(total: std::time::Duration, cancel: &Cancel) {
     let mut left = total;
     let slice = std::time::Duration::from_secs(1);
     while left > std::time::Duration::ZERO {
+        if cancel.is_cancelled() {
+            return;
+        }
         let step = left.min(slice);
         tokio::time::sleep(step).await;
         left -= step;
     }
+}
+
+/// Sleep in one-second slices with nothing able to interrupt it.
+///
+/// A thin wrapper for the callers that hold no signal — see
+/// [`sleep_in_slices_until`] for why the slicing exists.
+pub async fn sleep_in_slices(total: std::time::Duration) {
+    sleep_in_slices_until(total, &Cancel::new()).await;
 }
 
 /// Reserve a folder by creating it, suffixing `(2)`, `(3)`… on a clash.
@@ -580,6 +856,35 @@ mod tests {
         assert!(r.complete());
     }
 
+    /// How many `Progress::Messages` a chat of `total` messages would send.
+    fn reports_for(total: i64) -> usize {
+        let stride = progress_stride(total);
+        (1..=total as usize)
+            .filter(|d| d.is_multiple_of(stride))
+            .count()
+    }
+
+    #[test]
+    fn a_short_chat_reports_more_than_its_final_count() {
+        // The defect: at a flat every-hundredth, a 60-message chat sent nothing
+        // during the read and its row sat at 0 until the export finished.
+        assert_eq!(progress_stride(60), 10);
+        assert_eq!(reports_for(60), 6);
+    }
+
+    #[test]
+    fn a_long_chat_reports_once_per_percent_and_not_once_per_message() {
+        assert_eq!(progress_stride(6643), 66);
+        assert_eq!(reports_for(6643), 100);
+    }
+
+    #[test]
+    fn an_uncounted_chat_still_advances_its_counter() {
+        // `0` here is "we never got a count", so there is no bar to fill; the
+        // floor is the whole rule and the counter still moves.
+        assert_eq!(progress_stride(0), 10);
+    }
+
     #[test]
     fn unique_dir_reserves_by_creating() {
         let parent = std::env::temp_dir().join(format!("tgx-uniq-{}", std::process::id()));
@@ -612,6 +917,40 @@ mod tests {
         let start = tokio::time::Instant::now();
         sleep_in_slices(std::time::Duration::from_secs(120)).await;
         assert_eq!(start.elapsed(), std::time::Duration::from_secs(120));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_token_stops_a_long_wait() {
+        // The defect this prevents: Stop clicked during a two-minute rate limit
+        // used to do nothing until the wait ran out. One slice is the ceiling.
+        let signal = Cancel::new();
+        signal.cancel();
+        let start = tokio::time::Instant::now();
+        sleep_in_slices_until(std::time::Duration::from_secs(120), &signal).await;
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "waited {:?} of a cancelled 120s sleep",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_uncancelled_wait_still_runs_its_full_length() {
+        let signal = Cancel::new();
+        let start = tokio::time::Instant::now();
+        sleep_in_slices_until(std::time::Duration::from_secs(120), &signal).await;
+        assert_eq!(start.elapsed(), std::time::Duration::from_secs(120));
+        assert!(!signal.is_cancelled());
+    }
+
+    #[test]
+    fn a_fresh_signal_is_not_cancelled_and_reset_clears_one_that_is() {
+        let signal = Cancel::new();
+        assert!(!signal.is_cancelled());
+        signal.cancel();
+        assert!(signal.is_cancelled());
+        signal.reset();
+        assert!(!signal.is_cancelled());
     }
 
     #[test]

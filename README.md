@@ -47,7 +47,11 @@ corpus test skips and says so. See *The corpus, and why it is not committed*.
 `save.bat` is the everyday driver — run it bare for a menu, or pass the action:
 `save`, `commit`, `push`, `pull`, `build`, `test`, `parity`, `corpus`, `wire`.
 It pushes to [KostaJovanovic/TelegramExporter](https://github.com/KostaJovanovic/TelegramExporter),
-and adds that remote itself on a checkout that has none.
+and adds that remote itself on a checkout that has none. `save.bat --force`
+runs `save` and, if the push is rejected, pushes with `--force-with-lease`
+instead of prompting — it still overwrites the remote branch, but refuses if
+origin moved since your last fetch, rather than clobbering a push you never
+saw.
 
 ```powershell
 cargo run -p tgx-app --bin TelegramExporter      # the window
@@ -88,9 +92,10 @@ crates/
 ```
 
 Two dependency rules are enforced by the build rather than by convention:
-`tgx-html` may not depend on `grammers-tl-types`, and the analyser (when it
-lands) may not depend on `tgx-tg`. In the Python original both were comments
-plus a binary-size heuristic.
+`tgx-html` may not depend on `grammers-tl-types`, and `tgx-parity` (the oracle)
+may not depend on `tgx-tg`. `crates/tgx-parity/tests/layering.rs` reads both
+manifests and fails `cargo test --all` if either creeps in. In the Python
+original both were comments plus a binary-size heuristic.
 
 ## Output
 
@@ -143,7 +148,7 @@ save.bat test               # fmt + clippy + every suite, the same as CI
 save.bat build              # -> dist\TelegramExporter.exe
 ```
 
-The release binary is **18.4 MB**, against the Python build's 46.4 MB. Desktop's
+The release binary is **19.5 MB**, against the Python build's 46.4 MB. Desktop's
 stylesheet, script and 42 icons are embedded in it, so there is no `_MEIPASS`
 branch, no spec file and no `datas` list.
 

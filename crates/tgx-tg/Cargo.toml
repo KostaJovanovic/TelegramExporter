@@ -15,7 +15,9 @@ grammers-client = "0.10"
 grammers-session = { version = "0.10", features = ["sqlite-storage"] }
 grammers-tl-types = "0.10"
 
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs"] }
+# `signal` is for the CLI's Ctrl-C: the JSON is streamed, so tearing the
+# process down mid-write leaves a zero-byte file rather than a partial export.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "signal"] }
 futures-util = "0.3"
 
 serde = { workspace = true }

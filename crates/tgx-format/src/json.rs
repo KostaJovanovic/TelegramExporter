@@ -81,11 +81,21 @@ pub fn message_block(body: &Map<String, Value>) -> String {
 /// Returns everything up to and including `"messages": [` and a newline.
 /// Desktop's three header keys stay first and keep their order; a topic's own
 /// metadata follows them.
+///
+/// The empty map is handled separately rather than left to the arithmetic. An
+/// empty object serialises as `{}` — two bytes, no newline — so cutting a fixed
+/// two off it leaves nothing at all, and the file opened on `,\n "messages": [`
+/// with no `{` and a leading comma: not JSON, and only found by reading the
+/// code, since every caller today passes at least `name`/`type`/`id`.
 pub fn header_prelude(header: &Map<String, Value>) -> String {
+    let inner = " ".repeat(INDENT);
+    if header.is_empty() {
+        return format!("{{\n{inner}\"messages\": [\n");
+    }
     let head = to_string(&Value::Object(header.clone()));
     // Drop the trailing "\n}" and splice the streamed array on.
-    let trimmed = &head[..head.len().saturating_sub(2)];
-    format!("{trimmed},\n{}\"messages\": [\n", " ".repeat(INDENT))
+    let trimmed = head.strip_suffix("\n}").unwrap_or(&head);
+    format!("{trimmed},\n{inner}\"messages\": [\n")
 }
 
 /// The closing bracket and brace for a streamed file.
@@ -254,6 +264,17 @@ mod tests {
         // The Python exporter appended a newline here; Desktop does not.
         assert_eq!(footer(), "\n ]\n}");
         assert!(!footer().ends_with('\n'));
+    }
+
+    #[test]
+    fn an_empty_header_still_opens_a_valid_object() {
+        // Unreachable from the exporter, but the byte-slicing form emitted
+        // `,\n "messages": [` — a file with no opening brace.
+        let out = header_prelude(&Map::new());
+        assert_eq!(out, "{\n \"messages\": [\n");
+        let whole = format!("{out}{}", footer());
+        let parsed: Value = serde_json::from_str(&whole).expect("valid JSON");
+        assert_eq!(parsed["messages"], json!([]));
     }
 
     #[test]

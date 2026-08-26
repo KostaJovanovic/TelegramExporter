@@ -28,7 +28,12 @@ indexmap = { version = "2", features = ["serde"] }
 anyhow = "1"
 thiserror = "2"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
-log = "0.4"
+# `std` is **not** a default feature of `log`, and `set_boxed_logger` is gated
+# behind it. Declared here rather than in the one crate that installs the
+# logger, because a whole-workspace build unifies features and would have hidden
+# the omission: `cargo build --workspace` passed while `cargo build -p tgx-tg`
+# did not compile.
+log = { version = "0.4", features = ["std"] }
 
 [profile.release]
 opt-level = 3
@@ -36,6 +41,6 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
-# The Python build was 42 MB via PyInstaller. Record the Rust number so a
+# The Python build was 46.4 MB via PyInstaller. Record the Rust number so a
 # sudden jump is visible, the way the Git-Bash-vs-PowerShell OpenSSL
 # discovery was (+2.5 MB from the wrong build shell).

@@ -3,16 +3,22 @@
 //! Everything here paints the Swiss language: hairline rules instead of boxes,
 //! square corners, letterspaced uppercase micro-type, one red.
 //!
-//! Three things Qt could not express and GPUI can, each of which deletes a
-//! workaround from the original:
+//! **Nothing here animates.** GPUI can express transitions where Qt could not,
+//! and the design's `--dur-*` tokens were carried over for them — but the only
+//! thing that ever used one was the drifting grid backdrop, and that is gone by
+//! decision (see `ROADMAP.md`, Phase 6). The durations went with it rather than
+//! sit here looking applied. If motion is wanted again, `analyser.css` is the
+//! source and it is three constants.
 //!
-//! * **Letter-spacing** is a real property, not a hand-set `QFont`.
-//! * **Transitions** exist, so hovers need not snap.
-//! * **Shadows** exist without a graphics effect.
+//! **Letter-spacing is not one of them.** GPUI 0.2.2 has no letter-spacing
+//! property — not on `Styled`, not on `TextStyle` — so the design's tracking is
+//! built out of layout instead; see [`tracked`]. The tokens
+//! `rhythm::TRACK_CAPS` and `rhythm::TRACK_MICRO` went unapplied for exactly as
+//! long as this file claimed otherwise.
 
 use crate::tokens::{metrics, rhythm, type_scale, Palette};
 use gpui::prelude::*;
-use gpui::{div, px, Div, Hsla, SharedString};
+use gpui::{div, px, relative, Div, Hsla, SharedString};
 
 /// A 1px rule — the design's core primitive.
 ///
@@ -34,15 +40,125 @@ pub fn soft_rule(palette: &Palette) -> Div {
     div().h(px(1.0)).w_full().bg(palette.rule)
 }
 
-/// A letterspaced uppercase micro-heading.
+/// One unit of a letterspaced run: an inked cluster, or a gap between words.
+///
+/// A space is a *variant* rather than an `Ink(" ")`, because a `div` whose only
+/// child is a single space has no reliable width — the shaper is free to trim
+/// it, and the word gap then collapses to the tracking, which reads as one long
+/// word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Glyph {
+    Ink(SharedString),
+    Space,
+}
+
+/// Split a label into the units [`tracked`] lays out.
+///
+/// **A combining mark stays with the character it marks.** Splitting on
+/// `chars()` alone would give a decomposed `é` its own box one track-space to
+/// the right of the `e`, so the accent floats between two letters. The fonts
+/// here are the merged Latin+Cyrillic Geist build, so the Cyrillic marks
+/// (U+0483..) matter as much as the Latin ones.
+fn glyphs(text: &str) -> Vec<Glyph> {
+    let mut out: Vec<Glyph> = Vec::new();
+    let mut current = String::new();
+    for c in text.chars() {
+        if is_combining(c) && !current.is_empty() {
+            current.push(c);
+            continue;
+        }
+        if !current.is_empty() {
+            out.push(Glyph::Ink(std::mem::take(&mut current).into()));
+        }
+        if c.is_whitespace() {
+            out.push(Glyph::Space);
+        } else {
+            current.push(c);
+        }
+    }
+    if !current.is_empty() {
+        out.push(Glyph::Ink(current.into()));
+    }
+    out
+}
+
+/// The combining ranges, spelled out because `std` has no character-class
+/// query and this crate takes no dependencies to get one.
+fn is_combining(c: char) -> bool {
+    matches!(c as u32,
+        0x0300..=0x036F      // combining diacritical marks
+        | 0x0483..=0x0489    // Cyrillic
+        | 0x0591..=0x05BD    // Hebrew points
+        | 0x1AB0..=0x1AFF
+        | 0x1DC0..=0x1DFF
+        | 0x20D0..=0x20F0    // combining marks for symbols
+        | 0xFE20..=0xFE2F)
+}
+
+/// How wide a word gap is, as a fraction of the type size.
+///
+/// The empty spacer cannot inherit a font's own space advance, so it is set
+/// here; 0.32em is close to Geist's and reads as one word gap rather than two.
+const SPACE_EM: f32 = 0.32;
+
+/// A letterspaced run of text.
+///
+/// **GPUI has no letter-spacing property**, so tracking is done in layout: one
+/// child per character, with the tracking as the flex `gap`. That is worth the
+/// children because the whole design language is letterspaced uppercase
+/// micro-type — `--ls-caps` and `--ls-micro` are in the stylesheet's `:root`,
+/// and an eyebrow set without them is simply a small uppercase word.
+///
+/// What it costs, and why these must stay **painted labels**: the text is no
+/// longer one text run, so it cannot be selected, cannot be searched by the
+/// platform, and will not wrap — a tracked string that outgrows its box is
+/// clipped, not broken. Never put body copy or a user-supplied string of
+/// unknown length through here.
+///
+/// The gap falls *between* glyphs and not after the last one, unlike CSS
+/// `letter-spacing`, which leaves a trailing space on every label. A tracked
+/// label therefore ends flush and still aligns to a rule beside it.
+pub fn tracked(text: impl Into<SharedString>, size: gpui::Pixels, track_em: f32) -> Div {
+    let text: SharedString = text.into();
+    let track = px(f32::from(size) * track_em);
+    let space = px(f32::from(size) * SPACE_EM);
+    let mut row = div()
+        .flex()
+        .flex_row()
+        .items_baseline()
+        .text_size(size)
+        // One line by construction. The body ratio would pad the row and push
+        // the label off the baseline it shares with whatever sits next to it.
+        .line_height(leading(size, rhythm::LINE_TIGHT))
+        .gap(track);
+    for glyph in glyphs(&text) {
+        row = row.child(match glyph {
+            // `flex_none` on every box: in a tight row the shrink would take
+            // the letters, not the row, and the tracking would go uneven
+            // before anything visibly overflowed.
+            Glyph::Ink(s) => div().flex_none().child(s),
+            Glyph::Space => div().flex_none().w(space),
+        });
+    }
+    row
+}
+
+/// A letterspaced uppercase micro-heading — `MICRO` at `TRACK_MICRO`.
 ///
 /// The design leans hard on these; in Qt they needed a hand-built `QFont`
-/// because a stylesheet has no letter-spacing at all.
+/// because a stylesheet has no letter-spacing at all, and here they need
+/// [`tracked`] for the same reason.
 pub fn eyebrow(text: impl Into<SharedString>, palette: &Palette) -> Div {
-    div()
-        .text_size(type_scale::MICRO)
-        .text_color(palette.muted)
-        .child(uppercase(text))
+    tracked(uppercase(text), type_scale::MICRO, rhythm::TRACK_MICRO).text_color(palette.muted)
+}
+
+/// Letterspaced uppercase caption at an arbitrary size — `TRACK_CAPS`.
+///
+/// Takes its colour rather than a palette: these label things that are
+/// sometimes muted, sometimes the accent, and sometimes sitting on a filled
+/// cell where neither is right.
+pub fn caps(text: impl Into<SharedString>, size: gpui::Pixels, colour: Hsla) -> Div {
+    tracked(uppercase(text), size, rhythm::TRACK_CAPS).text_color(colour)
 }
 
 /// Uppercase the caller's own string.
@@ -55,12 +171,75 @@ pub fn uppercase(text: impl Into<SharedString>) -> SharedString {
     s.to_uppercase().into()
 }
 
-/// A section number, set large in mono.
-pub fn section_number(n: u32, palette: &Palette) -> Div {
+/// A hairline square, filled when ticked.
+///
+/// Square corners — `metrics::RADIUS` is 0 and that is the design, not a
+/// default. It is applied rather than left implicit so that a future rounded
+/// theme cannot round this one control by omission.
+///
+/// **Disabled is a muted border, never a missing one.** A control that is off
+/// and a control that is unavailable must not paint the same, or the only way
+/// to tell them apart is to click and watch nothing happen. Ticked-and-disabled
+/// fills with `muted` rather than `rule`: `rule` is the divider grey and a box
+/// filled with it reads as empty on both appearances.
+///
+/// `flex_none`, because in a row with a long title the flex shrink comes out of
+/// the 12px box first and the tick vanishes before the title does.
+pub fn tick_box(ticked: bool, enabled: bool, palette: &Palette) -> Div {
+    let ink = if enabled { palette.fg } else { palette.muted };
+    let border = if enabled {
+        palette.hairline
+    } else {
+        palette.muted
+    };
     div()
-        .text_size(type_scale::HUGE)
-        .text_color(palette.fg)
-        .child(format!("{n:02}"))
+        .flex_none()
+        .w(px(12.0))
+        .h(px(12.0))
+        .rounded(metrics::RADIUS)
+        .border_1()
+        .border_color(border)
+        .when(ticked, |d| d.bg(ink))
+}
+
+/// The share of the track an indeterminate bar paints.
+///
+/// Short enough to read as a marker rather than as progress, long enough to be
+/// visible on a narrow panel.
+const INDETERMINATE_FILL: f32 = 0.12;
+
+/// The fraction actually painted, given what the caller knows.
+///
+/// **A bar reading 0% and a bar meaning "unknown" are different states.** The
+/// first says nothing has happened yet, which is true and useful; the second
+/// says the run has started and its size is not known, and painting it as 0%
+/// makes a working export look stuck. A non-finite fraction — an
+/// `n as f32 / total as f32` with `total` zero — paints empty rather than
+/// propagating a NaN into the layout.
+fn bar_fill(fraction: Option<f32>) -> f32 {
+    match fraction {
+        None => INDETERMINATE_FILL,
+        Some(f) if f.is_finite() => f.clamp(0.0, 1.0),
+        Some(_) => 0.0,
+    }
+}
+
+/// One progress bar. `None` is *indeterminate*.
+///
+/// 6px tall, as the original's `setFixedHeight(6)`: the bar is a status line,
+/// not a widget, and anything taller starts competing with the type.
+pub fn progress_bar(fraction: Option<f32>, palette: &Palette) -> Div {
+    div()
+        .w_full()
+        .h(px(6.0))
+        .rounded(metrics::RADIUS)
+        .bg(palette.rule)
+        .child(
+            div()
+                .h_full()
+                .w(relative(bar_fill(fraction)))
+                .bg(palette.accent),
+        )
 }
 
 /// One cell of the nav bar.
@@ -300,6 +479,11 @@ pub fn forum_dot(palette: &Palette) -> Hsla {
 }
 
 /// Line height in pixels for a given size.
+///
+/// GPUI's `line_height` takes a length, and the stylesheet's rhythm is ratios
+/// (`--lh-tight` 1.2, `--lh-body` 1.5, `--lh-prose` 1.65). This is the one
+/// place the two meet, so a hand-multiplied leading never drifts from the
+/// token it was derived from.
 pub fn leading(size: gpui::Pixels, ratio: f32) -> gpui::Pixels {
     px(f32::from(size) * ratio)
 }
@@ -307,11 +491,6 @@ pub fn leading(size: gpui::Pixels, ratio: f32) -> gpui::Pixels {
 /// The window's floor.
 pub fn min_window() -> (f32, f32) {
     metrics::MIN_WINDOW
-}
-
-/// Body leading, for callers that just want the default.
-pub fn body_leading() -> gpui::Pixels {
-    leading(type_scale::BODY, rhythm::LINE_BODY)
 }
 
 #[cfg(test)]
@@ -458,5 +637,99 @@ mod tests {
     fn leading_scales_with_the_ratio() {
         let l = leading(type_scale::BODY, rhythm::LINE_BODY);
         assert_eq!(f32::from(l), 24.0);
+        assert_eq!(
+            f32::from(leading(type_scale::MICRO, rhythm::LINE_TIGHT)),
+            12.0
+        );
+    }
+
+    #[test]
+    fn a_letterspaced_label_is_one_child_per_character() {
+        // The element tree cannot be walked without a window, so the split is
+        // asserted where it happens.
+        assert_eq!(glyphs("AB").len(), 2);
+        assert_eq!(
+            glyphs("AB"),
+            vec![Glyph::Ink("A".into()), Glyph::Ink("B".into())]
+        );
+    }
+
+    #[test]
+    fn a_space_survives_letterspacing() {
+        // Five boxes for "AB CD": four letters and one spacer. A dropped space
+        // would leave "ABCD" evenly tracked and unreadable as two words.
+        let g = glyphs("AB CD");
+        assert_eq!(g.len(), 5);
+        assert_eq!(g[2], Glyph::Space);
+        assert_eq!(g.iter().filter(|g| **g == Glyph::Space).count(), 1);
+    }
+
+    #[test]
+    fn an_empty_label_produces_no_children() {
+        assert!(glyphs("").is_empty());
+    }
+
+    #[test]
+    fn a_combining_mark_stays_with_its_letter() {
+        // Decomposed "é": the accent must not get its own box a track-space
+        // away from the e it belongs to.
+        let g = glyphs("e\u{0301}f");
+        assert_eq!(
+            g,
+            vec![Glyph::Ink("e\u{0301}".into()), Glyph::Ink("f".into())]
+        );
+        // Cyrillic marks too: the shipped font is the merged Latin+Cyrillic
+        // build, so both scripts go through here.
+        assert_eq!(glyphs("\u{0438}\u{0301}").len(), 1);
+    }
+
+    #[test]
+    fn tracking_is_a_multiple_of_the_type_size() {
+        // .15em at 10px is 1.5px; if this ever reads as 0.15px the em was
+        // mistaken for a fraction of a pixel and the label is not tracked.
+        let track = f32::from(type_scale::MICRO) * rhythm::TRACK_MICRO;
+        assert!((track - 1.5).abs() < 1e-4, "got {track}");
+        let caps = f32::from(type_scale::SMALL) * rhythm::TRACK_CAPS;
+        assert!((caps - 1.04).abs() < 1e-4, "got {caps}");
+    }
+
+    #[test]
+    fn an_unknown_fraction_is_not_zero_percent() {
+        // "Started, size unknown" and "started, nothing done" are different
+        // states; painting the first as the second reads as stuck.
+        assert!(bar_fill(None) > 0.0);
+        assert_eq!(bar_fill(Some(0.0)), 0.0);
+        assert_ne!(bar_fill(None), bar_fill(Some(0.0)));
+    }
+
+    #[test]
+    fn a_fraction_outside_the_track_is_clamped() {
+        assert_eq!(bar_fill(Some(-1.0)), 0.0);
+        assert_eq!(bar_fill(Some(2.0)), 1.0);
+        assert_eq!(bar_fill(Some(0.5)), 0.5);
+        // n / 0 is a real way to reach this; a NaN width would poison layout.
+        assert_eq!(bar_fill(Some(f32::NAN)), 0.0);
+        assert_eq!(bar_fill(Some(f32::INFINITY)), 0.0);
+    }
+
+    #[test]
+    fn the_indeterminate_bar_is_short_enough_to_read_as_a_marker() {
+        assert!(bar_fill(None) < 0.25, "reads as real progress");
+    }
+
+    #[test]
+    fn a_disabled_tick_box_is_not_an_unticked_one() {
+        // Off and unavailable must not paint the same. Nothing here can walk
+        // the element, so the decision itself is pinned: the border colours a
+        // disabled box uses are neither the enabled one nor the background.
+        let p = Palette::light();
+        assert_ne!(p.muted, p.hairline, "disabled would look enabled");
+        assert_ne!(p.muted, p.bg, "disabled would look borderless");
+        let _ = (
+            tick_box(false, true, &p),
+            tick_box(true, true, &p),
+            tick_box(false, false, &p),
+            tick_box(true, false, &p),
+        );
     }
 }

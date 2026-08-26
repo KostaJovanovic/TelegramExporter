@@ -103,9 +103,10 @@ pub fn userpic_colour(bare_id: i64) -> u8 {
 ///
 /// Taken from `first_name` and `last_name`, never from splitting the display
 /// string. "Nađa Gavrilović arh blokade fotograf" renders as `Nf`, because the
-/// surname really is the single word "fotograf"; splitting the joined string
-/// gives `Nf`'s neighbour and is wrong. "Relja Jarkovački pravni" renders as
-/// `R` alone because all three words are the first name.
+/// surname really is the single word "fotograf"; splitting the joined string on
+/// its first space gives `NG`, which appears nowhere in the reference's 281
+/// userpics for her. "Relja Jarkovački pravni" renders as `R` alone because all
+/// three words are the first name.
 ///
 /// The stylesheet upper-cases them, so case is kept as-is.
 pub fn initials_from_fields(first: &str, last: &str) -> String {
@@ -266,10 +267,16 @@ mod tests {
 
     #[test]
     fn initials_come_from_the_fields_not_the_display_string() {
-        // The measured case: the surname really is the single word "fotograf".
+        // The measured case: the surname really is the single word "fotograf",
+        // so the fields are "Nađa Gavrilović arh blokade" / "fotograf". This
+        // test used to hand the whole tail in as the surname and assert "NG";
+        // Desktop paints `Nf`, 281 times in the reference's HTML, and `NG`
+        // appears nowhere in it. That the display string is not what is split
+        // is settled by the hidden-forward case below, where Desktop takes the
+        // *first* two words of a name it has only as one string.
         assert_eq!(
-            initials_from_fields("Nađa", "Gavrilović arh blokade fotograf"),
-            "NG"
+            initials_from_fields("Nađa Gavrilović arh blokade", "fotograf"),
+            "Nf"
         );
         // All three words are the first name, so there is only one letter.
         assert_eq!(initials_from_fields("Relja Jarkovački pravni", ""), "R");
