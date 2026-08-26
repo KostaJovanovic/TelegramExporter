@@ -23,9 +23,9 @@ A full-scope roadmap for rewriting `C:\Users\Kosta\Projekti\telegram` in Rust on
 | **3** `tgx-html` | **done** | HTML leg: **4 of 4 topics reproduced exactly, 256,780 lines** |
 | **4** `tgx-media` | **done** | Media leg: **830 of 836 filenames**, the six being the documented custom-emoji ceiling |
 | **5** `tgx-tg` | **built, unverified** | compiles and runs; `tgx login \| chats \| export`. Exit criterion needs a live account — see below |
-| **6** `tgx-ui` | not started | |
-| **7** `tgx-app` | not started | |
-| **8** Packaging | not started | |
+| **6** `tgx-ui` | **done** | tokens from `analyser.css`, components, empty states; **gpui builds and renders on Windows** |
+| **7** `tgx-app` | **built** | window opens and stays up; nav bar, chat list, settings, queue, status bar all live |
+| **8** Packaging | **done** | release binary **9.8 MB** (Python: 46.4 MB), assets embedded, CI on `windows-latest` |
 
 ### Phase 5 is written but cannot be signed off by me
 
@@ -55,7 +55,26 @@ Still outstanding inside Phase 5, all of it below the converter:
   `fetch_participants`, invites, scheduled) on top of the typed errors
 - reactor-name and custom-emoji resolution
 
-194 tests across 8 suites. Run the legs with:
+297 tests across 14 suites; `cargo clippy` and `cargo fmt --check` clean.
+
+### Risks that are now retired
+
+| # | Risk | Outcome |
+|---|---|---|
+| 1 | gpui/gpui-component are pre-1.0 | Pinned with `=0.2.2`. `gpui-component` declares `gpui ^0.2.2`, so the pin holds if it is added. |
+| 3 | JSON escaping differs silently | Pinned by the json leg **and** by unit tests checked against CPython's actual output. |
+| 8 | **GPUI needs a working GPU** | **gpui builds on Windows in 1m45s and the window renders here** — launched for 10s with empty stderr. |
+
+### Still open
+
+* **Risk 4 (DirectWrite colour fringing)** is unmeasured. GPUI renders through
+  DirectWrite, which is exactly what the Qt original abandoned over fringing on
+  light text over near-black. The measurement task in Phase 6 has not been run.
+* **Risk 2 (`N:\` disappears)** — the reference is still only on `N:\`. The
+  preview-sizing fixture is committed, but the golden corpus for the json/html
+  legs is not.
+
+Run the legs with:
 
 ```powershell
 cargo run -p tgx-parity -- json "N:\telegram export\UA KOLAB TELEGRAM"
