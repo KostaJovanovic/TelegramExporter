@@ -27,7 +27,10 @@ reach**: `tgx-tg`'s wire-facing half and `tgx-app`.
 
 ## Critical
 
-- [ ] **1. Two-factor sign-in through the GUI can never complete.**
+- [x] **1. Two-factor sign-in through the GUI can never complete.** *Fixed in
+  `5f14fa8`: one `Session` is now held in `actions::PENDING` across the steps,
+  kept through `NeedPassword` and a mistyped code, dropped on success and on
+  Cancel.*
   `crates/tgx-app/src/actions.rs:83` builds a *fresh* `Session` on every login
   step; line 111 then calls `session.check_password(&secret)`.
   `check_password` (`crates/tgx-tg/src/client.rs:132`) does
@@ -43,7 +46,11 @@ reach**: `tgx-tg`'s wire-facing half and `tgx-app`.
   **Fix:** keep the `Session` alive across login steps — own it on the shell, or
   move the whole exchange into one task that awaits the user's input.
 
-- [ ] **1b. The code path re-requests a login code before submitting one.**
+- [x] **1b. The code path re-requests a login code before submitting one.**
+  *Fixed in `5f14fa8`. It was worse than a possibly-new `phone_code_hash`:
+  Telegram treats a second `auth.sendCode` as starting over, so it invalidated
+  the code the user was typing, and repeated attempts drew `AUTH_RESTART`, which
+  is now also retried once where it is raised.*
   `actions.rs:91-96` calls `request_code` again, then `sign_in(&secret)` — the
   code the user typed is submitted against a possibly-new `phone_code_hash`.
   Falls out of the same fix.
@@ -146,7 +153,9 @@ reach**: `tgx-tg`'s wire-facing half and `tgx-app`.
   **Fix:** build `_p` in `engine::payload` from the `NameBook` it already
   maintains; note in ROADMAP that inline preview *rendering* remains open.
 
-- [ ] **10. `icacls` and `explorer` are launched by bare name.**
+- [x] **10. `icacls` and `explorer` are launched by bare name.** *Both fixed:
+  `icacls` in `e6dbe77` via `config::system32`, `explorer` likewise. The audit
+  was right that this is the moment the app is securing its credential store.*
   `crates/tgx-tg/src/config.rs:262` and `crates/tgx-app/src/actions.rs:262`.
   Windows `CreateProcess` search order includes the application directory and
   the current directory before `PATH`, and this app is explicitly designed to be

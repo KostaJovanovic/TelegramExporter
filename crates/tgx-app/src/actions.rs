@@ -299,8 +299,14 @@ pub fn open_output_folder(dir: &str) {
     if !path.exists() {
         let _ = std::fs::create_dir_all(path);
     }
+    // Absolute, for the same reason icacls is: CreateProcess searches the
+    // calling process's own directory before PATH, and this app is built to be
+    // copied into arbitrary folders. A planted explorer.exe beside it would run
+    // with the user's rights.
     #[cfg(windows)]
-    let _ = std::process::Command::new("explorer").arg(path).spawn();
+    let _ = std::process::Command::new(tgx_tg::config::system32("explorer.exe"))
+        .arg(path)
+        .spawn();
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg(path).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]

@@ -23,6 +23,26 @@ The exporter's **output is finished and proven**. The **window is not**.
 binary 18.5 MB in `dist/`. `origin` is set to
 `KostaJovanovic/TelegramExporter`; **nothing has been pushed**.
 
+## Read `AUDIT.md` too
+
+`AUDIT.md` is a full read of every crate, done at commit `2906e86`, with a live
+baseline run. **It is the defect list for the core; this document is the defect
+list for the window.** Do not treat either as complete on its own.
+
+Three of its items are already fixed and ticked there: the GUI's 2FA being
+impossible (1), the code path re-requesting a login code (1b), and `icacls` /
+`explorer` launched by bare name (10). The rest are open, and several are
+serious — Telegram's own thumbnails written into `result.json` but never
+downloaded, every channel exported as `public_*`, an empty non-forum chat
+deleting its own export folder, `FLOOD_PREMIUM_WAIT` classified as a permanent
+refusal, and the media parity leg asserting nothing.
+
+Its finding 3 also carries detail this document does not: after Stop, the Export
+button re-enables, so a second concurrent export of the same queue can be
+started; `ExportError::Cancelled` is never constructed anywhere; and
+`engine::sleep_in_slices` justifies itself entirely by a cancel signal that does
+not exist, so the slicing is currently a no-op for its stated purpose.
+
 ## Rules that must not be broken
 
 1. **Fix the code, never the reference.** The corpus is sha256-checked in
