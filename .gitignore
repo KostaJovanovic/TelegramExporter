@@ -6,6 +6,12 @@
 TelegramExporterData/
 Exports/
 
+# The built exe and whatever it writes beside itself. The folder itself is
+# tracked (dist/.gitkeep) so a fresh clone has somewhere to build into; its
+# contents never are — TelegramExporterData\ holds the session key.
+/dist/*
+!/dist/.gitkeep
+
 # Local scratch
 *.log
 

@@ -224,9 +224,9 @@ echo.
 call :checkcargo
 if errorlevel 1 goto end
 
-rem A running instance holds the exe open and the linker fails on it. Killing it
-rem first is not optional. taskkill exits non-zero when nothing was running,
-rem which is the normal case.
+rem A running instance holds both the linker output and dist\%EXENAME% open,
+rem so the build fails and then the copy does. Killing it first is not optional.
+rem taskkill exits non-zero when nothing was running, which is the normal case.
 echo [exe]  stop any running instance
 taskkill /F /IM %EXENAME% >nul 2>&1
 if errorlevel 1 (echo        none running) else (echo        stopped)
@@ -246,9 +246,21 @@ if not exist "target\release\%EXENAME%" (
   goto end
 )
 
-for /f %%s in ('powershell -NoProfile -Command "'{0:N1}' -f ((Get-Item 'target\release\%EXENAME%').Length/1MB)"') do set EXESIZE=%%s
+rem The exe ships from dist\, not from target\. cargo clean empties target,
+rem and the app keeps its state beside its own executable -- so an exe living
+rem in a build directory would take TelegramExporterData\ and Exports\ down
+rem with it. dist\ is a folder you can copy anywhere and it still works.
+if not exist "dist" mkdir dist
+copy /y "target\release\%EXENAME%" "dist\%EXENAME%" >nul
+if errorlevel 1 (
+  echo [err]  could not copy the exe into dist\ - is it still running?
+  set SAVE_ERROR=1
+  goto end
+)
+
+for /f %%s in ('powershell -NoProfile -Command "'{0:N1}' -f ((Get-Item 'dist\%EXENAME%').Length/1MB)"') do set EXESIZE=%%s
 echo.
-echo [ok]   target\release\%EXENAME%  %EXESIZE% MB
+echo [ok]   dist\%EXENAME%  %EXESIZE% MB
 echo        (the PyInstaller build of the Python original was 46.4 MB)
 goto end
 
