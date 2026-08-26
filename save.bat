@@ -20,6 +20,11 @@ rem that export into reference\, and the legs run against it with identical
 rem results. When reference\ exists, parity works with the drive unplugged.
 set CORPUS=reference
 
+rem Two clocks. T0 covers the whole run and is reported at the end; TS is
+rem restarted per step, so a slow run says *which* step was slow rather than
+rem leaving you watching a crate counter and guessing.
+call :clock T0
+
 set SAVE_ERROR=0
 set COMMIT_ONLY=0
 set FORCE_MODE=0
@@ -99,18 +104,24 @@ rem fix, and CI runs both with -D warnings, so a commit that skips them is a
 rem commit that breaks the build somewhere else.
 echo.
 echo [chk]  cargo fmt
+call :clock TS
 cargo fmt --all --check
 if errorlevel 1 goto testsfailed
+call :since TS "cargo fmt"
 
 echo.
 echo [chk]  cargo clippy
+call :clock TS
 cargo clippy --all-targets --all-features -- -D warnings
 if errorlevel 1 goto testsfailed
+call :since TS "cargo clippy"
 
 echo.
 echo [chk]  cargo test
+call :clock TS
 cargo test --all
 if errorlevel 1 goto testsfailed
+call :since TS "cargo test"
 
 rem The output format is verified, not asserted -- re-run it after any change to
 rem the writers. Skipped, loudly, when neither the corpus nor the drive is here.
@@ -232,6 +243,7 @@ taskkill /F /IM %EXENAME% >nul 2>&1
 if errorlevel 1 (echo        none running) else (echo        stopped)
 
 echo [exe]  cargo build --release
+call :clock TS
 cargo build --release -p tgx-app
 if errorlevel 1 (
   echo.
@@ -239,6 +251,7 @@ if errorlevel 1 (
   set SAVE_ERROR=1
   goto end
 )
+call :since TS "release build"
 
 if not exist "target\release\%EXENAME%" (
   echo [err]  build reported success but target\release\%EXENAME% is missing
@@ -272,12 +285,18 @@ echo === test: fmt, clippy, every suite ===
 echo.
 call :checkcargo
 if errorlevel 1 goto end
+call :clock TS
 cargo fmt --all --check
 if errorlevel 1 set SAVE_ERROR=1
+call :since TS "cargo fmt"
+call :clock TS
 cargo clippy --all-targets --all-features -- -D warnings
 if errorlevel 1 set SAVE_ERROR=1
+call :since TS "cargo clippy"
+call :clock TS
 cargo test --all
 if errorlevel 1 set SAVE_ERROR=1
+call :since TS "cargo test"
 goto end
 
 
@@ -291,6 +310,7 @@ if errorlevel 1 goto end
 call :pickref
 if errorlevel 1 goto noref
 echo [ref]  %PARITYROOT%
+call :clock TS
 echo.
 cargo run -q -p tgx-parity -- json "%PARITYROOT%"
 if errorlevel 1 set SAVE_ERROR=1
@@ -300,6 +320,7 @@ if errorlevel 1 set SAVE_ERROR=1
 echo.
 cargo run -q -p tgx-parity -- media "%PARITYROOT%"
 if errorlevel 1 set SAVE_ERROR=1
+call :since TS "parity"
 goto end
 
 :noref
@@ -424,6 +445,24 @@ if errorlevel 1 (
 )
 exit /b 0
 
+rem Unix seconds via PowerShell rather than %TIME%, which is locale-formatted
+rem and wraps at midnight -- a build started at 23:58 would report as negative.
+:clock
+for /f %%t in ('powershell -NoProfile -Command "[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()"') do set %~1=%%t
+exit /b 0
+
+rem :since <clock var> <label>  ->  [time] <label> 4m 12s
+:since
+set CLKVAL=!%~1!
+if not defined CLKVAL exit /b 0
+rem usebackq + backticks, so the PowerShell can use single quotes: the plain
+rem for /f form wraps the command in single quotes itself and there is no way
+rem to escape one inside it. Floor, not [int]: PowerShell rounds to nearest
+rem on a cast, so 752s printed as 13m 32s.
+for /f "usebackq delims=" %%e in (`powershell -NoProfile -Command "$s=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()-!CLKVAL!; if($s -ge 60){'{0}m {1:D2}s' -f [math]::Floor($s/60),($s%%60)}else{'{0}s' -f $s}"`) do set TOOK=%%e
+echo [time] %~2 !TOOK!
+exit /b 0
+
 :checkcargo
 where cargo >nul 2>&1
 if not errorlevel 1 exit /b 0
@@ -463,6 +502,7 @@ exit /b 0
 
 
 :end
+call :since T0 "total"
 echo.
 pause
 exit /b %SAVE_ERROR%
