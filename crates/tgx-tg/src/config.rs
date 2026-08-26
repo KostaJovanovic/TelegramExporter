@@ -244,24 +244,46 @@ fn same_shape(a: &Value, b: &Value) -> bool {
 }
 
 /// Create the data directory and restrict it to the current user.
+///
+/// **The restriction runs once per process, not once per call.** This is on the
+/// path of every action the window takes — connect, list chats, list topics,
+/// export — and the Windows implementation shells out to `icacls`, so calling
+/// it per action meant spawning a process on every click. The permissions do
+/// not change between calls; re-asserting them thousands of times only costs.
 pub fn ensure_data_dir() -> std::io::Result<PathBuf> {
+    use std::sync::OnceLock;
+    static RESTRICTED: OnceLock<()> = OnceLock::new();
+
     let dir = data_dir();
     std::fs::create_dir_all(&dir)?;
-    restrict_to_current_user(&dir);
+    if RESTRICTED.get().is_none() {
+        restrict_to_current_user(&dir);
+        let _ = RESTRICTED.set(());
+    }
     Ok(dir)
 }
 
 #[cfg(windows)]
 fn restrict_to_current_user(dir: &std::path::Path) {
+    use std::os::windows::process::CommandExt;
+
     // icacls is the documented way to do this without pulling in a Win32 ACL
     // crate. A failure is logged rather than fatal: on FAT32/exFAT there are no
     // ACLs at all, and the export must still run — but the user is told, since
     // the folder holds a bearer credential.
+    //
+    // CREATE_NO_WINDOW, because the app is a GUI binary and a console child
+    // gets a console window of its own. Without this the user sees a black
+    // cmd box flash on screen — which, in an app that is about to ask for
+    // their phone number and a login code, looks exactly like malware.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
     let out = std::process::Command::new("icacls")
         .arg(dir)
         .arg("/inheritance:r")
         .arg("/grant:r")
         .arg(format!("{}:(OI)(CI)F", whoami()))
+        .creation_flags(CREATE_NO_WINDOW)
         .output();
     match out {
         Ok(o) if o.status.success() => {}
