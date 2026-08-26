@@ -93,15 +93,31 @@ impl Session {
     }
 
     /// Ask Telegram to send a login code.
+    ///
+    /// **Calling this twice invalidates the first code.** Telegram treats a
+    /// second `auth.sendCode` as starting over, so the code already in the
+    /// user's hand stops working. Request once per attempt and keep the
+    /// `Session` alive until the code is submitted.
     pub async fn request_code(&mut self, phone: &str) -> Result<LoginStep> {
         if self.is_authorized().await? {
             return Ok(LoginStep::Ready);
         }
-        let token = self
-            .client
-            .request_login_code(phone, &self.api_hash)
-            .await
-            .map_err(|e| anyhow!("requesting a login code: {e}"))?;
+        let token = match self.client.request_login_code(phone, &self.api_hash).await {
+            Ok(t) => t,
+            // AUTH_RESTART means "an earlier authorisation was left half
+            // finished; begin again" — and beginning again is this same call.
+            // Retried once, because a user who is told to restart, restarts by
+            // pressing the same button, and there is nothing else for them to
+            // do differently.
+            Err(e) if is_auth_restart(&e) => {
+                log::warn!("Telegram asked to restart the login; retrying once");
+                self.client
+                    .request_login_code(phone, &self.api_hash)
+                    .await
+                    .map_err(|e| anyhow!("requesting a login code: {e}"))?
+            }
+            Err(e) => return Err(anyhow!("requesting a login code: {e}")),
+        };
         self.token = Some(token);
         Ok(LoginStep::NeedCode)
     }
@@ -213,6 +229,14 @@ impl ChatKind {
             ChatKind::Private | ChatKind::Bot => "personal_chat",
         }
     }
+}
+
+/// Is this Telegram telling us the authorisation flow must start over?
+///
+/// Matched on the name rather than the code: Telegram sends it as a 500, which
+/// is otherwise "server had a problem" and not something to retry blindly.
+pub fn is_auth_restart(e: &grammers_client::InvocationError) -> bool {
+    e.to_string().contains("AUTH_RESTART")
 }
 
 impl Drop for Session {

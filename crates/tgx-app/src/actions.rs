@@ -46,6 +46,29 @@ pub async fn sign_in(settings: Settings, tx: Sender<Event>) {
     }
 }
 
+/// The sign-in in progress, held between the steps the user drives.
+///
+/// **The login token cannot be re-derived, and the code cannot be re-requested
+/// without invalidating itself.** Telegram treats a second `auth.sendCode` as
+/// starting the authorisation over, so asking again — which is what this used
+/// to do, once per step — cancelled the code the user was in the middle of
+/// typing and eventually answered `AUTH_RESTART`. Each step runs as its own
+/// task, so the session lives here rather than on a stack frame.
+///
+/// It holds a half-finished credential, so it is cleared the moment the
+/// sign-in ends, either way.
+static PENDING: std::sync::OnceLock<tokio::sync::Mutex<Option<Session>>> =
+    std::sync::OnceLock::new();
+
+fn pending() -> &'static tokio::sync::Mutex<Option<Session>> {
+    PENDING.get_or_init(|| tokio::sync::Mutex::new(None))
+}
+
+/// Drop any half-finished sign-in.
+pub async fn forget_pending_login() {
+    *pending().lock().await = None;
+}
+
 /// Ask Telegram to send a login code.
 pub async fn request_code(settings: Settings, tx: Sender<Event>) {
     let mut session = match Session::connect(&settings).await {
@@ -65,6 +88,9 @@ pub async fn request_code(settings: Settings, tx: Sender<Event>) {
             }
         },
         Ok(_) => {
+            // Held for the next step. The code Telegram just sent is only
+            // usable with the token on this session.
+            *pending().lock().await = Some(session);
             let _ = tx.send(Event::LoginStage(crate::login::Stage::Code));
         }
         Err(e) => {
@@ -75,27 +101,26 @@ pub async fn request_code(settings: Settings, tx: Sender<Event>) {
 
 /// Submit the code, or the two-factor password.
 ///
-/// **A `Session` cannot be carried across steps here**, because each step
-/// runs as its own task: the login token lives on the session and would be
-/// dropped between them. Telegram allows re-requesting, so the code path
-/// re-establishes the session and asks again rather than holding a
-/// half-finished credential across an await the user controls.
-pub async fn finish_login(settings: Settings, secret: String, is_code: bool, tx: Sender<Event>) {
-    let mut session = match Session::connect(&settings).await {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = tx.send(Event::LoginFailed(e.to_string()));
-            return;
-        }
+/// Continues the session [`request_code`] left in [`PENDING`]. It does **not**
+/// re-request the code: that starts the authorisation over and invalidates the
+/// one the user just typed.
+pub async fn finish_login(_settings: Settings, secret: String, is_code: bool, tx: Sender<Event>) {
+    let mut held = pending().lock().await;
+    let Some(session) = held.as_mut() else {
+        // Nothing to continue: the dialog was reopened, or the app restarted
+        // between the code arriving and it being typed.
+        let _ = tx.send(Event::LoginFailed(
+            "That sign-in expired. Send a new code.".into(),
+        ));
+        let _ = tx.send(Event::LoginStage(crate::login::Stage::Phone));
+        return;
     };
     if is_code {
-        if let Err(e) = session.request_code(&settings.phone).await {
-            let _ = tx.send(Event::LoginFailed(e.to_string()));
-            return;
-        }
         match session.sign_in(&secret).await {
             Ok(LoginStep::Ready) => {}
             Ok(LoginStep::NeedPassword) => {
+                // Kept: the password token `sign_in` stashed lives on this
+                // session and there is no way to obtain another.
                 let _ = tx.send(Event::LoginStage(crate::login::Stage::Password));
                 return;
             }
@@ -103,6 +128,8 @@ pub async fn finish_login(settings: Settings, secret: String, is_code: bool, tx:
                 let _ = tx.send(Event::LoginFailed("Telegram wanted another code.".into()));
                 return;
             }
+            // Kept as well. A mistyped code does not spend the token, so the
+            // user retypes rather than starting the whole sign-in again.
             Err(e) => {
                 let _ = tx.send(Event::LoginFailed(e.to_string()));
                 return;
@@ -114,6 +141,10 @@ pub async fn finish_login(settings: Settings, secret: String, is_code: bool, tx:
     }
     match session.me().await {
         Ok(name) => {
+            // Signed in: the auth key is on disk now, so every later action
+            // reconnects on its own. Drop the half-finished credential rather
+            // than leaving it and its open connection alive for the run.
+            *held = None;
             let _ = tx.send(Event::SignedIn(name));
         }
         Err(e) => {
