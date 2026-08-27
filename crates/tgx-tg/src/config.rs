@@ -101,7 +101,6 @@ pub struct Settings {
     /// output.
     pub link_previews: bool,
 
-
     // Extra requests that recover what Telegram sends only when asked. None of
     // these exist in Desktop's format; each is separately switchable because
     // each costs traffic, and each degrades to nothing on failure.
