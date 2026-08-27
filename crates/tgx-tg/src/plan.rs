@@ -401,9 +401,16 @@ pub fn plan(
                 thumb_dest = Some(claimed);
             }
             // Skipped. Desktop still records that a thumbnail exists, with the
-            // same note it put in `file`, and reserves no name for it.
+            // same note it put in `file`, and reserves no name for it — but it
+            // still writes the **size**, in all 1,544 cases: 257 saved and
+            // 1,287 skipped. Writing it only on the saved branch made this one
+            // key 1,287 of the last live run's 1,290 `absent` findings, which
+            // is to say nearly every field the reference had and we did not.
             None => {
                 fields.insert("thumbnail".into(), json!(placeholder));
+                if facts.thumb_size > 0 {
+                    fields.insert("thumbnail_file_size".into(), json!(facts.thumb_size));
+                }
             }
         }
     }
@@ -417,7 +424,12 @@ pub fn plan(
     if facts.duration > 0 {
         fields.insert("duration_seconds".into(), json!(facts.duration));
     }
-    if let Some(e) = &facts.sticker_emoji {
+    // `Some("")` is not the same as `Some("👍")`. A sticker whose document
+    // carries an empty `alt` produced `"sticker_emoji": ""` on 11 messages in
+    // the last live run and on none in the reference — Desktop omits the key
+    // rather than writing a blank one, which is what every other optional field
+    // here already does.
+    if let Some(e) = facts.sticker_emoji.as_deref().filter(|e| !e.is_empty()) {
         fields.insert("sticker_emoji".into(), json!(e));
     }
     if let Some(p) = &facts.performer {
@@ -604,6 +616,46 @@ mod tests {
     }
 
     #[test]
+    fn a_sticker_with_no_emoji_does_not_get_an_empty_one() {
+        // `Some("")` is not `Some("👍")`. A document whose `alt` is empty wrote
+        // `"sticker_emoji": ""` on 11 messages in the last live run, against
+        // zero in the whole reference — Desktop omits the key rather than
+        // writing a blank one, which is what every other optional field in this
+        // function already does.
+        let mut book = NameBook::new();
+        let base = MediaFacts {
+            kind: "stickers",
+            media_type: Some("sticker"),
+            file_name: Some("sticker.webp".into()),
+            mime_type: "image/webp".into(),
+            size: 1024,
+            width: 512,
+            height: 512,
+            duration: 0,
+            sticker_emoji: Some(String::new()),
+            performer: None,
+            title: None,
+            thumb_size: 0,
+            has_thumb: false,
+            stripped: None,
+            spoiler: false,
+        };
+        let (f, _) = plan(&base, 1, "s", &mut book, &settings());
+        assert!(
+            f.get("sticker_emoji").is_none(),
+            "an empty alt must not become an empty key: {:?}",
+            f.get("sticker_emoji")
+        );
+
+        let with = MediaFacts {
+            sticker_emoji: Some("👍".into()),
+            ..base
+        };
+        let (f, _) = plan(&with, 2, "s", &mut book, &settings());
+        assert_eq!(f["sticker_emoji"], "👍");
+    }
+
+    #[test]
     fn a_skipped_document_records_its_thumbnail_as_skipped_too() {
         // 1,287 of the reference's 1,786 skipped files carry a `thumbnail`
         // key — and its value is the *placeholder*, the same note Desktop put
@@ -642,8 +694,19 @@ mod tests {
         let (f, job) = plan(&facts, 1, "s", &mut book, &s);
         assert_eq!(f["file"], TOO_LARGE);
         assert_eq!(f["thumbnail"], TOO_LARGE);
-        // No size either: there is no file for it to be the size of.
-        assert!(f.get("thumbnail_file_size").is_none());
+        // The size **is** written, and this assertion used to say the opposite
+        // — "there is no file for it to be the size of", which sounds right and
+        // is not what Desktop does. Re-measured against the reference:
+        //
+        //    257  thumbnail saved,   thumbnail_file_size present
+        //   1287  thumbnail skipped, thumbnail_file_size present
+        //      0  thumbnail present, thumbnail_file_size absent
+        //
+        // The size describes the thumbnail Telegram *has*, not the one we
+        // fetched, so a skip does not make it unknown. This single key was
+        // 1,287 of the last live run's 1,290 missing fields — and the test that
+        // should have caught it asserted the defect instead.
+        assert_eq!(f["thumbnail_file_size"], 4096);
         assert!(job.is_none(), "the file itself is not fetched");
         // And no name was reserved for a thumbnail nobody will fetch.
         assert_eq!(book.counter("thumb"), 0);
