@@ -133,6 +133,40 @@ fn on_off(v: bool) -> &'static str {
     }
 }
 
+/// A topic's own metadata, for the head of its `result.json`.
+///
+/// Everything here arrived with the topic listing, so writing it costs
+/// nothing; only `topic_id` was being kept.
+fn topic_head(t: &Topic) -> Map<String, Value> {
+    let mut head = Map::new();
+    head.insert("topic_id".into(), json!(t.id));
+    if !t.created_by.is_empty() {
+        head.insert("topic_created_by".into(), json!(t.created_by));
+    }
+    if let Some((date, _)) = tgx_format::date_pair(t.created_date) {
+        head.insert("topic_created".into(), json!(date));
+    }
+    // A string, as Desktop's own extension fields carry ids: a 64-bit
+    // document id does not survive a JSON reader that parses numbers as
+    // doubles, and this one is only ever compared, never arithmetic.
+    if let Some(e) = t.icon_emoji_id {
+        head.insert("topic_icon_emoji_id".into(), json!(e.to_string()));
+    }
+    if t.icon_color != 0 {
+        head.insert("topic_icon_color".into(), json!(t.icon_color));
+    }
+    for (flag, key) in [
+        (t.closed, "topic_closed"),
+        (t.hidden, "topic_hidden"),
+        (t.pinned, "topic_pinned"),
+    ] {
+        if flag {
+            head.insert(key.into(), json!(true));
+        }
+    }
+    head
+}
+
 /// One message, as a single line of log.
 ///
 /// Reads the finished payload rather than the TL object, so what it reports is
@@ -424,13 +458,71 @@ impl<'a> ChatExporter<'a> {
             )));
         }
 
+        // --- enrichment, before the read ------------------------------------
+        // **Before the sinks**, not merely before the read. The roster's names
+        // have to reach the very first message, and what it found — how many,
+        // and whether that was all of them — belongs in every header this
+        // export is about to write.
+        if self.settings.member_roster {
+            let roster = enrich::fetch_participants(
+                self.client,
+                peer,
+                self.settings,
+                &mut tally,
+                |seconds| progress(Progress::FloodWait { seconds }),
+            )
+            .await;
+            result.members = roster.members.len();
+            result.members_complete = roster.complete;
+            progress(Progress::Log(format!(
+                "roster: {} members, {} — {} extra request(s), {:.1}s in",
+                roster.members.len(),
+                if roster.complete {
+                    "complete"
+                } else {
+                    "CAPPED"
+                },
+                tally.requests,
+                started.elapsed().as_secs_f64()
+            )));
+            for m in &roster.members {
+                if let Some(id) = m.get("id").and_then(Value::as_str) {
+                    if let Some(name) = m.get("name").and_then(Value::as_str) {
+                        self.names.names.insert(id.to_string(), name.to_string());
+                        self.names.html.insert(id.to_string(), name.to_string());
+                    }
+                }
+            }
+            if !roster.members.is_empty() {
+                let body =
+                    serde_json::to_string_pretty(&roster.to_json()).unwrap_or_else(|_| "{}".into());
+                std::fs::create_dir_all(root)?;
+                std::fs::write(root.join("participants.json"), body)?;
+            }
+            if !roster.complete {
+                progress(Progress::Log(
+                    "the member list is incomplete — Telegram stopped serving it".into(),
+                ));
+            }
+            // In the header as well as the file, because a reader with only
+            // `result.json` in front of them otherwise cannot tell a roster
+            // that was capped from one that was whole.
+            if self.settings.chat_metadata {
+                chat_head.insert("members_listed".into(), json!(roster.members.len()));
+                chat_head.insert("members_complete".into(), json!(roster.complete));
+            }
+        }
+
         // Pre-create a sink per topic so the folder names are stable and the
         // index can list them even if a topic turns out empty.
         if split {
             for t in topics {
                 let dir = root.join(t.dirname());
-                let mut head = Map::new();
-                head.insert("topic_id".into(), json!(t.id));
+                // **All of it, because none of it costs a request.** The
+                // forum listing hands 22 fields over with the title and we
+                // were keeping one. Who opened a topic and when is part of
+                // what the topic is, and the folder name records neither.
+                let mut head = topic_head(t);
                 // Every topic folder is a standalone export, so each carries
                 // the chat's details rather than one of them holding it.
                 for (k, v) in &chat_head {
@@ -474,52 +566,6 @@ impl<'a> ChatExporter<'a> {
                     jobs: Vec::new(),
                 },
             );
-        }
-
-        // --- enrichment, before the read ------------------------------------
-        // **Before**, so the roster's names are available to the very first
-        // message rather than the last.
-        if self.settings.member_roster {
-            let roster = enrich::fetch_participants(
-                self.client,
-                peer,
-                self.settings,
-                &mut tally,
-                |seconds| progress(Progress::FloodWait { seconds }),
-            )
-            .await;
-            result.members = roster.members.len();
-            result.members_complete = roster.complete;
-            progress(Progress::Log(format!(
-                "roster: {} members, {} — {} extra request(s), {:.1}s in",
-                roster.members.len(),
-                if roster.complete {
-                    "complete"
-                } else {
-                    "CAPPED"
-                },
-                tally.requests,
-                started.elapsed().as_secs_f64()
-            )));
-            for m in &roster.members {
-                if let Some(id) = m.get("id").and_then(Value::as_str) {
-                    if let Some(name) = m.get("name").and_then(Value::as_str) {
-                        self.names.names.insert(id.to_string(), name.to_string());
-                        self.names.html.insert(id.to_string(), name.to_string());
-                    }
-                }
-            }
-            if !roster.members.is_empty() {
-                let body =
-                    serde_json::to_string_pretty(&roster.to_json()).unwrap_or_else(|_| "{}".into());
-                std::fs::create_dir_all(root)?;
-                std::fs::write(root.join("participants.json"), body)?;
-            }
-            if !roster.complete {
-                progress(Progress::Log(
-                    "the member list is incomplete — Telegram stopped serving it".into(),
-                ));
-            }
         }
 
         // --- the single pass ------------------------------------------------

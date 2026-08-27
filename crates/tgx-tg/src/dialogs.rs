@@ -361,6 +361,14 @@ pub struct Topic {
     pub hidden: bool,
     pub pinned: bool,
     pub icon_emoji_id: Option<i64>,
+    /// The palette index Telegram assigned the topic's icon.
+    pub icon_color: i32,
+    /// Who opened it, as a typed peer key.
+    ///
+    /// **The listing hands this over with the title, so it costs nothing.**
+    /// It was being read off the wire and thrown away: who opened a topic and
+    /// when is part of what the topic is, and the folder name records neither.
+    pub created_by: String,
     pub top_message: i64,
     pub created_date: i64,
 }
@@ -374,6 +382,8 @@ impl Topic {
             hidden: false,
             pinned: false,
             icon_emoji_id: None,
+            icon_color: 0,
+            created_by: String::new(),
             top_message: 0,
             created_date: 0,
         }
@@ -441,6 +451,8 @@ pub async fn list_topics(client: &Client, peer: PeerRef) -> Result<Vec<Topic>, E
                     hidden: t.hidden,
                     pinned: t.pinned,
                     icon_emoji_id: t.icon_emoji_id,
+                    icon_color: t.icon_color,
+                    created_by: crate::convert::peer_key(&t.from_id).to_string(),
                     top_message: t.top_message as i64,
                     created_date: t.date as i64,
                 });

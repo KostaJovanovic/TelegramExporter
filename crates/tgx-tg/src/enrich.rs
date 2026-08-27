@@ -139,7 +139,13 @@ pub async fn fetch_participants(
         return roster;
     }
     let Some(channel) = channel_ref(peer) else {
-        return roster;
+        // **Not a channel is not "no members".** `channels.getParticipants` is
+        // channel-only, so a basic group returned an empty roster that claimed
+        // to be complete — a member list of nobody, indistinguishable from a
+        // group with no members. Its members ride along with
+        // `messages.getFullChat` instead, which the chat-details pass already
+        // makes; a group small enough to still be a basic group is never paged.
+        return basic_group_roster(client, peer, tally, on_wait).await;
     };
 
     let mut offset = 0i32;
@@ -173,17 +179,7 @@ pub async fn fetch_participants(
         let before = roster.members.len();
         for user in &page.users {
             if let tl::enums::User::User(u) = user {
-                roster.members.push(json!({
-                    "id": format!("user{}", u.id),
-                    "name": tgx_format::peer::display_name(
-                        u.first_name.as_deref().unwrap_or(""),
-                        u.last_name.as_deref().unwrap_or(""),
-                        u.username.as_deref().unwrap_or(""),
-                        u.deleted,
-                    ),
-                    "username": u.username,
-                    "bot": u.bot,
-                }));
+                roster.members.push(member_json(u));
             }
         }
         let gained = roster.members.len() - before;
@@ -356,6 +352,61 @@ fn updates_of(u: &tl::enums::Updates) -> Vec<&tl::enums::Update> {
     }
 }
 
+/// The members of a basic group, which do not come from `getParticipants`.
+///
+/// A private chat has no roster at all and returns an empty *complete* one:
+/// there is genuinely nobody to list, which is different from failing to list
+/// them.
+async fn basic_group_roster(
+    client: &Client,
+    peer: PeerRef,
+    tally: &mut Enrichment,
+    mut on_wait: impl FnMut(u64),
+) -> Roster {
+    let mut roster = Roster {
+        complete: true,
+        ..Default::default()
+    };
+    let tl::enums::InputPeer::Chat(chat) = peer.into() else {
+        return roster;
+    };
+    let request = tl::functions::messages::GetFullChat {
+        chat_id: chat.chat_id,
+    };
+    let full = guarded(tally, &mut on_wait, || {
+        let client = client.clone();
+        let request = request.clone();
+        async move { client.invoke(&request).await.map_err(|e| classify(&e)) }
+    })
+    .await;
+    let Some(tl::enums::messages::ChatFull::Full(full)) = full else {
+        roster.complete = false;
+        return roster;
+    };
+    for user in &full.users {
+        if let tl::enums::User::User(u) = user {
+            roster.members.push(member_json(u));
+        }
+    }
+    roster
+}
+
+/// One roster row. Shared so the two paths cannot describe a member
+/// differently depending on which kind of chat they are in.
+fn member_json(u: &tl::types::User) -> Value {
+    json!({
+        "id": format!("user{}", u.id),
+        "name": tgx_format::peer::display_name(
+            u.first_name.as_deref().unwrap_or(""),
+            u.last_name.as_deref().unwrap_or(""),
+            u.username.as_deref().unwrap_or(""),
+            u.deleted,
+        ),
+        "username": u.username,
+        "bot": u.bot,
+    })
+}
+
 /// What the chat itself is, none of which is in the message stream.
 ///
 /// One request. Before this an export recorded nothing whatsoever about the
@@ -376,21 +427,90 @@ pub async fn fetch_chat_info(
     if !settings.chat_metadata {
         return info;
     }
-    let Some(channel) = channel_ref(peer) else {
-        return info;
+    // **Three peer shapes, three requests.** Only the channel one existed, so
+    // a basic group and a private chat got an empty map — the switch was on,
+    // the request was never made, and nothing said so. Exactly the shape of
+    // the bug this whole family had; it survived one layer further down
+    // because "wired" and "wired for every peer" are not the same claim.
+    let full = match peer.into() {
+        tl::enums::InputPeer::Channel(c) => {
+            let request = tl::functions::channels::GetFullChannel {
+                channel: tl::enums::InputChannel::Channel(tl::types::InputChannel {
+                    channel_id: c.channel_id,
+                    access_hash: c.access_hash,
+                }),
+            };
+            guarded(tally, &mut on_wait, || {
+                let client = client.clone();
+                let request = request.clone();
+                async move { client.invoke(&request).await.map_err(|e| classify(&e)) }
+            })
+            .await
+        }
+        tl::enums::InputPeer::Chat(c) => {
+            let request = tl::functions::messages::GetFullChat { chat_id: c.chat_id };
+            guarded(tally, &mut on_wait, || {
+                let client = client.clone();
+                let request = request.clone();
+                async move { client.invoke(&request).await.map_err(|e| classify(&e)) }
+            })
+            .await
+        }
+        tl::enums::InputPeer::User(u) => {
+            let request = tl::functions::users::GetFullUser {
+                id: tl::enums::InputUser::User(tl::types::InputUser {
+                    user_id: u.user_id,
+                    access_hash: u.access_hash,
+                }),
+            };
+            let got = guarded(tally, &mut on_wait, || {
+                let client = client.clone();
+                let request = request.clone();
+                async move { client.invoke(&request).await.map_err(|e| classify(&e)) }
+            })
+            .await;
+            // A user has no chat to be full of. What it does have is the bio,
+            // which is the one field of this set that means anything for a
+            // private chat.
+            if let Some(tl::enums::users::UserFull::Full(u)) = got {
+                let tl::enums::UserFull::Full(f) = u.full_user;
+                if let Some(about) = f.about.filter(|a| !a.is_empty()) {
+                    info.insert("description".into(), json!(about));
+                }
+                if let Some(t) = f.ttl_period.filter(|t| *t != 0) {
+                    info.insert("ttl_period".into(), json!(t));
+                }
+            }
+            return info;
+        }
+        _ => return info,
     };
-    let request = tl::functions::channels::GetFullChannel { channel };
-    let full = guarded(tally, &mut on_wait, || {
-        let client = client.clone();
-        let request = request.clone();
-        async move { client.invoke(&request).await.map_err(|e| classify(&e)) }
-    })
-    .await;
+
     let Some(tl::enums::messages::ChatFull::Full(full)) = full else {
         return info;
     };
-    let tl::enums::ChatFull::ChannelFull(c) = full.full_chat else {
-        return info;
+    let c = match full.full_chat {
+        tl::enums::ChatFull::ChannelFull(c) => c,
+        // A basic group carries a much smaller set, and none of the counts:
+        // its members arrive as a list rather than a number.
+        tl::enums::ChatFull::Full(g) => {
+            if !g.about.is_empty() {
+                info.insert("description".into(), json!(g.about));
+            }
+            if let tl::enums::ChatParticipants::Participants(p) = &g.participants {
+                info.insert("members_count".into(), json!(p.participants.len()));
+            }
+            if let Some(t) = g.ttl_period.filter(|t| *t != 0) {
+                info.insert("ttl_period".into(), json!(t));
+            }
+            if let Some(r) = allowed_reactions(g.available_reactions.as_ref()) {
+                info.insert("allowed_reactions".into(), r);
+            }
+            if let Some(tl::enums::ExportedChatInvite::ChatInviteExported(i)) = &g.exported_invite {
+                info.insert("invite_link".into(), json!(i.link));
+            }
+            return info;
+        }
     };
 
     if !c.about.is_empty() {
