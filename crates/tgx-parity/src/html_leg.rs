@@ -1,19 +1,30 @@
 //! The HTML leg: replay a reference `result.json` through our writer and diff
 //! the pages against Desktop's own.
 //!
-//! Five values live only in Desktop's HTML and never reach its JSON, so they
-//! are **lifted out of the reference and fed back in** rather than tested:
+//! **Seven** values live only in Desktop's HTML and never reach its JSON, so
+//! they are **lifted out of the reference and fed back in** rather than tested.
+//! Everything in this table is therefore something a green html leg *cannot
+//! prove*: the leg reads 4 of 4 whether or not anything upstream produces these
+//! at all, because the reference supplies them. That is not a defect to be
+//! fixed — lifting them is what lets the leg run with no connection — but the
+//! size of the surface is the point, so it is counted here. The doc said "five"
+//! from the day it was written and the count was never re-taken; it was seven.
 //!
-//! | value | why it cannot be derived |
-//! |---|---|
-//! | `from_name` | Desktop's HTML writes `first + " " + last` *untrimmed*; the JSON trims |
-//! | `forwarded_date` | the original timestamp, shown only in the forward header |
-//! | `reactions_chosen` | which reaction is yours |
-//! | `group` | album membership; Desktop's JSON has no `grouped_id` at all |
-//! | preview `src` | a `" (1)"` collision suffix depends on folder history the JSON does not record |
+//! | value | why it cannot be derived | what the leg cannot prove |
+//! |---|---|---|
+//! | `from_name` | Desktop's HTML writes `first + " " + last` *untrimmed*; the JSON trims | that we ever build an untrimmed name |
+//! | `forwarded_from_name` | the forward header's own name, likewise untrimmed | same, for the forward's peer |
+//! | `forwarded_date` | the original timestamp, shown only in the forward header | that we carry a forward's original date at all |
+//! | `group` | album membership; Desktop's JSON has no `grouped_id` at all | that we group an album, or repeat a joined forward's header |
+//! | preview `src` | a `" (1)"` collision suffix depends on folder history the JSON does not record | that we emit an `<img>` at all — see below |
+//! | `reactions_chosen` | which reaction is yours | that we know which reaction is the account's own |
+//! | `initials` + `colours` | the drawn letters and palette index of every 42px sender/forward avatar and every 20px reaction avatar; the JSON describes neither peer's entity | that we compute initials or pick a colour correctly |
 //!
-//! Everything else is under test. The preview's *pixel size* stays under test
-//! even though its file name is lifted.
+//! The preview row is the one that has already cost something: a live export
+//! had **zero `<img>` elements against Desktop's 649** while this leg was green
+//! over it for the whole of Phases 3–7, because the `src` it lifts is the only
+//! trace the leg looks for. The preview's *pixel size* stays under test even
+//! though its file name is lifted — `add_preview` recomputes it.
 
 use anyhow::{Context, Result};
 use regex::Regex;
@@ -310,10 +321,10 @@ fn check(topic: &Path) -> Result<Vec<PageReport>> {
         let info_src = lifted.get(&id).cloned().unwrap_or_default();
         let mut info = Map::new();
 
-        // Album membership is a fourth HTML-only input. Desktop's result.json
-        // has no grouped_id at all, so the only trace of an album is the very
-        // thing it decides — whether a joined forward repeats its header. It is
-        // fed in here rather than tested.
+        // Album membership is one of the seven HTML-only inputs. Desktop's
+        // result.json has no grouped_id at all, so the only trace of an album is
+        // the very thing it decides — whether a joined forward repeats its
+        // header. It is fed in here rather than tested.
         if !info_src.fwd_header {
             info.insert("group".into(), json!(album.to_string()));
         } else {
