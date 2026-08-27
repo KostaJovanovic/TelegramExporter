@@ -30,6 +30,20 @@ async fn main() -> Result<()> {
         eprintln!("could not open the log: {e}");
     }
 
+    // The same check `actions::report_data_dir_protection` makes for the window.
+    // `tgx login` writes a bearer credential into this folder, and this is the
+    // surface most likely to be run from a stick or a shared machine — the two
+    // places the ACL is most likely to have failed. Saying nothing here left the
+    // GUI as the only thing that ever mentioned it.
+    if let Some(why) = tgx_tg::config::lockdown_error() {
+        eprintln!(
+            "warning: could not restrict {} to your user ({why}).\n\
+             Anyone with access to this machine or drive can read the saved \
+             session and sign in as you.",
+            tgx_tg::config::data_dir().display()
+        );
+    }
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("help");
 
@@ -37,7 +51,14 @@ async fn main() -> Result<()> {
     // Credentials may come from the environment so a shell session can drive
     // this without writing them to disk first.
     if let Ok(v) = std::env::var("TG_API_ID") {
-        settings.api_id = v.parse().unwrap_or(settings.api_id);
+        // Not `unwrap_or(existing)`: a typo'd TG_API_ID silently fell back to
+        // whatever settings.json held, so the run either used the wrong account
+        // or failed at the wire with an error naming neither the variable nor
+        // the value. Someone who sets a variable is asserting it.
+        match v.trim().parse::<i64>() {
+            Ok(id) => settings.api_id = id,
+            Err(e) => return Err(anyhow!("TG_API_ID={v:?} is not a number: {e}")),
+        }
     }
     if let Ok(v) = std::env::var("TG_API_HASH") {
         settings.api_hash = v;
@@ -49,6 +70,9 @@ async fn main() -> Result<()> {
         "export" => {
             let want = args
                 .get(1)
+                .map(String::as_str)
+                .map(str::trim)
+                .filter(|w| !w.is_empty())
                 .ok_or_else(|| anyhow!("usage: tgx export <chat title>"))?;
             export(&settings, want).await
         }
@@ -194,6 +218,11 @@ async fn export(settings: &Settings, want: &str) -> Result<()> {
         .await
         .map_err(|e| anyhow!("listing chats: {e}"))?;
 
+    // Exact title first, substring second. The empty string is rejected in
+    // `main` rather than here, because `"".contains` is true of every title:
+    // `tgx export ""` would have exported whichever chat the dialog list
+    // happened to return first, and then said it was exporting it — which is
+    // not a usage error the user can see, it is the wrong chat done confidently.
     let needle = want.to_lowercase();
     let chat = list
         .iter()
@@ -279,7 +308,20 @@ async fn export(settings: &Settings, want: &str) -> Result<()> {
             // A second Ctrl-C is the user saying they meant it. tokio's handler
             // suppresses the default terminate, so without this the key does
             // nothing at all the second time and the wait looks like a hang.
+            //
+            // But `exit` runs no destructors, and the JSON is *streamed*: an
+            // `Output` dropped without `close()` leaves a file that is not
+            // truncated but **zero bytes**, because the writes are still
+            // buffered. That is exactly what the comment eleven lines above
+            // promises this design prevents. There is no way to reach those
+            // buffers from here — they belong to the export task — so the least
+            // dishonest thing is to say what it costs before doing it.
             if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!(
+                    "second Ctrl-C — exiting now. Any result.json still being \
+                     written will be left EMPTY, not partial; the first Ctrl-C \
+                     is what closes them cleanly."
+                );
                 std::process::exit(130);
             }
         });
