@@ -156,9 +156,13 @@ impl Shell {
                     .text_size(type_scale::TINY)
                     .when(done, |d| {
                         d.cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, _| {
-                                if let Some(root) = this.queue.root_of(chat_id) {
-                                    crate::actions::open_folder(&root.clone());
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let Some(root) = this.queue.root_of(chat_id).cloned() else {
+                                    return;
+                                };
+                                if let Err(e) = crate::actions::open_folder(&root) {
+                                    this.apply(crate::bridge::Event::Warn(e));
+                                    cx.notify();
                                 }
                             }))
                     })

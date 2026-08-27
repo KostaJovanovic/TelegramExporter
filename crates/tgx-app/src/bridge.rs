@@ -138,8 +138,28 @@ pub enum Event {
     Finished {
         stopped: bool,
     },
-    /// The run could not start at all.
-    Failed(String),
+    /// An action failed, and which action it was.
+    ///
+    /// **The activity is not decoration.** Without it this was a global switch:
+    /// `Shell::apply` cleared `exporting` *and* `counting` on any `Failed`,
+    /// whoever sent it — so a sign-in probe that could not reach Telegram while
+    /// an export was running made the window believe the export had stopped.
+    /// The Stop button vanished, the progress bar froze, and the export carried
+    /// on writing files until its own `Finished` put the state back. Five
+    /// senders share this variant and only one of them is the export.
+    Failed {
+        activity: Activity,
+        message: String,
+    },
+}
+
+/// Which action a [`Event::Failed`] belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activity {
+    SignIn,
+    Chats,
+    Count,
+    Export,
 }
 
 pub struct Bridge {

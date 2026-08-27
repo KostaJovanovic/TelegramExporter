@@ -375,8 +375,25 @@ fn set_lockdown_error(e: Option<String>) {
 /// name from a portable binary.
 #[cfg(windows)]
 pub fn system32(exe: &str) -> PathBuf {
-    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
-    PathBuf::from(root).join("System32").join(exe)
+    windows_dir().join("System32").join(exe)
+}
+
+/// Absolute path to a Windows binary that lives in `%SystemRoot%` itself.
+///
+/// **`explorer.exe` is not in `System32`.** It sits directly in `C:\Windows`,
+/// so `system32("explorer.exe")` built a path to a file that does not exist and
+/// the Open-folder button did nothing at all — silently, because the spawn
+/// result was discarded. Keeping the absolute-path property while fixing the
+/// directory is what this second helper is for; the answer to "is a bare name
+/// acceptable here" is still no.
+#[cfg(windows)]
+pub fn system_root(exe: &str) -> PathBuf {
+    windows_dir().join(exe)
+}
+
+#[cfg(windows)]
+fn windows_dir() -> PathBuf {
+    PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()))
 }
 
 /// How long `icacls` gets before it is killed.
@@ -635,6 +652,32 @@ mod tests {
             "{} does not exist on this machine",
             p.display()
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn explorer_is_found_where_it_actually_lives() {
+        // The mirror of the test above, and the one nobody wrote.
+        // `explorer.exe` is **not** in System32 — it sits directly in
+        // C:\Windows — so `system32("explorer.exe")` named a file that does not
+        // exist, and the Open-folder button did nothing at all. Silently: the
+        // spawn result was discarded.
+        let p = system_root("explorer.exe");
+        assert!(p.is_absolute(), "{}", p.display());
+        assert!(
+            !p.to_string_lossy()
+                .to_ascii_lowercase()
+                .contains("system32"),
+            "{} is the path that did not work",
+            p.display()
+        );
+        assert!(
+            p.is_file(),
+            "{} does not exist on this machine",
+            p.display()
+        );
+        // And the wrong one really is wrong, so this test can fail.
+        assert!(!system32("explorer.exe").is_file());
     }
 
     #[cfg(windows)]

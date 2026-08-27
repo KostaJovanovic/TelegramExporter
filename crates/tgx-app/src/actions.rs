@@ -5,7 +5,7 @@
 //! [`Event`](crate::bridge::Event)s, which wake the window rather than waiting
 //! to be found on its next frame.
 
-use crate::bridge::{Event, Events};
+use crate::bridge::{Activity, Event, Events};
 use tgx_tg::cancel::Cancel;
 use tgx_tg::client::{LoginStep, Session};
 use tgx_tg::config::Settings;
@@ -23,7 +23,10 @@ pub async fn sign_in(settings: Settings, tx: Events) {
     let session = match Session::connect(&settings).await {
         Ok(s) => s,
         Err(e) => {
-            let _ = tx.send(Event::Failed(e.to_string()));
+            let _ = tx.send(Event::Failed {
+                activity: Activity::SignIn,
+                message: e.to_string(),
+            });
             return;
         }
     };
@@ -37,7 +40,10 @@ pub async fn sign_in(settings: Settings, tx: Events) {
                 let _ = tx.send(Event::SignedIn(name));
             }
             Err(e) => {
-                let _ = tx.send(Event::Failed(e.to_string()));
+                let _ = tx.send(Event::Failed {
+                    activity: Activity::SignIn,
+                    message: e.to_string(),
+                });
             }
         },
         Ok(false) => {
@@ -45,7 +51,10 @@ pub async fn sign_in(settings: Settings, tx: Events) {
             let _ = tx.send(Event::Status("Not signed in".into()));
         }
         Err(e) => {
-            let _ = tx.send(Event::Failed(e.to_string()));
+            let _ = tx.send(Event::Failed {
+                activity: Activity::SignIn,
+                message: e.to_string(),
+            });
         }
     }
 }
@@ -59,17 +68,21 @@ pub async fn sign_in(settings: Settings, tx: Events) {
 /// listing. `ensure_connected` bounds the first and names the second, and it
 /// only costs a round trip the first time — the answer is cached on the shared
 /// connection.
-async fn ready(session: &Session, tx: &Events) -> bool {
+async fn ready(session: &Session, tx: &Events, activity: Activity) -> bool {
     match session.ensure_connected().await {
         Ok(true) => true,
         Ok(false) => {
-            let _ = tx.send(Event::Failed(
-                "Not signed in. Press 01 Sign in first.".into(),
-            ));
+            let _ = tx.send(Event::Failed {
+                activity,
+                message: "Not signed in. Press 01 Sign in first.".into(),
+            });
             false
         }
         Err(e) => {
-            let _ = tx.send(Event::Failed(e.to_string()));
+            let _ = tx.send(Event::Failed {
+                activity,
+                message: e.to_string(),
+            });
             false
         }
     }
@@ -220,11 +233,14 @@ pub async fn refresh_chats(settings: Settings, tx: Events) {
     let session = match Session::connect(&settings).await {
         Ok(s) => s,
         Err(e) => {
-            let _ = tx.send(Event::Failed(e.to_string()));
+            let _ = tx.send(Event::Failed {
+                activity: Activity::Chats,
+                message: e.to_string(),
+            });
             return;
         }
     };
-    if !ready(&session, &tx).await {
+    if !ready(&session, &tx, Activity::Chats).await {
         return;
     }
     match dialogs::list_chats(&session.client).await {
@@ -232,7 +248,10 @@ pub async fn refresh_chats(settings: Settings, tx: Events) {
             let _ = tx.send(Event::Chats(chats));
         }
         Err(e) => {
-            let _ = tx.send(Event::Failed(e.to_string()));
+            let _ = tx.send(Event::Failed {
+                activity: Activity::Chats,
+                message: e.to_string(),
+            });
         }
     }
 }
@@ -247,7 +266,10 @@ pub async fn count_chats(settings: Settings, chat_ids: Vec<i64>, cancel: Cancel,
     let session = match Session::connect(&settings).await {
         Ok(s) => s,
         Err(e) => {
-            let _ = tx.send(Event::Failed(e.to_string()));
+            let _ = tx.send(Event::Failed {
+                activity: Activity::Count,
+                message: e.to_string(),
+            });
             // Still ends the count, or the button reads "Stop counting" over a
             // run that never began.
             let _ = tx.send(Event::CountFinished {
@@ -257,7 +279,7 @@ pub async fn count_chats(settings: Settings, chat_ids: Vec<i64>, cancel: Cancel,
             return;
         }
     };
-    if !ready(&session, &tx).await {
+    if !ready(&session, &tx, Activity::Count).await {
         // Still ends the count, for the same reason as above: the button would
         // otherwise read "Stop counting" over a run that never began.
         let _ = tx.send(Event::CountFinished {
@@ -397,12 +419,15 @@ pub async fn export(
     let session = match Session::connect(&settings).await {
         Ok(s) => s,
         Err(e) => {
-            let _ = tx.send(Event::Failed(e.to_string()));
+            let _ = tx.send(Event::Failed {
+                activity: Activity::Export,
+                message: e.to_string(),
+            });
             let _ = tx.send(Event::Finished { stopped: true });
             return;
         }
     };
-    if !ready(&session, &tx).await {
+    if !ready(&session, &tx, Activity::Export).await {
         let _ = tx.send(Event::Finished { stopped: true });
         return;
     }
@@ -420,7 +445,10 @@ pub async fn export(
             // distinction is the whole reason `peer_refs_for` returns a
             // `Result`, and reporting it per chat would tell the user to go
             // looking for conversations they still have.
-            let _ = tx.send(Event::Failed(format!("listing chats: {e}")));
+            let _ = tx.send(Event::Failed {
+                activity: Activity::Export,
+                message: format!("listing chats: {e}"),
+            });
             let _ = tx.send(Event::Finished { stopped: true });
             return;
         }
@@ -492,10 +520,10 @@ pub async fn export(
                 // The destination is free text and may be unwritable,
                 // disconnected or invalid. That ends the whole queue, not
                 // one chat: every later chat would fail the same way.
-                let _ = tx.send(Event::Failed(format!(
-                    "cannot write into {}: {e}",
-                    settings.output_dir
-                )));
+                let _ = tx.send(Event::Failed {
+                    activity: Activity::Export,
+                    message: format!("cannot write into {}: {e}", settings.output_dir),
+                });
                 let _ = tx.send(Event::Finished { stopped: true });
                 return;
             }
@@ -641,27 +669,35 @@ fn report_result(tx: &Events, title: &str, result: &tgx_tg::engine::ExportResult
 ///
 /// A tool, not a step — it is live from the first frame, which is exactly why
 /// it must not carry a step number.
-pub fn open_folder(dir: &std::path::Path) {
+///
+/// Returns what went wrong, if anything. **The result used to be discarded**,
+/// and it was covering a real bug: the path was built with `system32()` and
+/// `explorer.exe` is not in System32 — it sits directly in `%SystemRoot%` — so
+/// every press spawned nothing and reported nothing.
+pub fn open_folder(dir: &std::path::Path) -> Result<(), String> {
     if !dir.exists() {
-        let _ = std::fs::create_dir_all(dir);
+        std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     }
     // Absolute, for the same reason icacls is: CreateProcess searches the
     // calling process's own directory before PATH, and this app is built to be
     // copied into arbitrary folders. A planted explorer.exe beside it would run
     // with the user's rights.
     #[cfg(windows)]
-    let _ = std::process::Command::new(tgx_tg::config::system32("explorer.exe"))
+    let spawned = std::process::Command::new(tgx_tg::config::system_root("explorer.exe"))
         .arg(dir)
         .spawn();
     #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(dir).spawn();
+    let spawned = std::process::Command::new("open").arg(dir).spawn();
     #[cfg(all(unix, not(target_os = "macos")))]
-    let _ = std::process::Command::new("xdg-open").arg(dir).spawn();
+    let spawned = std::process::Command::new("xdg-open").arg(dir).spawn();
+    spawned
+        .map(|_| ())
+        .map_err(|e| format!("opening {}: {e}", dir.display()))
 }
 
 /// Open the destination folder.
-pub fn open_output_folder(dir: &str) {
-    open_folder(std::path::Path::new(dir));
+pub fn open_output_folder(dir: &str) -> Result<(), String> {
+    open_folder(std::path::Path::new(dir))
 }
 
 #[cfg(test)]
@@ -680,7 +716,8 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, Event::Failed(m) if m.contains("my.telegram.org"))),
+                .any(|e| matches!(e, Event::Failed { message: m, .. }
+                                   if m.contains("my.telegram.org"))),
             "got {events:?}"
         );
     }
