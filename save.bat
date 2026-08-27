@@ -20,6 +20,14 @@ rem that export into reference\, and the legs run against it with identical
 rem results. When reference\ exists, parity works with the drive unplugged.
 set CORPUS=reference
 
+rem This machine owns the export, so a `cargo test` here that finds no corpus
+rem has not "skipped the legs" -- it has a broken setup, and it used to say so
+rem in an eprintln libtest throws away. With this set, crates\tgx-parity\tests\
+rem corpus.rs panics instead. `set TGX_REQUIRE_CORPUS=0` before calling opts
+rem back out; plain `cargo test --all` is unaffected, which is what keeps CI
+rem and a fresh clone working.
+if not defined TGX_REQUIRE_CORPUS set "TGX_REQUIRE_CORPUS=1"
+
 rem Two clocks. T0 covers the whole run and is reported at the end; TS is
 rem restarted per step, so a slow run says *which* step was slow rather than
 rem leaving you watching a crate counter and guessing.
@@ -34,12 +42,17 @@ set ACTION=%~1
 rem --force pushes with --force-with-lease, not a bare --force: it still
 rem overwrites origin/%BRANCH%, but refuses if origin moved since the last
 rem fetch, so it cannot silently clobber a push you have not seen yet.
-if /i "%ACTION%"=="--force"   (set FORCE_MODE=1 & set ACTION=save)
-if /i "%ACTION%"=="--commit"  (set COMMIT_ONLY=1 & set ACTION=save)
-if /i "%ACTION%"=="--no-push" (set COMMIT_ONLY=1 & set ACTION=save)
-if /i "%ACTION%"=="commit"    (set COMMIT_ONLY=1 & set ACTION=save)
+rem Quoted `set "NAME=value"` throughout, and not for style: `set DO_BUILD=1 &`
+rem assigns the string "1 " -- cmd takes everything between the = and the & as
+rem the value, trailing space included. The later `if "%DO_BUILD%"=="1"` then
+rem compares "1 " against "1" and never matches, so `save.bat release` ran the
+rem tests, committed, pushed, and silently skipped the build it was asked for.
+if /i "%ACTION%"=="--force"   (set "FORCE_MODE=1" & set "ACTION=save")
+if /i "%ACTION%"=="--commit"  (set "COMMIT_ONLY=1" & set "ACTION=save")
+if /i "%ACTION%"=="--no-push" (set "COMMIT_ONLY=1" & set "ACTION=save")
+if /i "%ACTION%"=="commit"    (set "COMMIT_ONLY=1" & set "ACTION=save")
 if /i "%ACTION%"=="save"    goto save
-if /i "%ACTION%"=="release" (set DO_BUILD=1 & goto save)
+if /i "%ACTION%"=="release" (set "DO_BUILD=1" & goto save)
 if /i "%ACTION%"=="push"    goto push
 if /i "%ACTION%"=="pull"    goto pull
 if /i "%ACTION%"=="build"   goto build
@@ -70,11 +83,11 @@ echo   save.bat --force  runs save and force-with-lease pushes without asking
 echo.
 set /p CHOICE=select [1-11]:
 if "%CHOICE%"=="1" goto save
-if "%CHOICE%"=="2" (set COMMIT_ONLY=1 & goto save)
+if "%CHOICE%"=="2" (set "COMMIT_ONLY=1" & goto save)
 if "%CHOICE%"=="3" goto push
 if "%CHOICE%"=="4" goto pull
 if "%CHOICE%"=="5" goto build
-if "%CHOICE%"=="6" (set DO_BUILD=1 & goto save)
+if "%CHOICE%"=="6" (set "DO_BUILD=1" & goto save)
 if "%CHOICE%"=="7" goto test
 if "%CHOICE%"=="8" goto parity
 if "%CHOICE%"=="9" goto corpus
@@ -130,7 +143,10 @@ call :since TS "cargo test"
 
 rem The output format is verified, not asserted -- re-run it after any change to
 rem the writers. Skipped, loudly, when neither the corpus nor the drive is here.
+rem A red leg lands in :testsfailed with the other checks, which still offers
+rem "commit anyway"; what it no longer does is decide that for you.
 call :runparity
+if errorlevel 1 goto testsfailed
 
 echo.
 echo [git]  stage
@@ -219,6 +235,7 @@ goto end
 :stageanyway
 echo [warn] committing with failing checks
 call :runparity
+if errorlevel 1 set "SAVE_ERROR=1"
 echo.
 echo [git]  stage
 git add .
@@ -489,9 +506,12 @@ if exist "%REFEXPORT%" (
 )
 exit /b 1
 
-rem Non-fatal: a missing reference must not block a commit, but it must say so
-rem rather than quietly passing.
+rem A *missing* reference is non-fatal: a machine without the export is allowed
+rem to commit. A *failing* leg is not -- it used to print [warn] and return 0,
+rem so `save.bat save` committed and pushed over a red oracle while telling you
+rem it was red. :parity has always got this right; this is now the same shape.
 :runparity
+set "PARITY_FAILED=0"
 call :pickref
 if errorlevel 1 (
   echo [skip] Desktop parity - no corpus and no reference drive
@@ -500,10 +520,12 @@ if errorlevel 1 (
 echo.
 echo [chk]  Desktop parity  (%PARITYROOT%)
 cargo run -q -p tgx-parity -- json "%PARITYROOT%"
-if errorlevel 1 echo [warn] result.json no longer matches Desktop byte for byte
+if errorlevel 1 (echo [warn] result.json no longer matches Desktop byte for byte & set "PARITY_FAILED=1")
 cargo run -q -p tgx-parity -- html "%PARITYROOT%"
-if errorlevel 1 echo [warn] the pages no longer match Desktop line for line
-exit /b 0
+if errorlevel 1 (echo [warn] the pages no longer match Desktop line for line & set "PARITY_FAILED=1")
+cargo run -q -p tgx-parity -- media "%PARITYROOT%"
+if errorlevel 1 (echo [warn] media names no longer land where Desktop put them & set "PARITY_FAILED=1")
+exit /b !PARITY_FAILED!
 
 
 :end
