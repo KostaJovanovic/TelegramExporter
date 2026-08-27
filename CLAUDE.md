@@ -243,6 +243,22 @@ set in the workspace dependency, because whole-workspace feature unification
 hides a per-crate omission (`cargo build --workspace` passed while
 `cargo build -p tgx-tg` did not).
 
+**An export narrates itself, at two levels.** `Progress::Log` is the stage
+commentary — the settings in force, the count and where it came from, the topic
+folders, the roster and whether it was capped, each resume after a rate limit,
+the read total against what Telegram promised, and per media batch the queue,
+the throughput and every file that did not arrive. It goes to both `tgx.log`
+and the window's transcript. `Progress::Detail` is one line per message and per
+file, goes to `tgx.log` and the CLI **only**, and is emitted at all only under
+`RUST_LOG=debug` — `engine::detail_wanted` gates the formatting so an ordinary
+run does not pay for it. Two reasons it never reaches the window: the transcript
+is a 2,000-line ring whose whole purpose is that the INCOMPLETE warning can
+still be scrolled to, and one chat of six thousand messages would flush it.
+
+**A detail line reports the message's text *length*, never its text.** The log
+sits beside the executable and an export is other people's conversation;
+`a_detail_line_never_carries_the_message_text` is what keeps it that way.
+
 ## Dependencies
 
 `gpui` and `gpui-component` are pinned **exactly**, not by caret, despite their

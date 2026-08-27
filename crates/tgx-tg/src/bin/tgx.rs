@@ -248,7 +248,20 @@ async fn export(settings: &Settings, want: &str) -> Result<()> {
             println!("\n  rate limited, waiting {seconds}s");
         }
         Progress::Topic { title, messages } => println!("\n  {title}: {messages}"),
-        Progress::Log(msg) => println!("\n  {msg}"),
+        Progress::Log(msg) => {
+            println!("\n  {msg}");
+            log::info!("{msg}");
+            // The progress line is redrawn with `\r`, so anything printed over
+            // it has to leave `last_line` empty or the next identical count is
+            // suppressed and the counter appears to stop.
+            last_line.clear();
+        }
+        // Only reaches here under `RUST_LOG=debug`, which is a request for it.
+        Progress::Detail(msg) => {
+            println!("{msg}");
+            log::debug!("{msg}");
+            last_line.clear();
+        }
     };
 
     // Ctrl-C stops the export the way the window's Stop button does, rather
