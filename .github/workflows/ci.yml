@@ -38,8 +38,20 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features
 
+      # --nocapture because the corpus skip notice is an eprintln! from a
+      # *passing* test, and libtest discards stdout and stderr for those. The
+      # comment at the top of this file has been claiming since it was written
+      # that the skip "prints that it did"; without this it never printed.
       - name: Test
-        run: cargo test --all
+        run: cargo test --all -- --nocapture
+
+      # And because a line in a 500-test log is not the same as being told:
+      # `reference/` is gitignored, so it can never be here, so the three legs
+      # can never run here. An annotation lands on the run summary where a
+      # human will see it without opening the log.
+      - name: Note that the parity legs did not run
+        if: ${{ hashFiles('reference/MANIFEST.txt') == '' }}
+        run: echo "::warning::the parity legs did not run - no corpus on CI (reference/ is gitignored, so json/html/media were skipped)"
 
       - name: Release build
         run: cargo build --release -p tgx-app
