@@ -6,12 +6,8 @@
 //! link forms go through [`safe_href`]. Nothing here is escaped by the caller;
 //! the escaping is this module's job and it happens on every path.
 
-use crate::escape::{esc, js_str, safe_href};
+use crate::escape::{esc, has_safe_scheme, js_str, safe_href};
 use serde_json::Value;
-
-const SAFE_SCHEMES: [&str; 6] = [
-    "http://", "https://", "mailto:", "tel:", "ftp://", "ftps://",
-];
 
 /// Render Desktop's `text_entities` list as inline HTML.
 ///
@@ -75,8 +71,7 @@ fn render_segment(seg: &Value) -> String {
         },
         "link" => match safe_href(raw) {
             Some(href) => {
-                let lowered = href.to_lowercase();
-                let href = if SAFE_SCHEMES.iter().any(|s| lowered.starts_with(s)) {
+                let href = if has_safe_scheme(&href) {
                     href
                 } else {
                     format!("https://{href}") // bare t.me/foo

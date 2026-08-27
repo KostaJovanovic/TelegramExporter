@@ -23,11 +23,29 @@ pub fn fit_box(width: i64, height: i64, box_size: i64) -> (i64, i64) {
     if width <= 0 || height <= 0 {
         return (box_size, box_size);
     }
-    let rw = box_size * width / height;
+    // `width` and `height` are the wire's word for it, not ours: they come out
+    // of a `result.json` or off the connection, and nothing between there and
+    // here bounds them. `box_size * width` overflows i64 above a declared width
+    // of roughly 1.8e16 — which panics a debug build and, in release, wraps to a
+    // negative pixel size that goes straight into a `style` attribute. A
+    // dimension that cannot be scaled is degenerate in exactly the way
+    // `width <= 0` is, so it takes the same exit.
+    let Some(bw) = box_size.checked_mul(width) else {
+        return (box_size, box_size);
+    };
+    let rw = bw / height;
     if rw <= box_size {
         (rw, box_size)
     } else {
-        (box_size, box_size * height / width)
+        // `rw > box_size` means width > height, so this product is smaller than
+        // the one above and cannot overflow once that one has not. Checked
+        // rather than argued, so the reasoning is not load-bearing.
+        (
+            box_size,
+            box_size
+                .checked_mul(height)
+                .map_or(box_size, |bh| bh / width),
+        )
     }
 }
 
@@ -94,6 +112,21 @@ mod tests {
     fn missing_dimensions_fall_back_to_the_box() {
         assert_eq!(fit_box(0, 0, 200), (200, 200));
         assert_eq!(fit_box(-5, 10, 200), (200, 200));
+    }
+
+    #[test]
+    fn a_hostile_dimension_falls_back_instead_of_overflowing() {
+        // These are declared sizes from a message, so an i64 is all that bounds
+        // them. `box_size * width` used to be a plain multiply: this panicked in
+        // debug and wrapped to a negative `width: -…px` in release.
+        assert_eq!(fit_box(i64::MAX, 1, 520), (520, 520));
+        assert_eq!(fit_box(i64::MAX, i64::MAX, 520), (520, 520));
+        assert_eq!(fit_box(i64::MAX / 3, 7, 520), (520, 520));
+        // preview_size doubles the box before calling in, so the same input has
+        // to survive the whole path a real preview takes.
+        let (file, css) = preview_size(i64::MAX, 1, PREVIEW_BOX);
+        assert_eq!(file, (520, 520));
+        assert_eq!(css, (260, 260));
     }
 
     /// Would Desktop inline a photo of this size, or draw it as a row?

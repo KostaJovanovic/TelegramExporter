@@ -55,9 +55,24 @@ pub fn attr_value(text: &str) -> String {
 }
 
 /// Schemes allowed to survive into an href.
+///
+/// **Declared once.** `inline.rs` kept a byte-identical copy of this list for
+/// its "is this link already absolute?" test, so adding a scheme in one place
+/// and not the other would have left a URL that [`safe_href`] accepts getting
+/// `https://` glued to its front.
 const SAFE_SCHEMES: [&str; 6] = [
     "http://", "https://", "mailto:", "tel:", "ftp://", "ftps://",
 ];
+
+/// Does this URL already carry a scheme from [`SAFE_SCHEMES`]?
+///
+/// For callers deciding whether a URL is absolute. It is **not** a safety test:
+/// only [`safe_href`] is, because a scheme can be smuggled past a naive prefix
+/// check with whitespace or control characters.
+pub fn has_safe_scheme(url: &str) -> bool {
+    let lowered = url.to_lowercase();
+    SAFE_SCHEMES.iter().any(|s| lowered.starts_with(s))
+}
 
 /// Return `url` if it is safe to put in an href, else `None`.
 ///
@@ -92,13 +107,12 @@ pub fn safe_href(url: &str) -> Option<String> {
     // URL, so this is reachable from any message. Neither form is a relative
     // URL despite having no `scheme:` prefix, which is exactly how both slipped
     // through the branch below.
-    let bytes = collapsed.as_bytes();
-    if bytes.starts_with(b"//") || bytes.starts_with(br"\\") {
-        return None;
-    }
+    //
     // A backslash is not a path separator in a URL, but browsers normalise it
     // to one before resolving, so `/\host` reaches the same place as `//host`.
-    if matches!(bytes, [b'/' | b'\\', b'/' | b'\\', ..]) {
+    // All four mixtures are one pattern; the explicit `//` and `\\` prefix
+    // tests that used to sit here were a subset of it and never fired.
+    if matches!(collapsed.as_bytes(), [b'/' | b'\\', b'/' | b'\\', ..]) {
         return None;
     }
     if SAFE_SCHEMES.iter().any(|s| lowered.starts_with(s)) {
@@ -251,6 +265,26 @@ mod tests {
         ] {
             assert_eq!(safe_href(bad), None, "{bad} was accepted");
         }
+    }
+
+    #[test]
+    fn the_absolute_test_and_the_safety_test_read_one_list() {
+        // `inline.rs` used to keep its own copy of SAFE_SCHEMES to decide
+        // whether a link already had a scheme. A scheme added to one list and
+        // not the other means a URL safe_href accepts gets "https://" glued to
+        // its front, so the two views have to be the same list.
+        for good in ["ftps://a.b/c", "FTPS://a.b/c", "mailto:a@b.c", "tel:+381"] {
+            assert!(has_safe_scheme(good), "{good}");
+            assert!(safe_href(good).is_some(), "{good}");
+        }
+        // Relative targets are safe but not absolute — that is the whole
+        // distinction inline.rs needs.
+        for relative in ["t.me/foo", "./photos/x.jpg", "messages2.html#go1"] {
+            assert!(!has_safe_scheme(relative), "{relative}");
+            assert!(safe_href(relative).is_some(), "{relative}");
+        }
+        // And it is not a safety test on its own.
+        assert!(!has_safe_scheme("javascript:alert(1)"));
     }
 
     #[test]

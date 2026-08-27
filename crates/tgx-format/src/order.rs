@@ -4,7 +4,6 @@
 //! differently ordered map produces a file that diffs against a real export on
 //! nearly every line. This is not a style preference; it is the wire format.
 
-use indexmap::IndexMap;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -198,19 +197,6 @@ pub fn ordered(fields: &Map<String, Value>) -> Map<String, Value> {
         out.insert(k.clone(), fields[k].clone());
     }
     out
-}
-
-/// The same, for an `IndexMap`-shaped payload.
-pub fn ordered_index(fields: &IndexMap<String, Value>) -> IndexMap<String, Value> {
-    let mut keys: Vec<&String> = fields.keys().collect();
-    keys.sort_by(|a, b| {
-        rank(a)
-            .cmp(&rank(b))
-            .then_with(|| a.as_str().cmp(b.as_str()))
-    });
-    keys.into_iter()
-        .map(|k| (k.clone(), fields[k].clone()))
-        .collect()
 }
 
 #[cfg(test)]

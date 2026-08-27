@@ -38,19 +38,6 @@ impl Tree {
         }
     }
 
-    /// Start at a given depth — used when a fragment is spliced into a page.
-    pub fn at(indent: usize) -> Self {
-        Self {
-            buf: String::new(),
-            indent,
-            last_was_tag: false,
-        }
-    }
-
-    pub fn indent(&self) -> usize {
-        self.indent
-    }
-
     pub fn into_string(self) -> String {
         self.buf
     }
@@ -113,12 +100,6 @@ impl Tree {
         self.open(tag, attrs);
         self.text(content);
         self.close(tag);
-    }
-
-    /// A raw line emitted verbatim at the current indent, treated as a tag for
-    /// blank-line purposes. Used for the doctype.
-    pub fn raw_tag(&mut self, line: &str) {
-        self.tag_line(line);
     }
 }
 

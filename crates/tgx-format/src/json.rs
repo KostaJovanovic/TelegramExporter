@@ -37,9 +37,15 @@ pub fn to_string(value: &Value) -> String {
 ///
 /// In a real `result.json` every array sits at its key's depth except
 /// `reactions`, whose elements are pushed one space further and whose closing
-/// bracket follows them. Since `reactions` is always the last key (guaranteed
-/// by [`crate::order::TAIL_ORDER`]), everything after its opening bracket up to
-/// the object's final brace is the array.
+/// bracket moves with them.
+///
+/// The block that moves is found by matching the array's own brackets, not by
+/// running to the object's final brace. `reactions` is the last *ranked* key
+/// ([`crate::order::TAIL_ORDER`]), but an unranked one — a key Telegram added
+/// that nobody here has classified — sorts after it
+/// ([`crate::order::ordered`]), and the run-to-the-brace form pushed those
+/// keys a space right as well, silently corrupting the indentation of the one
+/// kind of key a reader is most likely to be looking at in a diff.
 pub fn desktop_reaction_indent(lines: Vec<String>) -> Vec<String> {
     if lines.len() < 2 {
         return lines;
@@ -50,18 +56,35 @@ pub fn desktop_reaction_indent(lines: Vec<String>) -> Vec<String> {
     else {
         return lines;
     };
-    let last = lines.len() - 1;
+    // The pretty-printer closes an array at its opening line's indent, and no
+    // value line can begin with `]` (a JSON string never spans lines), so the
+    // first such line is the array's own bracket. An empty `"reactions": []`
+    // has no closing line and nothing to move.
+    let depth = indent_of(&lines[at]);
+    let Some(close) = lines
+        .iter()
+        .enumerate()
+        .skip(at + 1)
+        .find(|(_, l)| l.trim_start().starts_with(']') && indent_of(l) == depth)
+        .map(|(i, _)| i)
+    else {
+        return lines;
+    };
     lines
         .into_iter()
         .enumerate()
         .map(|(i, l)| {
-            if i > at && i < last {
+            if i > at && i <= close {
                 format!(" {l}")
             } else {
                 l
             }
         })
         .collect()
+}
+
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start_matches(' ').len()
 }
 
 /// One message, rendered as it appears inside the streamed `messages` array.
@@ -227,6 +250,44 @@ mod tests {
     #[test]
     fn a_message_without_reactions_is_untouched() {
         let lines: Vec<String> = vec!["  {".into(), "   \"id\": 1".into(), "  }".into()];
+        assert_eq!(desktop_reaction_indent(lines.clone()), lines);
+    }
+
+    #[test]
+    fn a_key_sorting_after_reactions_keeps_its_own_indent() {
+        // `ordered` puts an unranked key after `reactions`, so this shape is
+        // what any key Telegram adds and nobody here has classified produces.
+        // Running the over-indent to the object's closing brace instead of to
+        // the array's own bracket moved those keys too — corrupting the
+        // indentation of precisely the line a reader opens the diff for.
+        let lines: Vec<String> = vec![
+            "  {".into(),
+            "   \"id\": 1,".into(),
+            "   \"reactions\": [".into(),
+            "    {".into(),
+            "     \"type\": \"emoji\"".into(),
+            "    }".into(),
+            "   ],".into(),
+            "   \"something_new_in_2027\": 1".into(),
+            "  }".into(),
+        ];
+        let out = desktop_reaction_indent(lines);
+        assert_eq!(out[3], "     {"); // the array still moves
+        assert_eq!(out[6], "    ],"); // and so does its closing bracket
+        assert_eq!(out[7], "   \"something_new_in_2027\": 1"); // this does not
+        assert_eq!(out[8], "  }");
+    }
+
+    #[test]
+    fn an_empty_reactions_array_moves_nothing() {
+        // `[]` has no closing line of its own; there is nothing to shift and
+        // nothing after it may be shifted either.
+        let lines: Vec<String> = vec![
+            "  {".into(),
+            "   \"reactions\": [],".into(),
+            "   \"something_new_in_2027\": 1".into(),
+            "  }".into(),
+        ];
         assert_eq!(desktop_reaction_indent(lines.clone()), lines);
     }
 

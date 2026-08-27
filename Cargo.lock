@@ -6228,7 +6228,6 @@ name = "tgx-format"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "indexmap",
  "serde",
  "serde_json",
 ]
