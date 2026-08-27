@@ -76,6 +76,19 @@ impl Output {
     }
 
     pub fn add(&mut self, payload: &Map<String, Value>) -> std::io::Result<()> {
+        // **Counted before anything is written, not after.** `count` is the one
+        // thing that decides whether the *next* message needs a `,` separator,
+        // so a body write that failed with the count not yet raised left the
+        // next call believing it was the first: two blocks with no comma
+        // between them, which is not JSON and which no `close()` can repair.
+        //
+        // No caller survives an error from here today — `engine.rs` routes it
+        // through `close_all` and returns — and this is what makes that a
+        // property of the type rather than a coincidence of its one caller. The
+        // cost is `count` reading one high after a fatal write, on a run that is
+        // ending anyway.
+        let first = self.count == 0;
+        self.count += 1;
         if let Some(w) = self.json.as_mut() {
             // `_p` carries what Desktop shows in HTML but keeps out of JSON.
             let body: Map<String, Value> = payload
@@ -83,7 +96,7 @@ impl Output {
                 .filter(|(k, _)| k.as_str() != "_p")
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            if self.count > 0 {
+            if !first {
                 w.write_all(b",\n")?;
             }
             w.write_all(json::message_block(&body).as_bytes())?;
@@ -91,7 +104,6 @@ impl Output {
         if let Some(h) = self.html.as_mut() {
             h.add(payload)?;
         }
-        self.count += 1;
         Ok(())
     }
 
