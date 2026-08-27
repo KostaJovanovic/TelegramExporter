@@ -513,8 +513,16 @@ fn preview_of(out: &Map<String, Value>, preview_src: Option<&str>) -> Option<Val
 /// is the documented custom-emoji ceiling: Desktop downloads the emoji's
 /// document and rewrites the field to point at it, and the media leg's 830 of
 /// 836 is the same six files.
-pub fn reactions_of(r: &tl::types::MessageReactions, names: &NameBook) -> Option<Value> {
-    let recent = r.recent_reactions.as_deref().unwrap_or(&[]);
+pub fn reactions_of(
+    r: &tl::types::MessageReactions,
+    reactors: Option<&[tl::enums::MessagePeerReaction]>,
+    names: &NameBook,
+) -> Option<Value> {
+    // `reactors` is the full list `enrich::fetch_reactors` recovered when the
+    // message's own sample was short — Telegram volunteers at most three names
+    // per *message*, not per reaction. Without it a message with two reactions
+    // of five named three people and silently hid seven.
+    let recent = reactors.unwrap_or_else(|| r.recent_reactions.as_deref().unwrap_or(&[]));
     let mut out = Vec::new();
     for entry in &r.results {
         let tl::enums::ReactionCount::Count(entry) = entry;
@@ -581,9 +589,15 @@ fn same_reaction(a: &tl::enums::Reaction, b: &tl::enums::Reaction) -> bool {
 /// `voters` and `chosen` come from `results`, which Telegram omits entirely
 /// before anyone has voted; a poll in that state reports every answer at zero
 /// rather than losing its answers.
-pub fn poll_of(m: &tl::types::MessageMediaPoll) -> Value {
+pub fn poll_of(
+    m: &tl::types::MessageMediaPoll,
+    refreshed: Option<&tl::enums::PollResults>,
+) -> Value {
     let tl::enums::Poll::Poll(poll) = &m.poll;
-    let tl::enums::PollResults::Results(results) = &m.results;
+    // `refreshed` is what `enrich::fetch_poll_results` recovered for a poll
+    // Telegram answered with `min` — every answer zeroed, which exports as a
+    // poll nobody voted in. Two of the reference's seven arrive that way.
+    let tl::enums::PollResults::Results(results) = refreshed.unwrap_or(&m.results);
     let tallies = results.results.as_deref().unwrap_or(&[]);
 
     let answers: Vec<Value> = poll
@@ -1119,7 +1133,7 @@ mod tests {
             )]),
             top_reactors: None,
         };
-        let out = reactions_of(&r, &names).expect("two reactions");
+        let out = reactions_of(&r, None, &names).expect("two reactions");
         let a = &out[0];
         assert_eq!(a["type"], "emoji");
         assert_eq!(a["emoji"], "❤");
@@ -1132,6 +1146,52 @@ mod tests {
             out[1].get("recent").is_none(),
             "the ❤ reactor leaked onto 👍"
         );
+    }
+
+    #[test]
+    fn the_full_reactor_list_replaces_telegrams_three_name_sample() {
+        // Telegram volunteers at most three names per *message*, not per
+        // reaction, so a message with two reactions of five named three people
+        // and hid seven. `full_reactions` existed to fetch the rest, defaulted
+        // to on, and was read by nothing — so every export shipped the sample.
+        let mut names = NameBook::default();
+        let who = |n: i64| {
+            tl::enums::MessagePeerReaction::Reaction(tl::types::MessagePeerReaction {
+                big: false,
+                unread: false,
+                my: false,
+                peer_id: peer_user(n),
+                date: 1_766_071_072,
+                reaction: tl::enums::Reaction::Emoji(tl::types::ReactionEmoji {
+                    emoticon: "HEART".into(),
+                }),
+            })
+        };
+        for n in 1..=5 {
+            names.learn_user_parts(n, &format!("P{n}"), "", "", false, None);
+        }
+        let r = tl::types::MessageReactions {
+            min: false,
+            can_see_list: true,
+            reactions_as_tags: false,
+            results: vec![emoji_reaction("HEART", 5)],
+            // What the message itself carried: three of the five.
+            recent_reactions: Some(vec![who(1), who(2), who(3)]),
+            top_reactors: None,
+        };
+
+        let sample = reactions_of(&r, None, &names).expect("one reaction");
+        assert_eq!(sample[0]["recent"].as_array().map(Vec::len), Some(3));
+
+        // The full list, as the extra request returns it.
+        let full = vec![who(1), who(2), who(3), who(4), who(5)];
+        let out = reactions_of(&r, Some(&full), &names).expect("one reaction");
+        let recent = out[0]["recent"].as_array().expect("named reactors");
+        assert_eq!(recent.len(), 5, "the sample was not replaced");
+        assert_eq!(recent[4]["from"], "P5");
+        // The count is Telegram's own and is not recomputed from the list:
+        // anonymous reactors are in the count and in neither list.
+        assert_eq!(out[0]["count"], 5);
     }
 
     #[test]
@@ -1150,7 +1210,7 @@ mod tests {
             recent_reactions: None,
             top_reactors: None,
         };
-        let out = reactions_of(&r, &NameBook::default()).expect("one reaction");
+        let out = reactions_of(&r, None, &NameBook::default()).expect("one reaction");
         assert_eq!(out[0]["type"], "custom_emoji");
         assert_eq!(out[0]["document_id"], "5296383305254459545");
         assert!(out[0].get("emoji").is_none());
@@ -1227,7 +1287,10 @@ mod tests {
         // All seven polls in the reference came out of a live export as plain
         // text: `plan::classify` answers "what would we download", and a poll
         // is not a file, so nothing recognised it.
-        let out = poll_of(&poll_media(false, Some(vec![(0, 5, true), (1, 3, false)])));
+        let out = poll_of(
+            &poll_media(false, Some(vec![(0, 5, true), (1, 3, false)])),
+            None,
+        );
         assert_eq!(out["question"], "klip");
         assert_eq!(out["closed"], false);
         assert_eq!(out["total_voters"], 8);
@@ -1241,7 +1304,7 @@ mod tests {
     fn a_poll_nobody_has_voted_in_keeps_its_answers() {
         // Telegram omits `results` entirely before the first vote. Reading it
         // as "no answers" would drop the question's options.
-        let out = poll_of(&poll_media(false, None));
+        let out = poll_of(&poll_media(false, None), None);
         assert_eq!(out["answers"].as_array().map(Vec::len), Some(2));
         assert_eq!(out["answers"][0]["voters"], 0);
         assert_eq!(out["answers"][0]["chosen"], false);

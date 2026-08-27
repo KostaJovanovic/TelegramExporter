@@ -23,7 +23,7 @@ use crate::error::{classify, EnrichError};
 use grammers_client::session::types::PeerRef;
 use grammers_client::Client;
 use grammers_tl_types as tl;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::time::Duration;
 
 /// How long a single enrichment may wait out a rate limit.
@@ -239,6 +239,322 @@ pub fn poll_needs_refresh(results: &tl::types::PollResults) -> bool {
             let tl::enums::PollAnswerVoters::Voters(v) = r;
             v.voters.unwrap_or(0) == 0
         }),
+    }
+}
+
+/// A page of reactors, at a time.
+const REACTION_PAGE: i32 = 100;
+
+/// 2,000 reactors is far past any real message; a loop with no bound is not.
+const REACTION_PAGES: usize = 20;
+
+/// Everyone who reacted, in place of the three names Telegram volunteers.
+///
+/// **This is what `full_reactions` was supposed to do and did not.** The
+/// setting has defaulted to `true` since it was written, was offered in the
+/// panel as "Full reaction lists", and was read by nothing — so every export
+/// carried the sample of at most three names that arrives with the message,
+/// exactly as if the switch were off. The predicate that decides whether to
+/// ask ([`reactions_are_truncated`]) was written at the same time and was
+/// equally unreachable.
+///
+/// People who react anonymously are simply not in the response and no amount
+/// of asking reveals them, so the returned list can still be shorter than the
+/// counts imply. That is Telegram's answer, not a truncation of ours.
+///
+/// `Err` is only ever a rate limit, so [`guarded`] can wait it out; anything
+/// else is a refusal and comes back as an empty list. Restarting from an empty
+/// accumulator on retry is correct — the caller re-invokes this, not the loop.
+pub async fn fetch_reactors(
+    client: &Client,
+    peer: PeerRef,
+    message_id: i32,
+) -> Result<Vec<tl::enums::MessagePeerReaction>, EnrichError> {
+    let mut collected = Vec::new();
+    let mut offset: Option<String> = None;
+    for _ in 0..REACTION_PAGES {
+        let request = tl::functions::messages::GetMessageReactionsList {
+            peer: peer.into(),
+            id: message_id,
+            reaction: None,
+            offset: offset.clone(),
+            limit: REACTION_PAGE,
+        };
+        let page = match client.invoke(&request).await {
+            Ok(p) => p,
+            Err(e) => {
+                let err = classify(&e);
+                // A rate limit is the caller's to wait out. A refusal — this
+                // is admin-visible on some chats — costs the message its full
+                // list and nothing else.
+                if err.is_transient() {
+                    return Err(err);
+                }
+                return Ok(Vec::new());
+            }
+        };
+        let tl::enums::messages::MessageReactionsList::List(page) = page;
+        let batch = page.reactions.len();
+        collected.extend(page.reactions);
+        offset = page.next_offset;
+        if offset.is_none() || batch == 0 {
+            break;
+        }
+    }
+    Ok(collected)
+}
+
+/// A poll's real tallies, for one Telegram answered with `min`.
+///
+/// Two of the reference export's seven polls arrive this way: every answer
+/// zeroed, which exports as a poll nobody voted in. `refresh_polls` existed to
+/// fix that and was read by nothing.
+///
+/// `poll_hash: 0` is required and means "I have nothing cached, send it in
+/// full". The Python original records that omitting it raised before any
+/// request went out, and that the surrounding `except` then swallowed the
+/// error — so the feature silently never worked until a test caught it.
+pub async fn fetch_poll_results(
+    client: &Client,
+    peer: PeerRef,
+    message_id: i32,
+) -> Result<Option<tl::enums::PollResults>, EnrichError> {
+    let request = tl::functions::messages::GetPollResults {
+        peer: peer.into(),
+        msg_id: message_id,
+        poll_hash: 0,
+    };
+    let updates = match client.invoke(&request).await {
+        Ok(u) => u,
+        Err(e) => {
+            let err = classify(&e);
+            if err.is_transient() {
+                return Err(err);
+            }
+            return Ok(None);
+        }
+    };
+    // Only an update that actually carries tallies is worth grafting on: the
+    // response can echo the same empty results back.
+    for update in updates_of(&updates) {
+        if let tl::enums::Update::MessagePoll(u) = update {
+            let tl::enums::PollResults::Results(r) = &u.results;
+            if r.results.as_ref().is_some_and(|rs| !rs.is_empty()) {
+                return Ok(Some(u.results.clone()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn updates_of(u: &tl::enums::Updates) -> Vec<&tl::enums::Update> {
+    match u {
+        tl::enums::Updates::Combined(c) => c.updates.iter().collect(),
+        tl::enums::Updates::Updates(c) => c.updates.iter().collect(),
+        tl::enums::Updates::UpdateShort(s) => std::slice::from_ref(&s.update).iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// What the chat itself is, none of which is in the message stream.
+///
+/// One request. Before this an export recorded nothing whatsoever about the
+/// group it came from — `chat_metadata` was offered as "Chat details",
+/// defaulted to on, and was read by nothing.
+///
+/// **Beyond Desktop's format on purpose.** Desktop's header is `name`, `type`
+/// and `id`; every key here is an addition, which is why it is a switch and
+/// why the switch has to actually work.
+pub async fn fetch_chat_info(
+    client: &Client,
+    peer: PeerRef,
+    settings: &Settings,
+    tally: &mut Enrichment,
+    mut on_wait: impl FnMut(u64),
+) -> Map<String, Value> {
+    let mut info = Map::new();
+    if !settings.chat_metadata {
+        return info;
+    }
+    let Some(channel) = channel_ref(peer) else {
+        return info;
+    };
+    let request = tl::functions::channels::GetFullChannel { channel };
+    let full = guarded(tally, &mut on_wait, || {
+        let client = client.clone();
+        let request = request.clone();
+        async move { client.invoke(&request).await.map_err(|e| classify(&e)) }
+    })
+    .await;
+    let Some(tl::enums::messages::ChatFull::Full(full)) = full else {
+        return info;
+    };
+    let tl::enums::ChatFull::ChannelFull(c) = full.full_chat else {
+        return info;
+    };
+
+    if !c.about.is_empty() {
+        info.insert("description".into(), json!(c.about));
+    }
+    for (value, key) in [
+        (c.participants_count, "members_count"),
+        (c.admins_count, "admins_count"),
+        (c.kicked_count, "kicked_count"),
+        (c.banned_count, "banned_count"),
+        (c.online_count, "online_count"),
+        (c.slowmode_seconds, "slow_mode_seconds"),
+        (c.pinned_msg_id, "pinned_message_id"),
+        (c.ttl_period, "ttl_period"),
+    ] {
+        // Absent and zero are the same thing for every one of these, so a
+        // falsy value is left out rather than written as `0`.
+        if let Some(v) = value.filter(|v| *v != 0) {
+            info.insert(key.into(), json!(v));
+        }
+    }
+    if let Some(linked) = c.linked_chat_id {
+        info.insert("linked_chat_id".into(), json!(format!("channel{linked}")));
+    }
+    info.insert("can_view_members".into(), json!(c.can_view_participants));
+    if c.participants_hidden {
+        info.insert("members_hidden".into(), json!(true));
+    }
+    if let Some(r) = allowed_reactions(c.available_reactions.as_ref()) {
+        info.insert("allowed_reactions".into(), r);
+    }
+    if let Some(tl::enums::ChannelLocation::Location(l)) = &c.location {
+        info.insert("location".into(), json!(l.address));
+    }
+    if let Some(tl::enums::ExportedChatInvite::ChatInviteExported(i)) = &c.exported_invite {
+        info.insert("invite_link".into(), json!(i.link));
+    }
+    info
+}
+
+/// Which reactions the chat permits, in Desktop's own vocabulary.
+fn allowed_reactions(available: Option<&tl::enums::ChatReactions>) -> Option<Value> {
+    match available? {
+        tl::enums::ChatReactions::All(_) => Some(json!("all")),
+        tl::enums::ChatReactions::None => Some(json!("none")),
+        tl::enums::ChatReactions::Some(s) => Some(Value::Array(
+            s.reactions
+                .iter()
+                .map(|r| match r {
+                    tl::enums::Reaction::Emoji(e) => json!(e.emoticon),
+                    tl::enums::Reaction::CustomEmoji(e) => json!(e.document_id.to_string()),
+                    _ => Value::Null,
+                })
+                .filter(|v| !v.is_null())
+                .collect(),
+        )),
+    }
+}
+
+/// Every invite link, which is what turns a placeholder inviter into a name.
+///
+/// **Admin-only.** Telegram refuses this for an ordinary member, which is the
+/// common case, so a refusal is silent and costs nothing. `invite_links` was
+/// offered, defaulted to on, and read by nothing.
+pub async fn fetch_invites(
+    client: &Client,
+    peer: PeerRef,
+    settings: &Settings,
+    tally: &mut Enrichment,
+    mut on_wait: impl FnMut(u64),
+) -> Vec<Value> {
+    if !settings.invite_links {
+        return Vec::new();
+    }
+    let Ok(me) = client.get_me().await else {
+        return Vec::new();
+    };
+    let admin: tl::enums::InputUser = tl::enums::InputUser::User(tl::types::InputUser {
+        user_id: me.id().bare_id().unwrap_or(0),
+        access_hash: match &me.raw {
+            tl::enums::User::User(u) => u.access_hash.unwrap_or(0),
+            _ => 0,
+        },
+    });
+    let request = tl::functions::messages::GetExportedChatInvites {
+        revoked: false,
+        peer: peer.into(),
+        admin_id: admin,
+        offset_date: None,
+        offset_link: None,
+        limit: 100,
+    };
+    let result = guarded(tally, &mut on_wait, || {
+        let client = client.clone();
+        let request = request.clone();
+        async move { client.invoke(&request).await.map_err(|e| classify(&e)) }
+    })
+    .await;
+    let Some(tl::enums::messages::ExportedChatInvites::Invites(result)) = result else {
+        return Vec::new();
+    };
+
+    result
+        .invites
+        .iter()
+        .filter_map(|i| {
+            let tl::enums::ExportedChatInvite::ChatInviteExported(i) = i else {
+                return None;
+            };
+            let mut one = Map::new();
+            one.insert("link".into(), json!(i.link));
+            if let Some(t) = &i.title {
+                one.insert("title".into(), json!(t));
+            }
+            if let Some((date, _)) = tgx_format::date_pair(i.date as i64) {
+                one.insert("date".into(), json!(date));
+            }
+            one.insert("creator_id".into(), json!(format!("user{}", i.admin_id)));
+            if let Some(u) = i.usage {
+                one.insert("usage".into(), json!(u));
+            }
+            if let Some(u) = i.usage_limit {
+                one.insert("usage_limit".into(), json!(u));
+            }
+            if i.permanent {
+                one.insert("permanent".into(), json!(true));
+            }
+            if i.request_needed {
+                one.insert("request_needed".into(), json!(true));
+            }
+            Some(Value::Object(one))
+        })
+        .collect()
+}
+
+/// Messages queued to send later, which are in no history at all.
+///
+/// `scheduled_messages` was offered, defaulted to on, and read by nothing —
+/// so the file it is supposed to produce was never written.
+pub async fn fetch_scheduled(
+    client: &Client,
+    peer: PeerRef,
+    settings: &Settings,
+    tally: &mut Enrichment,
+    mut on_wait: impl FnMut(u64),
+) -> Vec<tl::enums::Message> {
+    if !settings.scheduled_messages {
+        return Vec::new();
+    }
+    let request = tl::functions::messages::GetScheduledHistory {
+        peer: peer.into(),
+        hash: 0,
+    };
+    let result = guarded(tally, &mut on_wait, || {
+        let client = client.clone();
+        let request = request.clone();
+        async move { client.invoke(&request).await.map_err(|e| classify(&e)) }
+    })
+    .await;
+    match result {
+        Some(tl::enums::messages::Messages::Messages(m)) => m.messages,
+        Some(tl::enums::messages::Messages::Slice(m)) => m.messages,
+        Some(tl::enums::messages::Messages::ChannelMessages(m)) => m.messages,
+        _ => Vec::new(),
     }
 }
 

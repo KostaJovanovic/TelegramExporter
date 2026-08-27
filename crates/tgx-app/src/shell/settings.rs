@@ -13,11 +13,12 @@
 //! has no such thing. A section is a letterspaced heading over a hairline, and
 //! a setting is a muted label on the left with its control on the right.
 //!
-//! **`chat_concurrency` is deliberately absent.** The original offers "Chats at
-//! once, 1 to 8"; this engine exports one chat at a time, and a control that is
-//! enabled and does nothing teaches that the interface is unreliable. The
-//! setting is still read and clamped by `Settings` so a file carrying it still
-//! loads — it simply is not offered.
+//! **There is no "Chats at once".** The original offers 1 to 8; this engine
+//! exports one chat at a time, and a control that is enabled and does nothing
+//! teaches that the interface is unreliable. The setting itself is gone too —
+//! keeping the field but offering no control left a switch that did nothing,
+//! which is the same lie one layer down. An old `settings.json` naming it
+//! still loads, because unknown keys are dropped per field.
 
 use super::Shell;
 use gpui::prelude::*;

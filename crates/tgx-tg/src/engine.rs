@@ -220,6 +220,21 @@ pub(crate) fn human_bytes(n: i64) -> String {
 /// and cannot be submitted at all.
 pub type ProgressFn<'a> = &'a mut (dyn FnMut(Progress) + Send);
 
+/// What the two per-message requests recovered, if either fired.
+///
+/// Carried alongside the message rather than grafted onto it: `grammers`'
+/// `Message` is not ours to mutate, and the Python original's in-place
+/// `msg.reactions.recent_reactions = ...` is exactly the kind of edit that
+/// makes it hard to tell afterwards what came off the wire and what we asked
+/// for separately.
+#[derive(Debug, Default)]
+struct MessageExtras {
+    /// Everyone who reacted, when the message's own sample was short.
+    reactors: Option<Vec<tl::enums::MessagePeerReaction>>,
+    /// Real tallies, when the poll came back `min` or all-zero.
+    poll_results: Option<tl::enums::PollResults>,
+}
+
 /// One output folder plus the media names it has handed out.
 struct TopicSink {
     output: Output,
@@ -378,6 +393,37 @@ impl<'a> ChatExporter<'a> {
         // is mostly used on.
         let export_type = chat.kind.export_type(chat.public);
 
+        // **Before the sinks, because it goes in their headers.** One request
+        // for the description, counts, pinned message and permanent invite,
+        // and one more — admin-only, silent when refused — for the full invite
+        // list. Both switches defaulted to on and were read by nothing, so an
+        // export recorded nothing at all about the group it came from.
+        let mut tally = Enrichment::default();
+        let mut chat_head =
+            enrich::fetch_chat_info(self.client, peer, self.settings, &mut tally, |seconds| {
+                progress(Progress::FloodWait { seconds })
+            })
+            .await;
+        let invites =
+            enrich::fetch_invites(self.client, peer, self.settings, &mut tally, |seconds| {
+                progress(Progress::FloodWait { seconds })
+            })
+            .await;
+        if !invites.is_empty() {
+            chat_head.insert("invite_links".into(), Value::Array(invites.clone()));
+        }
+        if !chat_head.is_empty() {
+            progress(Progress::Log(format!(
+                "chat details: {} ({} invite link(s))",
+                chat_head
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                invites.len()
+            )));
+        }
+
         // Pre-create a sink per topic so the folder names are stable and the
         // index can list them even if a topic turns out empty.
         if split {
@@ -385,6 +431,11 @@ impl<'a> ChatExporter<'a> {
                 let dir = root.join(t.dirname());
                 let mut head = Map::new();
                 head.insert("topic_id".into(), json!(t.id));
+                // Every topic folder is a standalone export, so each carries
+                // the chat's details rather than one of them holding it.
+                for (k, v) in &chat_head {
+                    head.insert(k.clone(), v.clone());
+                }
                 let output = Output::new(
                     &dir,
                     &t.title,
@@ -412,7 +463,7 @@ impl<'a> ChatExporter<'a> {
                 chat.id,
                 self.settings,
                 None,
-                None,
+                (!chat_head.is_empty()).then(|| chat_head.clone()),
             )?;
             sinks.insert(
                 GENERAL_TOPIC_ID,
@@ -428,7 +479,6 @@ impl<'a> ChatExporter<'a> {
         // --- enrichment, before the read ------------------------------------
         // **Before**, so the roster's names are available to the very first
         // message rather than the last.
-        let mut tally = Enrichment::default();
         if self.settings.member_roster {
             let roster = enrich::fetch_participants(
                 self.client,
@@ -471,8 +521,6 @@ impl<'a> ChatExporter<'a> {
                 ));
             }
         }
-        result.extra_requests += tally.requests;
-        result.enrich_deferred += tally.deferred;
 
         // --- the single pass ------------------------------------------------
         progress(Progress::Log(format!(
@@ -547,9 +595,16 @@ impl<'a> ChatExporter<'a> {
                         } else {
                             GENERAL_TOPIC_ID
                         };
+                        // **Before the conversion, not after.** The extra
+                        // requests replace what the message itself carries —
+                        // the three-name reaction sample and a `min` poll —
+                        // so a converter that had already run would have
+                        // written the short version.
+                        let extra = self.enrich_message(&msg, peer, &mut tally, progress).await;
                         if let Some(sink) = sinks.get_mut(&key) {
                             let before = sink.jobs.len();
-                            let payload = self.payload(&msg, &mut sink.media, &mut sink.jobs);
+                            let payload =
+                                self.payload(&msg, &extra, &mut sink.media, &mut sink.jobs);
                             if detail {
                                 progress(Progress::Detail(describe(
                                     &payload,
@@ -610,6 +665,37 @@ impl<'a> ChatExporter<'a> {
             }
         }
 
+        // Messages queued to send later are in no history, so they get their
+        // own file beside the export rather than being mixed into it.
+        let queued =
+            enrich::fetch_scheduled(self.client, peer, self.settings, &mut tally, |seconds| {
+                progress(Progress::FloodWait { seconds })
+            })
+            .await;
+        if !queued.is_empty() {
+            let rows: Vec<Value> = queued
+                .iter()
+                .map(|m| match m {
+                    tl::enums::Message::Message(m) => Value::Object(base_message(m, &self.names)),
+                    tl::enums::Message::Service(sm) => Value::Object(base_service(sm, &self.names)),
+                    tl::enums::Message::Empty(e) => json!({ "id": e.id }),
+                })
+                .collect();
+            let body = json!({ "count": rows.len(), "messages": rows });
+            match serde_json::to_string_pretty(&body)
+                .map_err(std::io::Error::other)
+                .and_then(|b| std::fs::write(root.join("scheduled.json"), b))
+            {
+                Ok(()) => progress(Progress::Log(format!(
+                    "scheduled: {} message(s) -> scheduled.json",
+                    rows.len()
+                ))),
+                Err(e) => progress(Progress::Log(format!("scheduled.json: {e}"))),
+            }
+        }
+
+        result.extra_requests += tally.requests;
+        result.enrich_deferred += tally.deferred;
         progress(Progress::Log(format!(
             "read {done} messages in {:.1}s{}",
             started.elapsed().as_secs_f64(),
@@ -786,9 +872,73 @@ impl<'a> ChatExporter<'a> {
         }
     }
 
+    /// The two per-message requests, each fired **only when the message says
+    /// the data is missing**.
+    ///
+    /// That conditional is the whole cost argument: on the reference export the
+    /// reaction list is short on 77 of 963 reacted messages, which is a 1.16%
+    /// increase in requests, not one per message.
+    ///
+    /// Both settings defaulted to on and were read by nothing, so neither
+    /// request had ever been made. `enrich::reactions_are_truncated` and
+    /// `enrich::poll_needs_refresh` were written to gate them and were
+    /// unreachable too.
+    async fn enrich_message(
+        &mut self,
+        msg: &grammers_client::message::Message,
+        peer: PeerRef,
+        tally: &mut Enrichment,
+        progress: ProgressFn<'_>,
+    ) -> MessageExtras {
+        let mut extras = MessageExtras::default();
+        let tl::enums::Message::Message(m) = &msg.raw else {
+            return extras;
+        };
+        let id = m.id;
+
+        if self.settings.full_reactions {
+            if let Some(tl::enums::MessageReactions::Reactions(r)) = &m.reactions {
+                if enrich::reactions_are_truncated(r) {
+                    let client = self.client;
+                    let got = enrich::guarded(
+                        tally,
+                        |secs| progress(Progress::FloodWait { seconds: secs }),
+                        || enrich::fetch_reactors(client, peer, id),
+                    )
+                    .await;
+                    // Longer, or it is not an improvement on the sample the
+                    // message already carried. Anonymous reactors are in
+                    // neither, so a shorter answer is Telegram's, not a loss.
+                    let named = r.recent_reactions.as_ref().map(Vec::len).unwrap_or(0);
+                    if let Some(list) = got.filter(|l| l.len() > named) {
+                        extras.reactors = Some(list);
+                    }
+                }
+            }
+        }
+
+        if self.settings.refresh_polls {
+            if let Some(tl::enums::MessageMedia::Poll(p)) = &m.media {
+                let tl::enums::PollResults::Results(r) = &p.results;
+                if enrich::poll_needs_refresh(r) {
+                    let client = self.client;
+                    extras.poll_results = enrich::guarded(
+                        tally,
+                        |secs| progress(Progress::FloodWait { seconds: secs }),
+                        || enrich::fetch_poll_results(client, peer, id),
+                    )
+                    .await
+                    .flatten();
+                }
+            }
+        }
+        extras
+    }
+
     fn payload(
         &mut self,
         msg: &grammers_client::message::Message,
+        extras: &MessageExtras,
         names: &mut MediaNames,
         jobs: &mut Vec<PendingDownload>,
     ) -> Map<String, Value> {
@@ -826,7 +976,10 @@ impl<'a> ChatExporter<'a> {
                     // it and the message reached the JSON as bare text — all
                     // seven polls and all three locations in the reference.
                     if let tl::enums::MessageMedia::Poll(p) = media {
-                        out.insert("poll".into(), convert::poll_of(p));
+                        out.insert(
+                            "poll".into(),
+                            convert::poll_of(p, extras.poll_results.as_ref()),
+                        );
                         out = tgx_format::order::ordered(&out);
                     }
                     if let Some((place, period)) = convert::location_of(media) {
@@ -839,7 +992,9 @@ impl<'a> ChatExporter<'a> {
                 }
                 if let Some(r) = &m.reactions {
                     let tl::enums::MessageReactions::Reactions(r) = r;
-                    if let Some(v) = convert::reactions_of(r, &self.names) {
+                    if let Some(v) =
+                        convert::reactions_of(r, extras.reactors.as_deref(), &self.names)
+                    {
                         out.insert("reactions".into(), v);
                         out = tgx_format::order::ordered(&out);
                     }
@@ -859,7 +1014,7 @@ impl<'a> ChatExporter<'a> {
                 // A service message can be reacted to like any other.
                 if let Some(r) = &s.reactions {
                     let tl::enums::MessageReactions::Reactions(r) = r;
-                    if let Some(v) = convert::reactions_of(r, &self.names) {
+                    if let Some(v) = convert::reactions_of(r, None, &self.names) {
                         out.insert("reactions".into(), v);
                         out = tgx_format::order::ordered(&out);
                     }
