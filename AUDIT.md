@@ -1222,6 +1222,16 @@ prediction was wrong and that is the finding.
   and the rest would have to be reproduced against grammers' TL shapes with no
   oracle, and the wire leg's new `extra` tally would score any wrong key. The
   Python's `_action_fields` is the specification when someone takes it on.
+- **Two of the three peer shapes have never been run.** `enrich::fetch_chat_info`
+  and the roster branch on `InputPeer::Chat` (a basic group) and
+  `InputPeer::User` (a private chat) are argued from `api.tl` and have never
+  been exercised against Telegram: every live run so far has been the same
+  forum supergroup, which takes the `InputPeer::Channel` arm. So `chat_metadata`
+  and `member_roster` are proven on one peer type in three. This is the same
+  shape as the bug the code's own comment records — "the switch was on, the
+  request was never made, and nothing said so" — one layer further down, because
+  *wired* and *wired for every peer* are not the same claim. Closing it needs a
+  live export of a basic group and of a one-to-one chat, not a test.
 - **The `_p` blind spot in the html leg** is unchanged: it still lifts the
   presentation map out of Desktop's own pages, so it proves the writer and not
   the pipeline. `crates/tgx-tg/tests/wire.rs` is the compensating control and
