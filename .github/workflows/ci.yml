@@ -32,18 +32,33 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # `--locked` on every cargo step that resolves dependencies. Without it a
+      # stale or absent `Cargo.lock` is silently *rewritten* to whatever the
+      # registry offers today, so CI would be judging a dependency set no
+      # developer ever built — and `gpui`/`gpui-component` are pinned exactly
+      # (see CLAUDE.md) precisely because a pre-1.0 bump can break the interface
+      # with no code change of ours. With it, an out-of-date lock file fails the
+      # run and says so. `cargo fmt` takes no `--locked`: it resolves nothing.
       - name: Format
         run: cargo fmt --all --check
 
+      # `-- -D warnings` is redundant *today* — the `RUSTFLAGS: -D warnings`
+      # above already reaches clippy, because clippy runs as a rustc wrapper and
+      # its lints land in rustc's `warnings` group. Measured, not assumed: a
+      # scratch crate with a `&Vec<i32>` parameter fails this exact command with
+      # "`-D clippy::ptr-arg` implied by `-D warnings`". It is spelled out
+      # anyway, because that chain is three deniable steps long and anyone who
+      # narrows RUSTFLAGS to a target, or moves it, turns lint denial off
+      # without touching this line. save.bat and CLAUDE.md both promise denial.
       - name: Clippy
-        run: cargo clippy --all-targets --all-features
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       # --nocapture because the corpus skip notice is an eprintln! from a
       # *passing* test, and libtest discards stdout and stderr for those. The
       # comment at the top of this file has been claiming since it was written
       # that the skip "prints that it did"; without this it never printed.
       - name: Test
-        run: cargo test --all -- --nocapture
+        run: cargo test --locked --all -- --nocapture
 
       # And because a line in a 500-test log is not the same as being told:
       # `reference/` is gitignored, so it can never be here, so the three legs
@@ -54,7 +69,7 @@ jobs:
         run: echo "::warning::the parity legs did not run - no corpus on CI (reference/ is gitignored, so json/html/media were skipped)"
 
       - name: Release build
-        run: cargo build --release -p tgx-app
+        run: cargo build --locked --release -p tgx-app
 
       # The Python build was 46.4 MB via PyInstaller and the Rust one is
       # 19.5 MB. Both numbers were stale here and disagreed with the README,

@@ -42,6 +42,18 @@ set ACTION=%~1
 rem --force pushes with --force-with-lease, not a bare --force: it still
 rem overwrites origin/%BRANCH%, but refuses if origin moved since the last
 rem fetch, so it cannot silently clobber a push you have not seen yet.
+rem --force-if-includes rides with it everywhere, because the lease alone is
+rem weaker than it reads. --force-with-lease compares against the *local*
+rem remote-tracking ref, refs/remotes/origin/%BRANCH% -- not against the remote.
+rem Anything that fetches in the background (an IDE, a `git fetch` in another
+rem window, a periodic prefetch) advances that ref without showing anybody the
+rem commits it just recorded, and the lease is then satisfied by a state the
+rem user has never actually looked at -- exactly the clobber the lease was
+rem chosen to prevent. --force-if-includes additionally requires that whatever
+rem is being overwritten is already an ancestor of what is being pushed, i.e.
+rem that the local work was built on top of it, so a fetch that nobody read
+rem cannot license the overwrite. It needs git 2.30 or newer (2.52 here); on an
+rem older git the push is rejected outright rather than silently unprotected.
 rem Quoted `set "NAME=value"` throughout, and not for style: `set DO_BUILD=1 &`
 rem assigns the string "1 " -- cmd takes everything between the = and the & as
 rem the value, trailing space included. The later `if "%DO_BUILD%"=="1"` then
@@ -188,7 +200,7 @@ echo.
 set /p FETCH=pull + merge remote first? (y/n):
 if /i "%FETCH%"=="y" goto fetch
 
-set /p FORCE=force-with-lease push instead? overwrites the remote unless it moved since your last fetch. (y/n):
+set /p FORCE=force-with-lease push instead? overwrites the remote unless it carries work you have not built on. (y/n):
 if /i "%FORCE%"=="y" goto forcepush
 
 echo [git]  skipped - nothing pushed
@@ -204,7 +216,7 @@ goto afterpush
 
 :forcepush
 call :branchname
-git push -u origin %BRANCH% --force-with-lease
+git push -u origin %BRANCH% --force-with-lease --force-if-includes
 if errorlevel 1 set SAVE_ERROR=1
 echo.
 echo [git]  force-with-lease pushed origin/%BRANCH%
@@ -414,9 +426,9 @@ if errorlevel 1 goto end
 git push -u origin %BRANCH%
 if not errorlevel 1 goto end
 echo.
-set /p FORCE=push failed. force-with-lease push? overwrites the remote unless it moved since your last fetch. (y/n):
+set /p FORCE=push failed. force-with-lease push? overwrites the remote unless it carries work you have not built on. (y/n):
 if /i not "%FORCE%"=="y" goto pushgaveup
-git push -u origin %BRANCH% --force-with-lease
+git push -u origin %BRANCH% --force-with-lease --force-if-includes
 if errorlevel 1 set SAVE_ERROR=1
 goto end
 

@@ -168,6 +168,21 @@ Two of these are new, and both came out of that run:
   Telegram's next size down, or copy the full file when there is none. Path and
   role match; bytes do not. No leg compares them — the media leg diffs *names* —
   so nothing goes red, which is precisely why it is written here.
+* **Three entity types are absent from the corpus, so the oracle never sees
+  them.** Counted, not assumed: across all 6,643 messages in `reference/`, the
+  `text_entities` are 3,916 `plain`, 130 `mention`, 53 `link`, 7
+  `mention_name`, 5 `bold`, 2 `email`, 1 `phone` and 1 `custom_emoji` — and
+  **zero `hashtag`, zero `cashtag`, zero `bot_command`**. Those three are
+  exactly the inline types that build a `ShowHashtag(...)` / `ShowCashtag(...)`
+  / `ShowBotCommand(...)` JavaScript call
+  (`crates/tgx-html/src/inline.rs:95-106`), which is the one place in the writer
+  where attacker-controlled chat text is interpolated into a JS argument rather
+  than into markup. The `js_str` + `esc` guard there is therefore covered by
+  **unit tests only, and by no leg at all**: a regression in it would leave all
+  three legs green. The reference is one Serbian supergroup and cannot be
+  widened by editing it; closing this needs either a second corpus from a chat
+  that uses hashtags and bot commands, or the guard treated as unproven
+  outside its own tests.
 * **`custom_emoji.document_id` stays a numeric id, not a sticker path.** This is
   the media leg's documented 830-of-836 ceiling and it is unchanged. A JSON
   replay cannot see custom emoji at all.
