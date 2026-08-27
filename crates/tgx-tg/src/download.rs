@@ -10,6 +10,7 @@
 //! alone — the HTML references the file before it is fetched, so a silent
 //! failure is a broken link in the archive rather than an error anyone sees.
 
+use crate::cancel::Cancel;
 use crate::error::{classify, EnrichError};
 use crate::plan::DownloadJob;
 use grammers_client::media::{Downloadable, Media, PhotoSize};
@@ -20,6 +21,16 @@ use tokio::sync::Semaphore;
 
 /// How many times a download is retried before its path is recorded as missing.
 pub const MAX_RETRIES: u32 = 5;
+
+/// How many rate limits one file may wait out before it is given up on.
+///
+/// A `FLOOD_WAIT` did not spend a retry — deliberately, since it is Telegram
+/// asking for patience rather than a failure — but that made the retry loop
+/// unbounded in the one case where it can genuinely never end: an account under
+/// a persistent limit answers every attempt the same way, and the loop had no
+/// second counter and no exit. Twenty waits is far more patience than any real
+/// export needs and still terminates.
+pub const MAX_RATE_LIMIT_WAITS: u32 = 20;
 
 /// What one media pass produced.
 #[derive(Debug, Default)]
@@ -60,12 +71,26 @@ pub struct PendingDownload {
 pub type Reporter = tokio::sync::mpsc::UnboundedSender<crate::engine::Progress>;
 
 /// Run every job, at most `concurrency` at a time.
+///
+/// **Cancellable, which it was not.** This module did not so much as import
+/// [`Cancel`], so Stop reached the engine's between-batch check and nothing
+/// else: a folder of 1,781 files carried on to the last one. The comment beside
+/// the rate-limit sleep said it waited "in slices so a cancel is not swallowed"
+/// and then passed a `Cancel::new()` that nobody held, which is a signal that
+/// can never fire.
+///
+/// On cancel the pool **stops starting new jobs and lets the in-flight ones
+/// finish**. Tearing a download down mid-write would leave a part-written file
+/// the HTML already links to, which is the thing this whole module argues
+/// against. Every job that never ran is recorded in `missing` and so reaches
+/// `missing_media.txt`: a stated gap, not a dangling reference.
 pub async fn run_all(
     client: &Client,
     root: &Path,
     jobs: Vec<PendingDownload>,
     concurrency: usize,
     report: Option<Reporter>,
+    cancel: &Cancel,
 ) -> MediaTally {
     let permits = Arc::new(Semaphore::new(concurrency.max(1)));
     let mut set = tokio::task::JoinSet::new();
@@ -76,11 +101,20 @@ pub async fn run_all(
         let client = client.clone();
         let root = root.to_path_buf();
         let report = report.clone();
+        let cancel = cancel.clone();
         set.spawn(async move {
             let _permit = permits.acquire_owned().await;
+            // Checked *after* the permit, not before: with a concurrency of 5
+            // and 1,781 jobs, 1,776 of them are already spawned and waiting
+            // here when Stop is pressed. Checking on the way in is what makes
+            // the cancel take effect in the time it takes five files to finish
+            // rather than 1,781.
+            if cancel.is_cancelled() {
+                return skipped(&pending.job);
+            }
             let dest = pending.job.dest.clone();
             let started = std::time::Instant::now();
-            let one = run_one(&client, &root, pending).await;
+            let one = run_one(&client, &root, pending, &cancel).await;
             if let Some(tx) = &report {
                 let _ = tx.send(crate::engine::Progress::Detail(format!(
                     "  {} {dest} ({} in {:.1}s)",
@@ -118,14 +152,47 @@ pub async fn run_all(
     tally
 }
 
-async fn run_one(client: &Client, root: &Path, pending: PendingDownload) -> MediaTally {
+/// Every path this job's message already promised in the JSON and the HTML.
+///
+/// The primary file, Telegram's thumbnail and the inline preview are named by
+/// `plan.rs` before a byte is fetched — that is the design, and it is where the
+/// wall-clock speed comes from — so a job that fails or never runs leaves up to
+/// three references to files that are not there. Only the first was ever
+/// recorded, so `missing_media.txt` under-reported and the other two showed up
+/// as dangling `<img>` tags with nothing anywhere accounting for them.
+fn promised_paths(job: &DownloadJob) -> Vec<String> {
+    let mut out = vec![job.dest.clone()];
+    out.extend(job.thumb_dest.clone());
+    out.extend(job.preview_dest.clone());
+    out
+}
+
+/// The tally for a job the pool never started, because Stop was pressed.
+///
+/// Counted as **failed**, not as a separate category. A file the export named
+/// and did not deliver is a gap in the archive whatever the reason, and the run
+/// says "Stopped" beside the number, so nothing here is claiming it tried.
+fn skipped(job: &DownloadJob) -> MediaTally {
+    MediaTally {
+        failed: 1,
+        missing: promised_paths(job),
+        ..MediaTally::default()
+    }
+}
+
+async fn run_one(
+    client: &Client,
+    root: &Path,
+    pending: PendingDownload,
+    cancel: &Cancel,
+) -> MediaTally {
     let mut tally = MediaTally::default();
     let dest = root.join(&pending.job.dest);
 
     if let Some(parent) = dest.parent() {
         if std::fs::create_dir_all(parent).is_err() {
             tally.failed += 1;
-            tally.missing.push(pending.job.dest.clone());
+            tally.missing.extend(promised_paths(&pending.job));
             return tally;
         }
     }
@@ -147,18 +214,22 @@ async fn run_one(client: &Client, root: &Path, pending: PendingDownload) -> Medi
 
     let Some(media) = pending.media else {
         tally.failed += 1;
-        tally.missing.push(pending.job.dest.clone());
+        tally.missing.extend(promised_paths(&pending.job));
         return tally;
     };
 
-    if let Some(written) = fetch_with_retry(client, &media, &dest).await {
+    if let Some(written) = fetch_with_retry(client, &media, &dest, cancel).await {
         tally.downloaded += 1;
         tally.bytes += written;
-        fetch_thumb(client, root, &media, &pending.job, &mut tally).await;
-        fetch_preview(client, root, &media, &pending.job, &dest, &mut tally).await;
+        fetch_thumb(client, root, &media, &pending.job, &mut tally, cancel).await;
+        fetch_preview(client, root, &media, &pending.job, &dest, &mut tally, cancel).await;
     } else {
         tally.failed += 1;
-        tally.missing.push(pending.job.dest.clone());
+        // Not just `dest`. When the primary file fails, its thumbnail and its
+        // preview are never fetched and never recorded, yet the JSON and the
+        // HTML have already named all three. Reporting one of three made
+        // `missing_media.txt` an incomplete account of the same run's gaps.
+        tally.missing.extend(promised_paths(&pending.job));
     }
     tally
 }
@@ -173,9 +244,19 @@ async fn run_one(client: &Client, root: &Path, pending: PendingDownload) -> Medi
 /// thumbnail by then, so losing it leaves a broken `<img>`. The Python original
 /// carries a comment recording exactly that, which is the reason this is one
 /// function rather than three loops.
-async fn fetch_with_retry<D: Downloadable>(client: &Client, media: &D, dest: &Path) -> Option<i64> {
+async fn fetch_with_retry<D: Downloadable>(
+    client: &Client,
+    media: &D,
+    dest: &Path,
+    cancel: &Cancel,
+) -> Option<i64> {
     let mut attempt = 0;
+    let mut waits = 0;
     loop {
+        if cancel.is_cancelled() {
+            let _ = std::fs::remove_file(dest);
+            return None;
+        }
         attempt += 1;
         match fetch(client, media, dest).await {
             Ok(written) if written > 0 => return Some(written),
@@ -190,9 +271,20 @@ async fn fetch_with_retry<D: Downloadable>(client: &Client, media: &D, dest: &Pa
             Err(e) => {
                 let _ = std::fs::remove_file(dest);
                 if let Some(wait) = e.retry_after() {
-                    // A rate limit is temporary. Wait it out in slices so a
-                    // cancel is not swallowed, and do not spend a retry on it.
-                    crate::engine::sleep_in_slices(wait).await;
+                    // A rate limit is temporary and does not spend a retry —
+                    // it is Telegram asking for patience, not a failure. It
+                    // gets its own ceiling instead, because `attempt -= 1` with
+                    // no second counter is a loop with no exit when every
+                    // attempt comes back rate-limited.
+                    waits += 1;
+                    if waits >= MAX_RATE_LIMIT_WAITS {
+                        return None;
+                    }
+                    // In slices, against the signal the caller actually holds.
+                    // This passed a `Cancel::new()` that nobody had, so the
+                    // comment promising a cancel would not be swallowed
+                    // described a flag that could never be set.
+                    crate::engine::sleep_in_slices_until(wait, cancel).await;
                     attempt -= 1;
                     continue;
                 }
@@ -223,6 +315,7 @@ async fn fetch_thumb(
     media: &Media,
     job: &DownloadJob,
     tally: &mut MediaTally,
+    cancel: &Cancel,
 ) {
     let Some(rel) = job.thumb_dest.as_ref() else {
         return;
@@ -235,7 +328,7 @@ async fn fetch_thumb(
         return;
     };
     let dest = root.join(rel);
-    match fetch_with_retry(client, &thumb, &dest).await {
+    match fetch_with_retry(client, &thumb, &dest, cancel).await {
         Some(written) => {
             tally.downloaded += 1;
             tally.bytes += written;
@@ -267,6 +360,7 @@ async fn fetch_preview(
     job: &DownloadJob,
     full: &Path,
     tally: &mut MediaTally,
+    cancel: &Cancel,
 ) {
     let Some(rel) = job.preview_dest.as_ref() else {
         return;
@@ -283,7 +377,7 @@ async fn fetch_preview(
         _ => None,
     };
     if let Some(t) = smaller {
-        if let Some(written) = fetch_with_retry(client, &t, &dest).await {
+        if let Some(written) = fetch_with_retry(client, &t, &dest, cancel).await {
             tally.downloaded += 1;
             tally.bytes += written;
             return;
@@ -420,6 +514,67 @@ mod tests {
         // And it says what the list means, not just the paths.
         assert!(body.contains("could not be saved"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn job_with_all_three() -> DownloadJob {
+        DownloadJob {
+            dest: "video_files/clip.mp4".into(),
+            thumb_dest: Some("video_files/clip.mp4_thumb.jpg".into()),
+            preview_dest: Some("photos/photo_1.jpg".into()),
+            size: 1024,
+            inline_bytes: None,
+            message_id: 7,
+        }
+    }
+
+    #[test]
+    fn a_failed_file_states_every_path_it_promised() {
+        // `plan.rs` names the file, its thumbnail and its preview before a byte
+        // is fetched. When the primary download fails the other two are never
+        // attempted and never recorded, yet the JSON and the HTML have already
+        // named all three — so missing_media.txt reported one gap in three and
+        // the other two showed up as dangling <img> tags accounted for nowhere.
+        let paths = promised_paths(&job_with_all_three());
+        assert_eq!(
+            paths,
+            vec![
+                "video_files/clip.mp4",
+                "video_files/clip.mp4_thumb.jpg",
+                "photos/photo_1.jpg"
+            ]
+        );
+        // A job with neither still reports itself.
+        let bare = DownloadJob {
+            thumb_dest: None,
+            preview_dest: None,
+            ..job_with_all_three()
+        };
+        assert_eq!(promised_paths(&bare), vec!["video_files/clip.mp4"]);
+    }
+
+    #[test]
+    fn a_job_stop_prevented_is_a_stated_gap_not_a_silent_one() {
+        // On cancel the pool stops starting jobs and lets the in-flight ones
+        // finish — tearing a download down mid-write would leave a part-written
+        // file the HTML already links to. What it must not do is drop the
+        // un-run jobs silently: the JSON named them before the pool ever saw
+        // them.
+        let t = skipped(&job_with_all_three());
+        assert_eq!(t.downloaded, 0);
+        assert_eq!(t.bytes, 0);
+        assert_eq!(t.failed, 1);
+        assert_eq!(t.missing.len(), 3);
+    }
+
+    #[test]
+    fn a_rate_limit_loop_has_an_exit() {
+        // A FLOOD_WAIT deliberately does not spend a retry — it is Telegram
+        // asking for patience, not a failure. With `attempt -= 1` and no second
+        // counter that made the loop unbounded in the one case where it can
+        // genuinely never end: an account under a persistent limit answers
+        // every attempt the same way.
+        assert!(MAX_RATE_LIMIT_WAITS > MAX_RETRIES);
+        assert!(MAX_RATE_LIMIT_WAITS < 100, "patience, not a hang");
     }
 
     #[test]
