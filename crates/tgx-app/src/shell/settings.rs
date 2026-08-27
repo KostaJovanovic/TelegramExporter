@@ -197,6 +197,23 @@ impl Shell {
                 set_extra(s, key, !extra(s, key));
             }));
         }
+        // Not in EXTRAS: that section is the requests, and this costs none —
+        // it changes which of two names already in hand gets written.
+        body = body
+            .child(self.check(
+                "own-names",
+                "Name contacts as they name themselves",
+                self.settings.own_names,
+                true,
+                cx,
+                |s| s.own_names = !s.own_names,
+            ))
+            .child(hint(
+                "Telegram sends your address-book name for anyone you have \
+                 saved, and never sends theirs — so a contact is written as \
+                 their @username instead, or keeps your name if they have none.",
+                p,
+            ));
         body = body.child(row("Member list cap (0 = no cap)", p).child(narrow(&form.member_limit)));
         body = body.child(hint(
             "A public channel can have millions of members and Telegram stops \

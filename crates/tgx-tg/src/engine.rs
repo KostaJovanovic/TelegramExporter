@@ -357,7 +357,10 @@ impl<'a> ChatExporter<'a> {
         Self {
             client,
             settings,
-            names: NameBook::default(),
+            names: NameBook {
+                own_names: settings.own_names,
+                ..NameBook::default()
+            },
             session,
             forwards_tried: std::collections::HashSet::new(),
         }
@@ -539,6 +542,8 @@ impl<'a> ChatExporter<'a> {
             .await;
             result.members = roster.members.len();
             result.members_complete = roster.complete;
+            self.names.aliased.0 += roster.aliased.0;
+            self.names.aliased.1 += roster.aliased.1;
             progress(Progress::Log(format!(
                 "roster: {} members, {} — {} extra request(s), {:.1}s in",
                 roster.members.len(),
@@ -825,6 +830,16 @@ impl<'a> ChatExporter<'a> {
             }
         }
 
+        // **Reported even when it is zero.** On an account with no contacts in
+        // the chat this option legitimately changes nothing, which looks
+        // exactly like a switch that does nothing — the failure this codebase
+        // has had five of.
+        if self.settings.own_names {
+            let (replaced, kept) = self.names.aliased;
+            progress(Progress::Log(format!(
+                "own names: {replaced} contact(s) written as their @handle,                  {kept} kept under your name for want of one"
+            )));
+        }
         result.extra_requests += tally.requests;
         result.enrich_deferred += tally.deferred;
         progress(Progress::Log(format!(

@@ -32,35 +32,53 @@ pub struct NameBook {
     pub initials: HashMap<String, String>,
     /// A self-chosen name colour, numbered past the seven-entry palette.
     pub colour: HashMap<String, i64>,
+    /// Write a contact as `@handle` rather than under the name you saved.
+    ///
+    /// **Set here rather than checked at each call site**, because there are
+    /// four of them — `result.json`'s name, the HTML's untrimmed one, the
+    /// userpic letters and the roster — and a switch honoured by three of four
+    /// is worse than one honoured by none: the export would then disagree with
+    /// itself about who somebody is.
+    pub own_names: bool,
+    /// Contacts written as their own handle, and contacts that had no handle
+    /// to be written as.
+    ///
+    /// Counted because this option is otherwise invisible: on an account with
+    /// no contacts in the chat it legitimately changes nothing, and that looks
+    /// exactly like a switch that does nothing.
+    pub aliased: (usize, usize),
 }
 
 impl NameBook {
-    /// Learn a user from the fields that matter, rather than from the whole TL
-    /// object.
+    /// Learn a user from [`UserFacts`].
     ///
     /// grammers regenerates `tl::types::User` from Telegram's schema and it has
     /// gained fields three times in recent releases; taking the parts keeps
-    /// this testable without a 60-field fixture that rots on every bump.
-    pub fn learn_user_parts(
-        &mut self,
-        id: i64,
-        first: &str,
-        last: &str,
-        username: &str,
-        deleted: bool,
-        colour: Option<i64>,
-    ) {
-        let key = PeerKey::user(id).to_string();
-        if let Some(n) = tgx_format::peer::display_name(first, last, username, deleted) {
+    /// this testable without a forty-field fixture that rots on every bump.
+    ///
+    /// **The `own_names` substitution lives here**, not in [`Self::learn_user`].
+    /// This is the entry point every test uses, so a switch honoured only on
+    /// the TL path would be a switch no test could reach.
+    pub fn learn(&mut self, f: UserFacts<'_>) {
+        let (first, last) = own_name_parts(
+            self.own_names,
+            f.contact,
+            f.username,
+            f.first,
+            f.last,
+            &mut self.aliased,
+        );
+        let key = PeerKey::user(f.id).to_string();
+        if let Some(n) = tgx_format::peer::display_name(first, last, f.username, f.deleted) {
             self.names.insert(key.clone(), n);
         }
-        if let Some(n) = tgx_format::peer::html_name(first, last, username, deleted) {
+        if let Some(n) = tgx_format::peer::html_name(first, last, f.username, f.deleted) {
             self.html.insert(key.clone(), n);
         }
-        let letters = if deleted {
+        let letters = if f.deleted {
             "D".to_string()
         } else if first.is_empty() && last.is_empty() {
-            username
+            f.username
                 .chars()
                 .next()
                 .map(|c| c.to_uppercase().to_string())
@@ -69,7 +87,7 @@ impl NameBook {
             tgx_format::peer::initials_from_fields(first, last)
         };
         self.initials.insert(key.clone(), letters);
-        if let Some(v) = colour {
+        if let Some(v) = f.colour {
             self.colour.insert(key, v);
         }
     }
@@ -82,14 +100,15 @@ impl NameBook {
             Some(tl::enums::PeerColor::Color(c)) => c.color.map(|v| v as i64),
             _ => None,
         };
-        self.learn_user_parts(
-            u.id,
-            u.first_name.as_deref().unwrap_or(""),
-            u.last_name.as_deref().unwrap_or(""),
-            u.username.as_deref().unwrap_or(""),
-            u.deleted,
+        self.learn(UserFacts {
+            id: u.id,
+            first: u.first_name.as_deref().unwrap_or(""),
+            last: u.last_name.as_deref().unwrap_or(""),
+            username: u.username.as_deref().unwrap_or(""),
+            deleted: u.deleted,
+            contact: u.contact,
             colour,
-        );
+        });
     }
 
     pub fn learn_chat_title(&mut self, key: PeerKey, title: &str) {
@@ -112,6 +131,58 @@ impl NameBook {
             .map(String::as_str)
             .unwrap_or("")
     }
+}
+
+/// The handful of `tl::types::User` fields an export actually needs.
+///
+/// Named rather than positional because the flags are the point: a call site
+/// reading `false, false, None` says nothing about which of *deleted*,
+/// *contact* and *colour* is which, and the two were one argument away from
+/// silently swapping.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct UserFacts<'a> {
+    pub id: i64,
+    pub first: &'a str,
+    pub last: &'a str,
+    pub username: &'a str,
+    pub deleted: bool,
+    /// In *your* address book — which is why the name above may be the one you
+    /// gave them rather than the one they chose. See `Settings::own_names`.
+    pub contact: bool,
+    pub colour: Option<i64>,
+}
+
+/// The name parts to build a user's display name from, honouring `own_names`.
+///
+/// Returns the pair to feed to `display_name`, which already falls back to
+/// `@username` when both are empty — so blanking them here *is* the
+/// substitution, and it goes through the same tested path as a user who
+/// genuinely set no name.
+///
+/// **Only a contact is touched.** For everyone else Telegram already sends the
+/// name they chose; rewriting those to handles would lose real names to
+/// implement an option about false ones.
+///
+/// `tally` counts `(replaced, kept)` — the second being a contact with no
+/// username, where their own name is unobtainable and yours is better than
+/// nothing.
+pub(crate) fn own_name_parts<'a>(
+    own_names: bool,
+    contact: bool,
+    username: &str,
+    first: &'a str,
+    last: &'a str,
+    tally: &mut (usize, usize),
+) -> (&'a str, &'a str) {
+    if !own_names || !contact {
+        return (first, last);
+    }
+    if username.is_empty() {
+        tally.1 += 1;
+        return (first, last);
+    }
+    tally.0 += 1;
+    ("", "")
 }
 
 /// Desktop writes peers as `user123` / `chat123` / `channel123`.
@@ -1063,8 +1134,20 @@ mod tests {
         // The nine names below are exactly the nine the reference export
         // contains, with the payload keys it carries for each.
         let mut names = NameBook::default();
-        names.learn_user_parts(11, "Nađa", "Gavrilović", "", false, None);
-        names.learn_user_parts(12, "Group", "", "", false, None);
+        names.learn(UserFacts {
+            id: 11,
+            first: "Nađa",
+            last: "Gavrilović",
+            username: "",
+            ..Default::default()
+        });
+        names.learn(UserFacts {
+            id: 12,
+            first: "Group",
+            last: "",
+            username: "",
+            ..Default::default()
+        });
 
         /// One action, the name Desktop gives it, and the payload it carries.
         type Case = (
@@ -1341,7 +1424,13 @@ mod tests {
         // because `reactions` is allowed to *differ* between two runs and the
         // check never asked whether it was there at all.
         let mut names = NameBook::default();
-        names.learn_user_parts(1401106198, "Petar", "Markov", "", false, None);
+        names.learn(UserFacts {
+            id: 1401106198,
+            first: "Petar",
+            last: "Markov",
+            username: "",
+            ..Default::default()
+        });
 
         let r = tl::types::MessageReactions {
             min: false,
@@ -1378,6 +1467,82 @@ mod tests {
     }
 
     #[test]
+    fn own_names_writes_a_contact_as_their_own_handle() {
+        // Telegram overwrites first/last with YOUR address-book entry for
+        // anyone you have saved and sends no second field carrying theirs, so
+        // the username is the only identifier guaranteed to be the person's
+        // own. Confirmed against the account holder's own export: the name in
+        // `result.json` was their contact name, not hers.
+        let mut tally = (0, 0);
+        let parts = own_name_parts(true, true, "tamara", "Tamara", "Blokade", &mut tally);
+        assert_eq!(parts, ("", ""), "the contact name was kept");
+        assert_eq!(tally, (1, 0));
+        // Blanking the pair is the substitution: `display_name` already falls
+        // back to the handle, so this goes down the same path as a user who
+        // genuinely set no name.
+        assert_eq!(
+            tgx_format::peer::display_name(parts.0, parts.1, "tamara", false).as_deref(),
+            Some("@tamara")
+        );
+    }
+
+    #[test]
+    fn own_names_leaves_everyone_who_is_not_a_contact_alone() {
+        // For a non-contact Telegram already sends the name they chose.
+        // Rewriting those to handles would lose real names in order to
+        // implement an option about false ones.
+        let mut tally = (0, 0);
+        let parts = own_name_parts(true, false, "someone", "Nada", "Gavrilović", &mut tally);
+        assert_eq!(parts, ("Nada", "Gavrilović"));
+        assert_eq!(tally, (0, 0), "a non-contact must not be counted");
+    }
+
+    #[test]
+    fn a_contact_with_no_handle_keeps_the_name_you_gave_them() {
+        // Their own name is unobtainable and yours is better than none — but
+        // it is counted, so the run can say how often it could not be honoured
+        // rather than reporting a clean substitution it did not make.
+        let mut tally = (0, 0);
+        let parts = own_name_parts(true, true, "", "Tam Fmk", "", &mut tally);
+        assert_eq!(parts, ("Tam Fmk", ""));
+        assert_eq!(tally, (0, 1));
+    }
+
+    #[test]
+    fn the_option_off_changes_nothing_at_all() {
+        let mut tally = (0, 0);
+        assert_eq!(
+            own_name_parts(false, true, "tamara", "Tamara", "Blokade", &mut tally),
+            ("Tamara", "Blokade")
+        );
+        assert_eq!(tally, (0, 0));
+    }
+
+    #[test]
+    fn every_name_the_export_writes_moves_together() {
+        // Four consumers read this book — `result.json`'s trimmed name, the
+        // HTML's untrimmed one, the userpic letters and the roster. A switch
+        // honoured by three of four is worse than one honoured by none: the
+        // export would disagree with itself about who somebody is.
+        let mut book = NameBook {
+            own_names: true,
+            ..NameBook::default()
+        };
+        book.learn(UserFacts {
+            id: 11,
+            first: "Tamara",
+            last: "Blokade",
+            username: "tamara",
+            contact: true,
+            ..Default::default()
+        });
+        let key = PeerKey::user(11).to_string();
+        assert_eq!(book.get(&key), "@tamara");
+        assert_eq!(book.html_name(&key), "@tamara");
+        assert_eq!(book.aliased, (1, 0));
+    }
+
+    #[test]
     fn the_full_reactor_list_replaces_telegrams_three_name_sample() {
         // Telegram volunteers at most three names per *message*, not per
         // reaction, so a message with two reactions of five named three people
@@ -1397,7 +1562,13 @@ mod tests {
             })
         };
         for n in 1..=5 {
-            names.learn_user_parts(n, &format!("P{n}"), "", "", false, None);
+            names.learn(UserFacts {
+                id: n,
+                first: &format!("P{n}"),
+                last: "",
+                username: "",
+                ..Default::default()
+            });
         }
         let r = tl::types::MessageReactions {
             min: false,
@@ -1604,7 +1775,13 @@ mod tests {
     #[test]
     fn the_name_book_keeps_trimmed_and_untrimmed_apart() {
         let mut b = NameBook::default();
-        b.learn_user_parts(1, "Ivana", "", "", false, None);
+        b.learn(UserFacts {
+            id: 1,
+            first: "Ivana",
+            last: "",
+            username: "",
+            ..Default::default()
+        });
         // 94 of 601 names on one reference page end in a space. The two really
         // are different strings and both have to be kept.
         assert_eq!(b.get("user1"), "Ivana");
@@ -1614,21 +1791,27 @@ mod tests {
     #[test]
     fn initials_come_from_the_fields_not_the_joined_string() {
         let mut b = NameBook::default();
-        b.learn_user_parts(
-            1,
-            "Nada",
-            "Gavrilovic arh blokade fotograf",
-            "",
-            false,
-            None,
-        );
+        b.learn(UserFacts {
+            id: 1,
+            first: "Nada",
+            last: "Gavrilovic arh blokade fotograf",
+            username: "",
+            ..Default::default()
+        });
         assert_eq!(b.initials.get("user1").unwrap(), "NG");
     }
 
     #[test]
     fn a_deleted_account_is_named_and_lettered() {
         let mut b = NameBook::default();
-        b.learn_user_parts(1, "", "", "", true, None);
+        b.learn(UserFacts {
+            id: 1,
+            first: "",
+            last: "",
+            username: "",
+            deleted: true,
+            ..Default::default()
+        });
         assert_eq!(b.get("user1"), "Deleted Account");
         assert_eq!(b.initials.get("user1").unwrap(), "D");
     }
@@ -1636,7 +1819,14 @@ mod tests {
     #[test]
     fn a_self_chosen_colour_is_kept() {
         let mut b = NameBook::default();
-        b.learn_user_parts(1, "A", "B", "", false, Some(11));
+        b.learn(UserFacts {
+            id: 1,
+            first: "A",
+            last: "B",
+            username: "",
+            colour: Some(11),
+            ..Default::default()
+        });
         assert_eq!(b.colour.get("user1"), Some(&11));
     }
 }
