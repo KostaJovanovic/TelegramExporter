@@ -247,6 +247,15 @@ impl Settings {
         if out.theme != "dark" && out.theme != "light" {
             out.theme = "dark".into();
         }
+        // **`sort_mode` deliberately gets no such normalisation.** It looks like
+        // the same case as `theme` and is not: the vocabulary belongs to
+        // `tgx_app::list::SortMode`, which this crate must not know about, and
+        // `SortMode::from_key` already falls back to Recent for anything it does
+        // not recognise. So an unreadable value costs nothing at read time. The
+        // only difference from `theme` is that the nonsense string survives in
+        // `settings.json` instead of being rewritten — which is a smaller price
+        // than duplicating the UI's key list across the layer boundary, where
+        // the copy would then be free to drift.
         out.page_size = out.page_size.max(1);
         out.download_concurrency = out.download_concurrency.max(1);
         // Zero means unlimited for both of these, and a negative is neither a

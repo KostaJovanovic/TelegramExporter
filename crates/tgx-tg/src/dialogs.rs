@@ -44,17 +44,22 @@ fn chat_info(dialog: &grammers_client::peer::Dialog) -> Option<ChatInfo> {
     // `bare_id` is the number Desktop writes into the chat `id` header —
     // 3586682625, not the bot-API -100… form. `id()` gives the tagged form.
     //
-    // `public` and `access_hash` both come off the raw TL object rather than
-    // being defaulted. Both were hardcoded — `public` did not exist and
-    // `access_hash` was `0` in all three arms — and each cost something real:
-    // every private supergroup was written to `result.json` as
-    // `"type": "public_supergroup"`, and a zero hash meant the peer had to be
-    // rediscovered by walking every dialog once per queued chat.
-    let (id, title, kind, is_forum, public, access_hash) = match &dialog.peer {
+    // `public` comes off the raw TL object rather than being defaulted. It was
+    // hardcoded — it did not exist — and every private supergroup was therefore
+    // written to `result.json` as `"type": "public_supergroup"`.
+    //
+    // **There is no `access_hash` here any more.** It was collected in all
+    // three arms, stored on `ChatInfo`, and read by nothing — and the comment
+    // that stood here credited it with saving a rediscovery walk "once per
+    // queued chat", which is real and is delivered by `peer_refs_for`'s single
+    // dialog sweep, not by this field. A `pub` member of a `pub` struct that is
+    // written and never read fires no dead-code lint, which is exactly the
+    // class that has already hidden two bugs in this workspace.
+    let (id, title, kind, is_forum, public) = match &dialog.peer {
         Peer::User(u) => {
-            let (public, hash) = match &u.raw {
-                tl::enums::User::User(r) => (r.username.is_some(), r.access_hash.unwrap_or(0)),
-                tl::enums::User::Empty(_) => (false, 0),
+            let public = match &u.raw {
+                tl::enums::User::User(r) => r.username.is_some(),
+                tl::enums::User::Empty(_) => false,
             };
             (
                 u.id().bare_id().unwrap_or(0),
@@ -66,7 +71,6 @@ fn chat_info(dialog: &grammers_client::peer::Dialog) -> Option<ChatInfo> {
                 },
                 false,
                 public,
-                hash,
             )
         }
         Peer::Group(g) => {
@@ -74,16 +78,10 @@ fn chat_info(dialog: &grammers_client::peer::Dialog) -> Option<ChatInfo> {
             // history a new member can read — which is why the two are listed
             // apart rather than lumped together.
             //
-            // A basic `Chat` has no username and no access hash at all: it
-            // cannot be public, and it is addressed by id alone.
-            let (forum, kind, public, hash) = match &g.raw {
-                tl::enums::Chat::Channel(c) => (
-                    c.forum,
-                    ChatKind::Supergroup,
-                    has_username(c),
-                    c.access_hash.unwrap_or(0),
-                ),
-                _ => (false, ChatKind::Group, false, 0),
+            // A basic `Chat` has no username: it cannot be public.
+            let (forum, kind, public) = match &g.raw {
+                tl::enums::Chat::Channel(c) => (c.forum, ChatKind::Supergroup, has_username(c)),
+                _ => (false, ChatKind::Group, false),
             };
             (
                 g.id().bare_id().unwrap_or(0),
@@ -91,7 +89,6 @@ fn chat_info(dialog: &grammers_client::peer::Dialog) -> Option<ChatInfo> {
                 kind,
                 forum,
                 public,
-                hash,
             )
         }
         Peer::Channel(c) => (
@@ -100,7 +97,6 @@ fn chat_info(dialog: &grammers_client::peer::Dialog) -> Option<ChatInfo> {
             ChatKind::Channel,
             false,
             has_username(&c.raw),
-            c.raw.access_hash.unwrap_or(0),
         ),
     };
 
@@ -112,7 +108,6 @@ fn chat_info(dialog: &grammers_client::peer::Dialog) -> Option<ChatInfo> {
         is_forum,
         public,
         message_count: None,
-        access_hash,
     })
 }
 

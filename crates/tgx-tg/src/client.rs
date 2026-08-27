@@ -436,7 +436,6 @@ pub struct ChatInfo {
     /// `None` means *not counted*, which is **not** the same as zero. It paints
     /// blank, sorts last, and every place that sums has to tell the two apart.
     pub message_count: Option<i64>,
-    pub access_hash: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -556,7 +555,6 @@ mod tests {
             is_forum: false,
             public: false,
             message_count: None,
-            access_hash: 0,
         };
         let empty = ChatInfo {
             message_count: Some(0),

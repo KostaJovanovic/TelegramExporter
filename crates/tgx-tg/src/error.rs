@@ -95,7 +95,13 @@ pub fn classify(err: &grammers_client::InvocationError) -> EnrichError {
             let name = &rpc.name;
             let flood_wait = name.contains("FLOOD") && name.contains("WAIT");
             if flood_wait || name.contains("SLOWMODE_WAIT") {
-                let secs = rpc.value.unwrap_or(0) as u64;
+                // Floored at one second, not zero. A FLOOD_WAIT with no
+                // `value` — Telegram does send them — became a zero-length
+                // wait, so the retry fired immediately and asked for the same
+                // rate limit again as fast as the loop could go. That is the
+                // one response guaranteed to make a rate limit worse, from the
+                // arm whose whole purpose is to wait it out.
+                let secs = rpc.value.unwrap_or(1).max(1) as u64;
                 return EnrichError::Transient(Duration::from_secs(secs));
             }
             // Everything else from the RPC layer is Telegram declining.
@@ -161,6 +167,22 @@ mod tests {
                 "{message} lost its duration"
             );
         }
+    }
+
+    #[test]
+    fn a_wait_with_no_duration_still_waits() {
+        // Telegram does send a FLOOD_WAIT with no number on it. `unwrap_or(0)`
+        // turned that into a zero-length wait, so the retry fired immediately
+        // and asked for the same rate limit again as fast as the loop could go
+        // — the one response guaranteed to make a rate limit worse, from the
+        // arm whose entire purpose is to wait it out.
+        let got = classify(&rpc(420, "FLOOD_WAIT"));
+        assert!(got.is_transient());
+        let waited = got.retry_after().expect("a wait has a duration");
+        assert!(
+            waited >= Duration::from_secs(1),
+            "an immediate retry is not a wait: {waited:?}"
+        );
     }
 
     #[test]
