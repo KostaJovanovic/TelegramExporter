@@ -15,8 +15,14 @@
 //! matches on [`Refused`], because they are different variants and the compiler
 //! will not let a match on one silently swallow the other.
 //!
+//! **There is a third case, and collapsing it into [`Refused`] cost 7,140
+//! files.** A stale file reference is not Telegram declining and not Telegram
+//! asking for patience: it is Telegram saying *ask again with a fresh
+//! reference*. See [`Stale`].
+//!
 //! [`Transient`]: EnrichError::Transient
 //! [`Refused`]: EnrichError::Refused
+//! [`Stale`]: EnrichError::Stale
 
 use std::time::Duration;
 use thiserror::Error;
@@ -31,6 +37,29 @@ pub enum EnrichError {
     /// it.** Wait and try again; count what is still lost.
     #[error("rate limited for {0:?}")]
     Transient(Duration),
+
+    /// The short-lived *reference* Telegram issues alongside a file has aged
+    /// out — `FILE_REFERENCE_EXPIRED` and the rest of its family.
+    ///
+    /// **Neither of the other two, which is the whole reason it exists.**
+    /// Waiting does not help: nothing is rate-limiting us and the reference
+    /// will not become valid again. Giving up is wrong too: the file is still
+    /// there, and re-reading the message yields a fresh reference that works.
+    ///
+    /// Classified as [`Refused`] it was asked for five times with the same dead
+    /// blob — five requests that could not succeed — and then written down as a
+    /// permanent gap. The live export of 2026-08-27 lost **7,140 files** that
+    /// way in one chat, 20.6% of its media, every one of them still on
+    /// Telegram: 5,577 photos, 810 videos, 465 stickers and voice messages, and
+    /// 274 PDFs and Word documents out of topics named `zapisnici` and
+    /// `mejlovi`. The cure is
+    /// [`download::refreshed_media`], and it is the only cure — a reference
+    /// cannot be renewed in place, only re-obtained.
+    ///
+    /// [`Refused`]: EnrichError::Refused
+    /// [`download::refreshed_media`]: crate::download
+    #[error("stale file reference: {0}")]
+    Stale(String),
 
     /// Telegram said no, and will keep saying no — an admin-only method for a
     /// non-admin, a channel we cannot read. Giving up quietly is correct.
@@ -54,6 +83,18 @@ impl EnrichError {
             EnrichError::Transient(d) => Some(*d),
             _ => None,
         }
+    }
+
+    /// Would asking again with a **fresh file reference** help?
+    ///
+    /// Deliberately not folded into [`is_transient`]: a caller that reacts to
+    /// this by sleeping and retrying the same request would burn attempts on a
+    /// reference that cannot come back, which is exactly the behaviour this
+    /// variant was added to end.
+    ///
+    /// [`is_transient`]: EnrichError::is_transient
+    pub fn is_stale(&self) -> bool {
+        matches!(self, EnrichError::Stale(_))
     }
 }
 
@@ -103,6 +144,16 @@ pub fn classify(err: &grammers_client::InvocationError) -> EnrichError {
                 // arm whose whole purpose is to wait it out.
                 let secs = rpc.value.unwrap_or(1).max(1) as u64;
                 return EnrichError::Transient(Duration::from_secs(secs));
+            }
+            // Matched on the family rather than the one spelling, for the same
+            // reason as the waits above: `FILE_REFERENCE_EXPIRED`,
+            // `_INVALID`, `_EMPTY` and the `..._ALL_...` variants all mean the
+            // same thing to us — the blob we asked with is no good and a fresh
+            // one would be. Only `EXPIRED` was ever observed here; the others
+            // failing over into "Telegram declined" would be the same bug
+            // wearing a different name.
+            if name.contains("FILE_REFERENCE") {
+                return EnrichError::Stale(name.clone());
             }
             // Everything else from the RPC layer is Telegram declining.
             EnrichError::Refused(rpc.name.clone())
@@ -186,9 +237,36 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_file_reference_is_neither_a_wait_nor_a_refusal() {
+        // Landing in `Refused` meant this was asked five times with the same
+        // expired blob and then written down as a permanent gap. One live
+        // export lost 7,140 files to it, every one still on Telegram.
+        //
+        // The whole family, not just the spelling that was observed: the
+        // others falling through to "Telegram declined" would be this bug
+        // again under a different name.
+        for message in [
+            "FILE_REFERENCE_EXPIRED",
+            "FILE_REFERENCE_INVALID",
+            "FILE_REFERENCE_EMPTY",
+        ] {
+            let got = classify(&rpc(400, message));
+            assert!(got.is_stale(), "{message} was not recognised as stale");
+            assert!(!got.is_transient(), "{message} was mistaken for a wait");
+            assert_eq!(
+                got.retry_after(),
+                None,
+                "{message} must not be slept on — waiting cannot refresh a reference"
+            );
+        }
+    }
+
+    #[test]
     fn a_refusal_is_still_a_refusal() {
         // The other half of the same property: widening the wait test must not
-        // start swallowing errors that are genuinely permanent.
+        // start swallowing errors that are genuinely permanent, and neither
+        // must widening the stale test — a refusal that reads as stale would be
+        // re-read and re-asked forever.
         for message in [
             "CHAT_ADMIN_REQUIRED",
             "CHANNEL_PRIVATE",
@@ -196,6 +274,10 @@ mod tests {
         ] {
             let got = classify(&rpc(400, message));
             assert!(!got.is_transient(), "{message} was mistaken for a wait");
+            assert!(
+                !got.is_stale(),
+                "{message} was mistaken for a stale reference"
+            );
             assert_eq!(got.retry_after(), None);
         }
     }

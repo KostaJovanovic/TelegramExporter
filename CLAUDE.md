@@ -29,7 +29,16 @@ save.bat build              # release build -> dist\TelegramExporter.exe
 save.bat parity             # all three replay legs against corpus or drive
 save.bat corpus             # cut reference\ out of the reference export
 save.bat wire <export dir>  # diff a live export against the reference run
+save.bat clean              # report target\ and empty it
 ```
+
+`target\` is a cache cargo never garbage-collects, and nothing reported its
+size until `clean` existed: it reached **45 GB**, 41 of that in `target\debug`,
+where a single link produced a 350 MB PDB because MSVC folds every dependency's
+debug info into it. `[profile.dev.package."*"] debug = false` in the root
+`Cargo.toml` is the fix for the recurring half; the stale half — 16 GB of
+artifact generations nothing could link again — no profile setting reaches, so
+`clean` reports it.
 
 `save.bat` prints `[time]` per step and a total; each action funnels through one
 exit path. Underneath it is plain cargo:

@@ -287,6 +287,55 @@ fn a_link_preview_is_not_media_unless_asked_for() {
 }
 
 #[test]
+fn a_link_preview_the_planner_names_is_one_the_pool_can_fetch() {
+    // The bug this pins: `classify` reached inside the page for its facts and
+    // the engine handed the pool `Message::media()`, which for a link preview is
+    // `Media::WebPage` — a variant grammers maps to `None` in
+    // `Downloadable::to_raw_input_location`. Every such image was named in
+    // result.json and in the HTML, then failed all five retries on a refusal
+    // that never reached the wire. 21 of 21 in the run of 2026-08-27.
+    //
+    // The property is the agreement, not either half: if the planner names it,
+    // the pool must have something to fetch, and vice versa.
+    for media in [
+        webpage_media(Some(photo(9, 800, 450, 42_090)), None),
+        webpage_media(None, Some(document(9, "video/mp4", 5_000, vec![]))),
+    ] {
+        assert!(
+            plan::classify(&media, true).is_some(),
+            "the planner names this one"
+        );
+        assert!(
+            plan::downloadable(&media, true).is_some(),
+            "so the pool must be able to fetch it"
+        );
+        // And with previews off neither side does anything.
+        assert!(plan::classify(&media, false).is_none());
+        assert!(plan::downloadable(&media, false).is_none());
+    }
+
+    // A preview with no image and no file: named by neither, fetched by
+    // neither. `None` here is a job that is never queued, not a silent gap.
+    let bare = webpage_media(None, None);
+    assert!(plan::classify(&bare, true).is_none());
+    assert!(plan::downloadable(&bare, true).is_none());
+}
+
+#[test]
+fn ordinary_media_still_reaches_the_pool_unchanged() {
+    // `downloadable` replaced `Message::media()` on every path, not just the
+    // link-preview one, so the other shapes have to keep answering.
+    assert!(plan::downloadable(&photo_media(photo(1, 100, 100, 500), false), false).is_some());
+    assert!(plan::downloadable(
+        &doc_media(document(2, "video/mp4", 900, vec![]), false),
+        false
+    )
+    .is_some());
+    // Media that is not a file at all has nothing to fetch and never did.
+    assert!(plan::downloadable(&webpage_media(None, None), true).is_none());
+}
+
+#[test]
 fn a_skipped_file_still_advances_the_counter_and_keeps_its_thumbnail_record() {
     // Both halves of the rule that matched 557 of 557 photos and 1,287 of
     // 1,786 skipped thumbnails.

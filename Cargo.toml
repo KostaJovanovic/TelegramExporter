@@ -44,3 +44,47 @@ strip = true
 # The Python build was 46.4 MB via PyInstaller. Record the Rust number so a
 # sudden jump is visible, the way the Git-Bash-vs-PowerShell OpenSSL
 # discovery was (+2.5 MB from the wrong build shell).
+#
+# **20.3 MB on 2026-08-27**, and the number this comment asked for had never
+# actually been written down. It splits 14.9 MB `.text` / 4.6 MB `.rdata`, with
+# no debug info and no embedded blob -- `.rsrc` is 0.1 MB and that is the icon.
+# The `tgx` CLI, which is the same converter and engine with the window taken
+# off, is 6.1 MB from 104 crates; the app is 503 crates. So roughly 6 MB is the
+# Telegram half -- `grammers-tl-types` carries the whole TL schema, and
+# `grammers-session`'s `sqlite-storage` links a complete libSQL to hold one
+# session file -- and roughly 14 MB is gpui plus gpui-component, which is not
+# only a widget set: `lsp-types`, `tree-sitter`, `ropey`, `html5ever`,
+# `markdown` and `notify` are all non-optional dependencies of it. CI's ceiling
+# is 30 MB.
+
+# Debug info for our seven crates; none for the other 496.
+#
+# `target\` reached **45 GB**, and 41 of that was `target\debug` -- 21 GB of
+# artifacts and 18 GB of incremental cache. The driver is that MSVC links every
+# dependency's debug info into each binary's own PDB, so one link of this tree
+# produced a **350 MB PDB**, and every test binary got one of its own:
+# `tgx_ui.pdb` was 255 MB for a crate of a few thousand lines, because it was
+# carrying gpui's, ash's and windows'.
+#
+# `package."*"` matches every dependency and **no workspace member**, which is
+# exactly the line worth drawing. Our own crates keep full debug info, so a
+# debugger and a backtrace through them are unchanged; the 496 crates nobody
+# here steps into stop paying for symbols. If it is still too big, the next
+# notch is `[profile.dev] debug = "line-tables-only"`, which keeps `file:line`
+# in a backtrace and drops the type and local-variable graph.
+[profile.dev.package."*"]
+debug = false
+
+# Build scripts and proc macros run at build time and are never debugged from
+# here. `bindgen`, `libsql-ffi` and `naga` are among them, and `target\debug\
+# build` was 0.9 GB on its own.
+[profile.dev.build-override]
+debug = false
+
+# Cargo never garbage-collects `target\`: a dep bump, a feature change or a
+# toolchain move gives an artifact a new metadata hash, and the old one stays
+# for good. 746 of 984 artifact groups in the debug tree had more than one copy
+# -- twelve `TelegramExporter.pdb`, fifteen `libtgx_tg.rlib` -- **16 GB of
+# generations nothing could ever link again**, and another 1.5 GB of the same
+# in release. No profile setting reaches this; `save.bat clean` is where it
+# gets reported and cleared.

@@ -10,6 +10,7 @@
 //! Telegram supplied, the size, the dimensions.
 
 use crate::config::Settings;
+use grammers_client::media::{Media, Photo};
 use grammers_tl_types as tl;
 use serde_json::{json, Map, Value};
 use tgx_media::names::{kind_for, layout, sanitize_extension, NameBook};
@@ -210,6 +211,64 @@ pub fn classify(media: &tl::enums::MessageMedia, follow_webpage: bool) -> Option
         }
         _ => None,
     }
+}
+
+/// The handle the download pool must be given for this message's media.
+///
+/// **Not `Message::media()`, and that difference cost 21 files a run.** For a
+/// link preview grammers answers `Media::WebPage`, and its own
+/// `Downloadable for Media` maps that variant to `None` — so `iter_download`
+/// hands back an iterator pre-loaded with `io::Error("media not
+/// downloadable")` before any request leaves the process. The planner had
+/// already named the image in `result.json` and in the HTML by then, so every
+/// link-preview photo burned all five retries on a permanent refusal and landed
+/// in `missing_media.txt`, one hundred percent of them, every run. Nothing
+/// distinguished it from a flaky network because the reason was discarded; see
+/// [`crate::download::MissingFile`].
+///
+/// It reads the page in **the same order [`classify`] does** — document, then
+/// photo. If the two ever disagree the pool downloads bytes the JSON does not
+/// describe, which is worse than the gap this fixes.
+///
+/// `None` here is not an error: it means there is nothing to fetch, and
+/// `run_one` records the paths the JSON promised as a stated gap.
+pub fn downloadable(media: &tl::enums::MessageMedia, follow_webpage: bool) -> Option<Media> {
+    let tl::enums::MessageMedia::WebPage(m) = media else {
+        return Media::from_raw(media.clone());
+    };
+    if !follow_webpage {
+        return None;
+    }
+    let tl::enums::WebPage::Page(page) = &m.webpage else {
+        return None;
+    };
+    if let Some(doc) = page.document.as_ref() {
+        if matches!(doc, tl::enums::Document::Document(_)) {
+            // Rebuilt as the media it would have been on its own message, so
+            // `Media::from_raw` applies the same sticker/document split it
+            // applies everywhere else.
+            return Media::from_raw(tl::enums::MessageMedia::Document(
+                tl::types::MessageMediaDocument {
+                    nopremium: false,
+                    spoiler: false,
+                    video: false,
+                    round: false,
+                    voice: false,
+                    document: Some(doc.clone()),
+                    alt_documents: None,
+                    video_cover: None,
+                    video_timestamp: None,
+                    ttl_seconds: None,
+                },
+            ));
+        }
+    }
+    if let Some(photo) = page.photo.as_ref() {
+        if matches!(photo, tl::enums::Photo::Photo(_)) {
+            return Some(Media::Photo(Photo::from_raw(photo.clone())));
+        }
+    }
+    None
 }
 
 fn document_facts(doc: &tl::types::Document, spoiler: bool) -> MediaFacts {

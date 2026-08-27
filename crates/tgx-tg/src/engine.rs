@@ -67,7 +67,16 @@ pub struct ExportResult {
     /// Type names the JSON encoder could not map.
     pub degraded: Vec<String>,
     pub media_downloaded: usize,
+    /// Download **jobs** that did not produce their file.
     pub media_failed: usize,
+    /// Lines in `missing_media.txt` — always ≥ `media_failed`, because one
+    /// failed job takes every path it had already promised down with it (the
+    /// file, Telegram's thumbnail, the inline preview).
+    ///
+    /// It exists because the warning that points the user at that file was
+    /// reporting `media_failed`: the run said "21 files could not be fetched —
+    /// see missing_media.txt" over a file that listed 42.
+    pub media_missing: usize,
     pub bytes_downloaded: i64,
     pub members: usize,
     /// **A short member list says so.** A truncated roster is
@@ -920,6 +929,14 @@ impl<'a> ChatExporter<'a> {
                 self.client,
                 &dir,
                 jobs,
+                // The pool needs the peer because a file reference can only be
+                // replaced by re-reading the message that carried it, and
+                // every reference in this batch was captured before the read
+                // above finished. See `download::refreshed_media`.
+                download::Refresh {
+                    peer,
+                    link_previews: self.settings.link_previews,
+                },
                 self.settings.download_concurrency,
                 Some(tx),
                 cancel,
@@ -935,10 +952,17 @@ impl<'a> ChatExporter<'a> {
                 progress(p);
             }
             let secs = batch_started.elapsed().as_secs_f64();
+            // **Both numbers count paths.** This said `tally.failed`, which
+            // counts *jobs*, directly above a list of the paths that were lost
+            // and directly below `fetching {queued} files`, which counts jobs
+            // again — so a batch reported "1 failed" and then named two files,
+            // and "467 saved, 672 failed" out of 829. Same defect as the
+            // chat-level warning that once said 21 over a file listing 42; it
+            // was fixed there and not here.
             progress(Progress::Log(format!(
-                "{title}: {} saved, {} failed, {} in {:.1}s ({}/s)",
+                "{title}: {} saved, {} missing, {} in {:.1}s ({}/s)",
                 tally.downloaded,
-                tally.failed,
+                tally.missing.len(),
                 human_bytes(tally.bytes),
                 secs,
                 human_bytes((tally.bytes as f64 / secs.max(0.001)) as i64)
@@ -950,7 +974,14 @@ impl<'a> ChatExporter<'a> {
             // thing the ring exists to keep. The file has the full list.
             const SHOWN: usize = 20;
             for m in tally.missing.iter().take(SHOWN) {
-                progress(Progress::Log(format!("  not saved: {m}")));
+                // With the reason, not just the path. Without it a permanent,
+                // hundred-percent-reproducible refusal reads exactly like a
+                // flaky network — which is how 21 link-preview photos failed
+                // every run of 2026-08-27 without any artifact saying why.
+                progress(Progress::Log(format!(
+                    "  not saved: {} — {}",
+                    m.path, m.reason
+                )));
             }
             if tally.missing.len() > SHOWN {
                 progress(Progress::Log(format!(
@@ -960,6 +991,7 @@ impl<'a> ChatExporter<'a> {
             }
             result.media_downloaded += tally.downloaded;
             result.media_failed += tally.failed;
+            result.media_missing += tally.missing.len();
             result.bytes_downloaded += tally.bytes;
             // A dangling reference is worse than a stated gap.
             if let Err(e) = download::write_missing(&dir, &tally.missing) {
@@ -1176,10 +1208,15 @@ impl<'a> ChatExporter<'a> {
                         // `<img>` at a file the pool never writes.
                         preview_src = job.as_ref().and_then(|j| j.preview_dest.clone());
                         if let Some(job) = job {
+                            // `plan::downloadable`, not `msg.media()`: the two
+                            // differ on exactly the media `classify` had to
+                            // reach inside — a link preview — and the second
+                            // hands the pool a `Media::WebPage` grammers
+                            // refuses to download.
                             let handle = if job.inline_bytes.is_some() {
                                 None
                             } else {
-                                msg.media()
+                                plan::downloadable(media, self.settings.link_previews)
                             };
                             jobs.push(PendingDownload { job, media: handle });
                         }
