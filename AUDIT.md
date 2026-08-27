@@ -495,3 +495,654 @@ Stated rather than ticked, because neither is fixed:
 - **`custom_emoji.document_id` stays a numeric id rather than a sticker path.**
   This is the documented media-leg ceiling: 830 of 836, the six being custom
   emoji, and a JSON replay cannot see them at all.
+
+---
+
+# Code audit — 2026-08-27 (second pass)
+
+Full read of every crate at `433ae90`, plus a **second live export** (`N:\telegram
+export\UA KOLAB RUST`, 6,687 messages, 3,105 files) put through the wire leg and
+then cross-examined field by field against Desktop's export and the Python
+original's. Where a finding could be checked against the oracle rather than
+argued from the code, it was, and the number is quoted.
+
+Three findings below are proved by a runnable repro rather than by reading:
+the libtest capture behaviour (1), the batch trailing-space behaviour (2), and
+the settings-loading behaviour (3). Each took a throwaway program because each
+contradicts something the repo currently asserts.
+
+## Baseline
+
+| check | result |
+|---|---|
+| `save.bat test` (at `a96519b`, before `433ae90` landed) | **509 passed, 0 failed** (19 suites), fmt and clippy clean |
+| `tgx-parity json/html/media reference` | 4/4, 4/4, 830/836 — all at their documented marks |
+| **`tgx-parity wire "…UA KOLAB RUST"`** | **RED**: 136 field mismatches, **1,290 absent fields**, **21 dangling paths** |
+
+The three replay legs are green and the one leg that opens a real export is not.
+That is the same shape as the 2026-08-27 section above, and for the same reason:
+the replay legs cannot see a key the converter never writes.
+
+**A note on provenance.** The live run was produced by `dist\TelegramExporter.exe`
+built at 01:16, which predates `433ae90`. Every wire finding below was therefore
+re-checked against current source before being written down; all of them still
+hold. One apparent finding did not survive that check and is recorded here so it
+is not rediscovered: the export's own narration is absent from `tgx.log`, but
+that is the stale binary — `Progress::Log → log::info!` landed in `433ae90`
+itself.
+
+---
+
+## Critical
+
+- [ ] **1. The oracle does not run in CI, and the skip is invisible.**
+  `crates/tgx-parity/tests/corpus.rs:27-41`, `.github/workflows/ci.yml:41`.
+  `reference/` is gitignored, so on CI `corpus_dir()` always returns `None`,
+  all four corpus tests return early, and the run reports `ok`. The design rests
+  on the skip being *visible* — `corpus.rs:7-12` and `CLAUDE.md` both promise
+  "the skip prints exactly what it did not check". **It does not.** libtest
+  captures stdout *and* stderr and discards both for a test that passes.
+  Verified with a throwaway `rustc --test` binary: a passing test whose body is
+  `eprintln!` + `println!` prints neither string — only `test … ok`.
+  So CI verifies the unit tests and the layering rules, verifies **none** of the
+  byte-exactness the project exists for, and says so nowhere. Every class the
+  three legs were written to catch is unguarded there, permanently, behind a
+  green check.
+  **Fix:** `--nocapture` on the CI test step is the one-word version; better is
+  a `TGX_REQUIRE_CORPUS=1` that turns the skip into a failure on any machine
+  that is supposed to have a corpus.
+
+- [ ] **2. `save.bat release` has never built anything, and exits 0.**
+  `save.bat:42` and `save.bat:77` are `(set DO_BUILD=1 & goto save)`. `cmd`
+  takes the value up to the `&` **including the space**, so `DO_BUILD` is
+  `"1 "`, and the test at `save.bat:207` is `=="1"`. It never matches.
+  Verified: a batch file of exactly this shape prints `DO_BUILD=[1 ]` and the
+  comparison reports no match; `set "DO_BUILD=1"` on its own line matches.
+  `release` and menu option 6 therefore run test + commit + push, skip the
+  build, print `[time] total` and exit **zero** — indistinguishable from a
+  release that worked. `dist\` keeps whatever was there before, which is how
+  the export analysed in this audit came to be produced by a binary 46 minutes
+  older than the source that was being read.
+  `save.bat:37`'s `FORCE_MODE` has the identical defect (`save.bat:160`), so
+  `--force` silently falls through to the ordinary prompt. That one fails
+  *safe*; the build does not.
+  **Fix:** `set "DO_BUILD=1"` as its own statement, both sites.
+
+- [ ] **3. One out-of-range number in `settings.json` discards the whole file,
+  and the window then writes the defaults back over the credentials.**
+  `crates/tgx-tg/src/config.rs:217`. `same_shape` (`config.rs:245`) compares
+  JSON *kinds* only, so `Number` matches `Number` — it cannot reject a number
+  of the right kind and the wrong range. `{"page_size": -1}` (the field is
+  `usize`) or `{"size_limit_mb": 20.5}` (it is `i64`) therefore passes the
+  shape gate, is inserted into `base`, and then fails `from_value` for the
+  **entire struct** — `#[serde(default)]` fills in absent fields, it does not
+  rescue present-and-failing ones. `unwrap_or(defaults)` drops everything else
+  in the file with it.
+  Verified with a standalone reproduction of `load_from_str`:
+
+  | `settings.json` holds | `api_hash` survives |
+  |---|---|
+  | `"page_size": "nonsense"` — wrong **kind** | yes (this is the case the test covers) |
+  | `"page_size": -1` — wrong **range** | **no** |
+  | `"size_limit_mb": 20.5` — wrong **number kind** | **no** |
+
+  This contradicts the doc at `config.rs:192` ("falling back **per field**
+  rather than per file") and the test `one_bad_field_does_not_lose_the_others`
+  (`config.rs:528`), which only ever supplies a wrong *type*. The clamps at
+  `config.rs:221-223` run after deserialisation and cannot help.
+  It escalates: `Settings::load()` hands back `api_id: 0`, `api_hash: ""`, and
+  the window persists settings on any change (`shell/mod.rs:651`,
+  `shell/settings.rs:318`, `shell/signin.rs:300`), writing the defaults over
+  the file. **One hand-typed `-1` destroys the stored API credentials, the
+  phone number and the output directory.**
+  **Fix:** deserialise field by field, or range-check inside `same_shape`.
+
+---
+
+## High
+
+- [ ] **4. `thumbnail_file_size` is never written for a size-skipped file —
+  1,287 of them.** `crates/tgx-tg/src/plan.rs:398` sets the key only inside the
+  `Some(dest)` arm. Measured over the reference: Desktop writes `thumbnail_file_size`
+  in **every** case where `thumbnail` is present — 257 saved **and 1,287
+  skipped**, 1,544 of 1,544. Ours: 257 written, 1,302 omitted. This is the
+  whole of the wire leg's `absent` tally bar three. The comment at
+  `plan.rs:381-391` reasoned the skipped branch out correctly for the
+  `thumbnail` *path* and dropped the size key with it.
+  **Fix:** write it in the `None` arm too, gated on `facts.thumb_size > 0`.
+
+- [ ] **5. `poll_append_answer` is mapped to the wrong TL constructor, and the
+  Python original's generic fallback was dropped.**
+  `crates/tgx-tg/src/convert.rs:741` is
+  `A::TodoAppendTasks(_) => no_payload("poll_append_answer")`.
+  `messageActionPollAppendAnswer` is its **own constructor** in the schema
+  (`api.tl`), distinct from `messageActionTodoAppendTasks` and
+  `messageActionTodoCompletions`. Three service messages (ćaskanje #5609,
+  #5612, #5615) came out of the live run with **no `action` key at all**;
+  Desktop names all three `poll_append_answer`, and so does the Python export.
+  Two defects, one arm:
+  * the mapping names a to-do action as a poll action, and leaves the real poll
+    action unmapped;
+  * `_ => None` means any of the **57 other** `messageAction*` constructors
+    vanishes silently. The Python original does not do this — `snake_action()`
+    (`app/tg/serialize.py:817`) turns any unmapped class name into its
+    snake_case spelling, which is exactly how Desktop names actions it was
+    written before. That is the guard the port lost, and it is why the Python
+    export got these three right and we did not.
+  The test at `convert.rs:1021` **pins the wrong behaviour** — it asserts
+  `TodoAppendTasks → "poll_append_answer"` under the name
+  `every_action_the_reference_holds_is_named_the_way_desktop_names_it`.
+  Desktop's payload for this action is actor + action and nothing else
+  (verified: all three reference messages carry no `answer` key), so the
+  replacement arm is `A::PollAppendAnswer(_) => no_payload("poll_append_answer")`.
+
+- [ ] **6. One mistyped two-factor password makes the rest of the sign-in
+  unreachable.** `crates/tgx-tg/src/client.rs:343-364`. `check_password` does
+  `self.password.take()` at line 345, then matches only
+  `SignInError::PasswordRequired(token)` to put the token back. grammers
+  returns **`SignInError::InvalidPassword(PasswordToken)`** for a wrong
+  password (`grammers-client-0.10.0/src/client/auth.rs:459-462`); `PasswordRequired`
+  is what `sign_in` returns to *ask* for one. So a wrong password falls to the
+  catch-all `Err(e)` arm with the token already consumed, and every retry
+  answers `"two-factor sign-in is not pending"` — the user has to restart the
+  whole sign-in and request a fresh code.
+  The docstring immediately above (`client.rs:341-342`) promises the opposite:
+  "On a wrong password grammers hands the token back, so the user can try again
+  rather than restarting the whole sign-in." grammers does; this does not.
+  This is audit item 1's failure re-entering by the one door that fix did not
+  cover — `actions::PENDING` correctly holds the `Session` across a mistyped
+  *code*, and the token it is holding has already been destroyed.
+  **Fix:** add `Err(SignInError::InvalidPassword(token))` to the arm that
+  restores `self.password`.
+
+- [ ] **7. The cancel token never reaches the download pool.**
+  `crates/tgx-tg/src/download.rs` does not import `Cancel` at all. Audit item 3
+  above records the fix as "checked in the read loop, in `sleep_in_slices` and
+  in the download pool" — the first two hold, the third does not.
+  During the media pass the only check is *between topic folders*
+  (`engine.rs:662`); the live run's `foto video` was a single uninterruptible
+  batch of 1,781 files. Worse, `fetch_with_retry` (`download.rs:192-197`) waits
+  out a rate limit with `sleep_in_slices`, which is
+  `sleep_in_slices_until(total, &Cancel::new())` (`engine.rs:1050`) — a signal
+  nobody holds and nothing can ever set — and then does `attempt -= 1`, so a
+  persistent `FLOOD_WAIT` loops **without bound and without an exit**. The
+  comment on those very lines claims "wait it out in slices so a cancel is not
+  swallowed". Every other wait site threads the real token.
+  **Fix:** pass `&Cancel` through `run_all` → `run_one` → `fetch_with_retry`;
+  count the rate-limit attempts.
+
+- [ ] **8. `save.bat save` runs two parity legs, gates on neither, and never
+  runs the third.** `save.bat:494-506`. Each leg's failure is `if errorlevel 1
+  echo [warn] …`; `SAVE_ERROR` is never set and `:runparity` ends `exit /b 0`.
+  The commit and the push proceed, and the script exits zero. The media leg is
+  not run on this path at all. Combined with finding 1 — CI cannot see the legs
+  either — **no gate anywhere in the project stops a byte-exactness regression
+  from being committed and pushed.** The `:parity` action (`save.bat:320-327`)
+  gets this right; the pre-commit path is the weaker of the two, and it is the
+  one that runs by default.
+
+- [ ] **9. `Event::Failed` is a process-wide kill-switch, and an export can be
+  started twice.** `crates/tgx-app/src/shell/mod.rs:526-532` clears `exporting`
+  and `counting` for *any* worker's failure, because the event carries no run
+  identity. `busy` (`mod.rs:810`) is `exporting || counting` and does **not**
+  include an in-flight sign-in probe, and `start_sign_in` (`mod.rs:702`) spawns
+  one unconditionally even when already signed in. So: press 01, press 03, let
+  the probe time out — `exporting` goes false while the export worker is still
+  running, `03 Start export` re-enables, and a second press calls
+  `cancel.reset()` (clearing the running export's token), wipes the queue rows
+  and starts a second concurrent export of the same chats into a second folder.
+  **Fix:** tag `Failed` with the run it belongs to, or stop the sign-in and
+  refresh paths from using that variant, and fold an in-flight probe into `busy`.
+
+- [ ] **10. "Open output folder" silently does nothing.**
+  `crates/tgx-app/src/actions.rs:653` launches
+  `tgx_tg::config::system32("explorer.exe")`, i.e.
+  `%SystemRoot%\System32\explorer.exe`. **That file does not exist** — verified
+  on this machine; `explorer.exe` lives at `%SystemRoot%\explorer.exe`.
+  `CreateProcess` fails and the result is dropped by `let _ =`. Both callers
+  are dead: the `Open output folder` tool (`shell/mod.rs:864`) and clicking a
+  finished queue row (`shell/run.rs:157`). `open_folder` creates the directory
+  first, so the side effect happens and the visible effect does not.
+  The Python original had it right (`app/ui/main_window.py:75-83`). The
+  absolute-path rule from audit item 10 is still correct and must be kept —
+  `system32()` remains right for `icacls.exe`, whose test is the only one that
+  exists. This is that fix applied one directory too deep.
+
+- [ ] **11. `icacls` is spawned with no timeout, on the first line of `main`.**
+  `crates/tgx-tg/src/config.rs:336-342` calls `.output()`, which blocks until
+  the child exits, forever. The Python bounds it — `timeout=15`
+  (`app/config.py:70-75`). This is a **fourth** guard lost from the one function
+  CLAUDE.md already records losing three.
+  `ensure_data_dir` is reached from `logging::init`, which is the first
+  statement of `main` in both binaries. If `icacls.exe` blocks — data folder on
+  a disconnected share or a stalled removable volume, an AV filter holding the
+  ACL write — `TelegramExporter.exe` never reaches `Application::new().run()`:
+  no window, no `startup-error.log`, no `tgx.log`, and no stderr, because it is
+  a GUI-subsystem binary. A process in Task Manager and nothing else.
+
+- [ ] **12. A failed ACL lockdown can never reach the log, and is never
+  retried.** Two defects that compound, both on the credential folder.
+  * `config.rs:356`'s `log::warn!` is the only report to the log, and the
+    lockdown runs exactly once per process (`config.rs:274-277`) — from inside
+    `logging::init` (`logging.rs:118`), which is **before**
+    `log::set_boxed_logger` at `logging.rs:158`. The facade still holds the
+    no-op logger, so the warning is discarded. The module doc (`config.rs:8-9`)
+    claims "the app says so in the log when that fails rather than leaving you
+    to assume it worked". In every real run it does not.
+  * `RESTRICTED.set(())` at `config.rs:276` runs unconditionally, so "tried
+    once" and "succeeded once" are the same state. Python sets its flag only in
+    the success branch (`app/config.py:81-86`) and retries until it works, which
+    is what `main_window.py:208`'s "attempted lazily" depends on. A transient
+    failure therefore leaves the **session key — a bearer credential** — at
+    default permissions for the life of the process, and `actions.rs:87`'s
+    deliberate re-call is a no-op.
+  The GUI does surface `lockdown_error()` (`actions.rs:96`); the CLI never
+  calls it, so `tgx login` stores the credential in a folder it knows may be
+  world-readable and says nothing — on the surface most likely to be run from a
+  stick or a shared machine.
+
+- [ ] **13. The media leg tolerates *any* six wrong filenames, not *these*
+  six.** `crates/tgx-parity/src/media_leg.rs:56-65` computes
+  `expected_ceiling = total.saturating_sub(6)` and passes if `exact >=
+  expected_ceiling`. The six known misses are one custom-emoji bug's cascade,
+  not six independent tolerances, so the allowance is spent on whatever fails
+  first. Any new naming regression touching six or fewer files — the four WebM
+  video stickers, a collision-suffix bug at the end of a folder, an
+  extension-sanitisation change — passes while printing "at the known ceiling".
+  The number is absolute rather than proportional, so a ten-file corpus passes
+  at 4/10. Audit item 8 made this leg assert; it asserts the wrong thing.
+  **Fix:** pin the exception *set* — the six reference paths — and require the
+  mismatch set to be a subset of it.
+
+- [ ] **14. Two of the three leg tests pass on an empty topic list.**
+  `crates/tgx-parity/tests/corpus.rs:59` and `:67`. `html_leg::run(&[])` and
+  `media_leg::run(&[])` both return `Ok(0)`; the media leg goes further and
+  reports "at the known ceiling" because `0 >= 0`. Only the json test carries
+  `assert!(!topics.is_empty())` (`corpus.rs:54`). `topic_folders`
+  (`lib.rs:32-41`) returns `Ok(())` both when it gives up at depth 3 and when it
+  hits a directory carrying its own `result.json`, so an empty vector is
+  reachable from a corpus laid out one level deeper. Same shape as the `let _ =`
+  bug audit item 8 fixed, one level up.
+
+---
+
+## Medium
+
+- [ ] **15. A failed download leaves its rendered preview dangling, and
+  `missing_media.txt` does not name it.** `crates/tgx-tg/src/download.rs:159-162`
+  pushes only `job.dest` into `missing`; `thumb_dest` and `preview_dest` are
+  fetched inside the success branch and are simply skipped when the primary
+  file fails. Verified on the live export: **21 `<img src>` targets in the HTML
+  point at files that do not exist**, and the two `missing_media.txt` files
+  name the 21 *photos* rather than the 21 `_thumb.jpg` previews. The module
+  docstring's "a dangling reference is worse than a stated gap" is broken by
+  its own error path.
+
+- [ ] **16. The wire leg renders a key the reference does not have as the word
+  `"downloaded"`, and has no mirror for `absent`.**
+  `crates/tgx-parity/src/wire_leg.rs:333-350`. `skip_reason` returns `None` for
+  three different states — a real path, a non-string, and *the key being
+  absent* — and the example line prints the other side as
+  `y.unwrap_or("downloaded")`. That is how the live run reported
+  `509 file: ours "(File exceeds maximum size…)", reference "downloaded"` for a
+  message whose reference JSON is a plain YouTube link with **no media keys at
+  all**. `brief()` (`:422`) already knows how to render this as `"absent"`.
+  The structural half matters more: `absent` (`:379`) iterates the reference's
+  keys only. There is **no tally for a field we write and the reference does
+  not** — which is the class message 509 belongs to, and which is exactly as
+  invisible to replay as `absent` was. It surfaced here by accident, for three
+  media keys, wearing a false label.
+
+- [ ] **17. `sticker_emoji: ""` is written where Desktop writes no key.**
+  `crates/tgx-tg/src/plan.rs:420` inserts whenever `facts.sticker_emoji` is
+  `Some`, and a sticker with an empty `alt` gives `Some("")`. 11 messages in the
+  live export; **zero** in the reference.
+  **Fix:** `if let Some(e) = … if !e.is_empty()`.
+
+- [ ] **18. 94 `forwarded_from` fields still resolve to the empty string, and
+  the reason the last fix gave for stopping there is not true.**
+  `crates/tgx-tg/src/engine.rs:756-764` says only the sender and the chat are
+  reachable "— which is enough: the names that were missing belonged to people
+  who had posted". The live export disproves it: 94 messages across 13 distinct
+  people, all forwards, all with a correct `forwarded_from_id`, all named
+  correctly by Desktop. A forward's origin is by definition someone who did
+  *not* post here. `convert.rs:253-274` already prefers `fwd.from_name` when the
+  lookup is empty; these are the case where Telegram sends neither.
+  The peers *are* in the response — grammers keeps the whole set on
+  `Message.peers` and the field is `pub(crate)`
+  (`grammers-client-0.10.0/src/message/message.rs:40`), so the reachability
+  claim is accurate and the conclusion drawn from it is not.
+  **Fix:** collect unresolved `forwarded_from_id`s and resolve them in one
+  batch — `Client::resolve_peer` (`client/chats.rs:621`) exists — or accept the
+  gap and correct the comment.
+
+- [ ] **19. `ChatInfo::access_hash` is written and never read.**
+  `crates/tgx-tg/src/client.rs:407`, populated at `dialogs.rs:56/84/103`. Every
+  other mention in the workspace is `access_hash: 0` in a fixture. Audit item 12
+  records carrying the real hash as part of its fix — but nothing constructs a
+  `PeerRef` from it, and `peer_refs_for` still pages the entire dialog list. The
+  O(chats × dialogs) → O(dialogs) win came from batching the sweep; the field
+  bought nothing. This is the same dead-`pub`-field class as `thumb_dest` in
+  item 2, which no lint catches for the same reason.
+
+- [ ] **20. `enrich`'s table promises six enrichments and the module implements
+  one — and two of the missing five would move the export *away* from Desktop.**
+  `crates/tgx-tg/src/enrich.rs:8-15` tabulates full reaction lists, poll
+  refresh, chat info, participants, invites and scheduled messages, with
+  measured hit rates. Only `fetch_participants` has a caller;
+  `reactions_are_truncated` and `poll_needs_refresh` are called **only by their
+  own tests**, and `chat_metadata`, `invite_links` and `scheduled_messages` are
+  settings that nothing reads.
+  Measured before recommending anything, because the obvious fix is wrong:
+
+  | | Desktop | Python | ours |
+  |---|---|---|---|
+  | max named reactors on any reaction | **3** | **11** | 3 |
+  | the two `min` polls (#728, #7100) | `total>0`, all answers `0` | identical | identical |
+
+  Desktop never names more than three reactors — 95 entries across 77 messages
+  have `count > len(recent)` and it leaves them sampled — and Desktop does *not*
+  refresh a `min` poll, writing `total_voters: 8` above two zeroed answers. The
+  Python original fetches full reactor lists (hence 11) and does **not**
+  successfully refresh polls either; its own comment says that feature "silently
+  never worked".
+  So wiring `full_reactions` restores *Python* parity and steps away from
+  Desktop's; wiring `refresh_polls` steps away from both, on 2 of 7 polls, and
+  `poll` is in the wire leg's must-match set. Both may still be wanted — richer
+  data is a legitimate goal — but each is a deliberate deviation of the same
+  kind as `link_previews`, and the docs and the leg should say so rather than
+  presenting them as bug fixes.
+
+- [ ] **21. The CLI's second Ctrl-C guarantees the zero-byte `result.json` the
+  design exists to prevent.** `crates/tgx-tg/src/bin/tgx.rs:282-284` calls
+  `std::process::exit(130)`, which runs no destructors: every live `Output` is
+  abandoned with its `BufWriter` unflushed, and per `output.rs:9-12` that means
+  **zero bytes, not a truncated file**. The comment at `tgx.rs:267-270` promises
+  the opposite for the Ctrl-C path, and nothing on screen distinguishes the two
+  presses — the first says "closing the export so nothing is left empty", the
+  second silently destroys it. Someone who presses twice because the first
+  seemed slow loses the run.
+
+- [ ] **22. An I/O error mid-message skips `close_all`, so the index the last
+  audit added is not written.** `crates/tgx-tg/src/engine.rs:560`'s
+  `sink.output.add(&payload)?` is a third error return, and `close_all`'s
+  docstring (`engine.rs:880`) claims "every path that can end an export comes
+  through here, including the two error returns above". `Drop` keeps the JSON
+  valid, so this is not the zero-byte failure — but `close_all` is also what
+  prunes empty topic folders, collects `degraded`, emits `Progress::Topic` and
+  writes `export_results.html` (`engine.rs:936`). A disk filling up therefore
+  produces topic pages whose back-link points at a file that was never written:
+  precisely the regression `write_index` was added for.
+
+- [ ] **23. A stale failure is appended to the next run's summary.**
+  `crates/tgx-app/src/shell/mod.rs:530` sets `failure`, and only
+  `Event::Finished` (`:520`) consumes it — but `sign_in`, `refresh_chats` and
+  `count_chats` all emit `Failed` and none emits `Finished`, and `start_export`
+  does not clear it. Open the app with the network down, then export three
+  chats successfully, and the status bar reads `Exported 3 of 3 chats:
+  connection timed out`. The field's own doc says "held only until the run ends".
+
+- [ ] **24. Two of the wire leg's must-match fields move for reasons that are
+  not defects.** `crates/tgx-parity/src/wire_leg.rs:45,47,59` require `from`,
+  `actor` and `forwarded_from` — resolved display names, not wire data. Someone
+  renaming their profile between two exports turns **every message they ever
+  sent** into a mismatch; the live run shows this already (`1662/1664/1669
+  from: ours "Tamara Blokade", reference "Tam Fmk 📸"`). Separately, `text` is
+  required while `edited` is allowed to drift (`:66`) — but an edit is *why*
+  `text` changes, so the two allowances contradict each other, and the test that
+  guards them only checks the sets are disjoint.
+  This matters because the report prints five examples per bucket: a rename
+  storm can push a genuine `text` or `media_type` failure off the page. Keep the
+  fields, but bucket a `from` disagreement by `from_id` so one rename reads as
+  one rename, and exempt `text` for an id whose `edited` differs.
+
+- [ ] **25. `Settings::save` is not atomic.** `config.rs:234-238` truncates then
+  writes. Interrupted, it leaves a partial `settings.json`, which
+  `load_from_str` rejects at `config.rs:200` and replaces with defaults — the
+  `api_hash` gone with no message. Write to a sibling `.tmp` and rename.
+
+- [ ] **26. The lockdown does not cover the files already in the folder.**
+  `config.rs:336-340` has no `/t`, so it rewrites the directory's DACL and not
+  its children's. `(OI)(CI)` fixes files created *after* this point; a `session`
+  that already carries an inherited `Users:(R)` ACE keeps it, and on Windows a
+  full-path open is checked against the file's own DACL. Reachable whenever the
+  data folder predates a successful lockdown — a `dist\` copied to another
+  machine, restored from backup, or unzipped. Present in the Python original
+  too, so not a port regression, but it is the one thing the function exists to
+  do. `/t /c` closes it.
+
+- [ ] **27. `grammers-*` is pinned by caret while `gpui` is pinned exactly.**
+  `crates/tgx-tg/Cargo.toml:14-16`. The asymmetry runs backwards to
+  consequence: a `gpui` break is a compile error, loud and immediate, while a
+  `grammers-tl-types` bump inside 0.10.x can re-shape a TL field, compile
+  cleanly — the converter matches only the variants it knows — and quietly
+  change what lands in `result.json`. That is the class CLAUDE.md says no test
+  here can catch. `chrono` (`date`/`date_unixtime`, both must-match) and `sha2`
+  (the corpus manifest hash) are in the same position. CI has no `--locked`.
+
+- [ ] **28. `tgx-app` depends on `grammers-client` directly, and the test that
+  exists to catch that does not look.** `crates/tgx-app/Cargo.toml:18` against
+  `CLAUDE.md`'s "`tgx-app` … depends only on tgx-ui + tgx-tg".
+  `crates/tgx-parity/tests/layering.rs` enforces two of the three documented
+  rules and claims to enforce the set. Either add the third assertion or correct
+  the document — at present they disagree and nothing notices.
+
+- [ ] **29. A failed chat's reason is unattributed.**
+  `crates/tgx-app/src/shell/mod.rs:493` has `chat_id` in hand and
+  `queue.title_of` beside it, but journals the bare message. Every other
+  transcript line is `"{title}: …"`. It bites hardest on the message audit item
+  11 exists to deliver — `actions.rs:366` sends "rate limited while listing
+  topics — retry this chat later" with no title, while the sibling branch four
+  lines below does prefix it. The queue's STATUS column cannot serve as the
+  fallback: it is 68 px and truncates to about one word. Three rate-limited
+  forums in a twenty-chat queue leave the user unable to tell which three to
+  re-run.
+
+- [ ] **30. Two processes share one `tgx.log` with no coordination.**
+  `logging.rs:117-129`. Running the `tgx` CLI — which CLAUDE.md documents as the
+  way to exercise the wire — while the window is open renames the window's live
+  log onto `tgx.prev.log`, destroying the genuinely previous run, creates a
+  fresh `tgx.log`, and then both processes write at independent offsets into it.
+  Also `logging.rs:115`'s "calling this twice is a no-op" is wrong twice over:
+  the rotation and truncation happen *before* `set_boxed_logger`, and the
+  refusal is returned as `Err`, not swallowed.
+
+---
+
+## Low / documentation
+
+- [ ] **A negative number silently means "unlimited".** `config.rs:178-190`:
+  `size_limit_mb: -5` yields `None` — download everything — and `member_limit:
+  -1` disables the roster cap. The saturating-multiply guard beside it was
+  written because untrusted input must not invert a limit; a negative inverts it
+  just as well, in the other direction.
+- [ ] **`Output::add` can desynchronise its own separator.** `output.rs:78-96`
+  increments `count` last, so an error from the HTML writer after the JSON block
+  was written leaves `count` stale and the next `add` omits the `",\n"`. Not
+  reachable today — the only caller propagates with `?` — but it is a latent
+  trap in the struct whose documented job is that the file is always valid.
+- [ ] **`icacls`'s diagnostic is read from stderr only** (`config.rs:346`).
+  `icacls` writes most failure text to **stdout**, so the user's security
+  warning degrades to `icacls exited exit code: 1` with no indication whether it
+  was FAT32, a bad grantee or a permissions problem. The Python read
+  `stderr or stdout` (`app/config.py:77`).
+- [ ] **`tgx export ""` exports an arbitrary chat.** `bin/tgx.rs:197-205`:
+  `contains("")` is true for the first element of the list. Reject an empty
+  title before searching.
+- [ ] **A malformed `TG_API_ID` is silently ignored.** `bin/tgx.rs:40`'s
+  `unwrap_or(settings.api_id)` means `TG_API_ID=1234x` falls back to whatever is
+  on disk while the user is told they have no credentials.
+- [ ] **`Bridge::new`'s `expect` is diagnosed as a GPU fault.**
+  `shell/mod.rs:254` is the crate's only non-test `expect`, and it runs inside
+  the window-content closure — before `WINDOW_OPENED` is set — so a
+  thread-spawn failure is reported as "this build needs a GPU with working
+  DirectX drivers". Item 15's misdiagnosis class, by another route.
+- [ ] **`sort_mode` has no fallback though `theme` was given one**
+  (`config.rs:218-220`) for exactly the same reason.
+- [ ] **CI's clippy line omits `-- -D warnings`** (`ci.yml:39`) and relies on
+  `RUSTFLAGS` instead; the gate works today but is one plausible edit from
+  silently becoming a report.
+- [ ] **`save.bat` cannot run non-interactively** — `pause` at `save.bat:512`
+  sits on the single exit path, contradicting the header's "can be chained", and
+  the menu spins forever on EOF.
+- [ ] **`--force-with-lease` without `--force-if-includes`** (`save.bat:191`,
+  `:402`): a `git fetch` between integration and push satisfies the lease and
+  permits the clobber it exists to prevent.
+- [ ] **`settings_are_wired`'s "is it read?" check is a bare substring match**
+  on `.{field}`, so a future short field name (`.id`, `.size`, `.text`) is
+  satisfied by any unrelated struct's field access. Fails safe in the other
+  direction, which is the right way round.
+- [ ] **`html_leg` lifts seven values out of Desktop's own HTML, and documents
+  five** (`html_leg.rs:10-14` vs `:408-413`). Everything lifted is by
+  construction not under test; the table should show the true size of that
+  surface.
+- [ ] **The CLI's 2FA password is never zeroised** (`bin/tgx.rs:116-130`) and is
+  copied again by `trim().to_string()`, after the function goes to real trouble
+  to keep it out of scrollback.
+- [ ] **`Output::add` deep-clones every payload to drop one key**
+  (`output.rs:81-85`) — 6,643 full-map clones per chat for a filter that could
+  be applied during serialisation.
+- [ ] **`error.rs:98`'s `unwrap_or(0)`** yields `Transient(Duration::ZERO)`, so
+  a caller "waits" zero seconds and retries at once. Nothing spins today because
+  every caller has its own bound; a one-second floor would make that
+  unconditional.
+- [ ] **`restrict_to_current_user` is a no-op on non-Windows, non-Unix targets**
+  and never sets `lockdown_error`, so the GUI affirmatively claims a protection
+  that was never attempted (`config.rs:371-385`).
+- [ ] **`app_dir()` falls back to `"."`** when `current_exe()` fails
+  (`config.rs:28-31`), putting the session key in whatever the working directory
+  happens to be.
+- [ ] **A signed-in user can spawn unbounded sign-in probes.**
+  `shell/mod.rs:702` spawns `actions::sign_in` unconditionally and only opens
+  the dialog when signed out, so the guard the comment at `:813` describes
+  ("disabled while the dialog is up") never engages.
+- [ ] **`shell/signin.rs:300,325` swallow a settings save failure** with
+  `let _ =`, where every other write path journals a warning. A read-only disk
+  means the credentials work this session and are gone next launch.
+
+---
+
+## The pure layers
+
+`tgx-format`, `tgx-html` and `tgx-media` came out of this pass **with no
+critical and no high findings**, which is what the oracle covering them is
+supposed to buy. The escaping in particular held up: `javascript:` in every
+casing, `data:`, `vbscript:`, `blob:`, `file:`, tab/LF/CR/NUL inside and before
+a scheme, `j a v a s c r i p t:`, NBSP separators, `//host`, `\\host`, `/\host`,
+`\/host`, a leading bidi mark, and the encoded colons `javascript&#58;` and
+`javascript%3a` were all tried against `safe_href` and all refused. Item 13's
+fix holds. No unescaped value reaches markup anywhere in the crate, and there
+is no `unwrap`/`expect`/slicing outside tests bar the documented-infallible
+ones.
+
+The one substantial finding is numbered with the rest; the remainder are small.
+
+- [ ] **31. Every blur preview is written to disk and none is ever shown.**
+  `crates/tgx-html/src/writer.rs:468` gates the inline stripped-thumbnail image
+  on `pv.get("stripped") == Some(true)`, and **nothing in the workspace writes a
+  `stripped` key**. The only producer of `_p.preview` is `convert::preview_of`
+  (`convert.rs:459`), which emits `{src, width, height}` and returns `None` the
+  moment `file`/`photo` is a placeholder (`convert.rs:462,474,478`) — which is
+  exactly the case a stripped thumbnail exists for.
+  Measured on the live export:
+
+  | topic | `stripped_thumbnail` in JSON | `<img src="thumbnails/…">` |
+  |---|---|---|
+  | ćaskanje | 32 | 0 |
+  | foto video | 1,195 | 0 |
+  | editorijal | 136 | 0 |
+  | bitno pročitaj | 1 | 0 |
+  | **total** | **1,364** | **0** |
+
+  All 1,364 JPEGs are on disk. `plan.rs:458` reserves the name, `stripped::expand`
+  builds a real JPEG, the pool writes it, `result.json` points at it, and the
+  page renders a grey `media_file` row instead. For a file too large to
+  download this is the only image that will ever exist.
+  This is the same reader-with-no-producer shape as `thumb_dest` in item 2 and
+  `_p` in item 9, and `convert.rs:343-344` already lists "the
+  `stripped_thumbnail` files we do write on disk referenced by nothing" among
+  the symptoms `presentation()` repairs. It does not repair this one.
+  No leg can see it: the html leg replays Desktop's `result.json`, which has no
+  `stripped_thumbnail` key at all.
+  **Fix:** one arm in `preview_of` — when the media is a placeholder and
+  `stripped_thumbnail` is present, emit `{src: that, stripped: true, …}`.
+
+- [ ] **32. `WIDTH_OFFSET` and `HEIGHT_OFFSET` name the wrong JPEG fields.**
+  `crates/tgx-media/src/jpeg_header.rs:53-56` and its doc at `:10`. Walking the
+  committed 623-byte header: SOF0 begins at `0x9e`, so byte **164 is the height
+  low byte** and **166 is the width low byte** — the constants are swapped.
+  `expand` (`stripped.rs:33-34`) is still byte-correct because it writes
+  `stripped[1]→164, stripped[2]→166` exactly as tdesktop does; only the names
+  are wrong. But the mislabelling has already produced a second bug:
+  `stripped::dimensions` (`stripped.rs:42`) returns `(stripped[1], stripped[2])`
+  documented as "width and height", which is `(height, width)`, and its test
+  enshrines the swap. Latent only because `dimensions` has no callers — the
+  first `<img>` sized from it gets a transposed box on every non-square
+  thumbnail.
+
+- [ ] **33. Eleven `pub` items are reachable only from their own tests**, the
+  class that hid item 2 and item 31: `stripped::dimensions`,
+  `order::ordered_index`, `PeerKey::raw_id`, `Tree::at`, `Tree::indent`,
+  `Tree::raw_tag`, `writer::css_preview_size`, `writer::preview_box_for`,
+  `HtmlWriter::total` (written, never read), `NameBook::is_claimed`,
+  `Presentation::is_empty`. Two knock-ons: `ordered_index` is the **only** user
+  of `indexmap` in `tgx-format` and is redundant by construction, since
+  `serde_json` is built with `preserve_order` and `Map` already *is* an
+  `IndexMap`; and `Tree::raw_tag`'s doc says "used for the doctype" when the
+  doctype goes through `Tree::text` in both callers — and must, or a blank line
+  appears before `<html>`.
+
+Smaller, all verified:
+
+- [ ] **`sanitize_extension` can reintroduce the trailing space
+  `sanitize_filename` exists to strip** (`names.rs:82-90` vs `:239-247`): a
+  document named `"invoice "` yields `files/invoice.invoice `, Windows drops the
+  trailing space on create, and `result.json` points at a name that is not on
+  disk — the dangling reference the truncation-trim was written to prevent.
+- [ ] **`fit_box` can overflow `i64`** (`preview.rs:26,30`): `520 * width` with
+  `width` taken straight off the wire panics in debug and wraps in release.
+  `preview_size` clamps the low end only.
+- [ ] **`desktop_reaction_indent` over-indents any key that sorts after
+  `reactions`** (`json.rs:43-65`). `order.rs:189` puts *unranked* keys after it,
+  so a message carrying `reactions` plus a key nobody has classified yet gets
+  that key shifted one space. The doc's "reactions is always the last key" is
+  true of ranked keys only.
+- [ ] **`<img src>` gets attribute escaping but no scheme vetting**
+  (`writer.rs:473,500,523,543,568`), the one attacker-shaped slot that skips
+  `safe_href` — and worse than an href, since an `<img>` loads without a click,
+  so `//host` on a `file://` page is an unprompted UNC fetch. Not reachable
+  today: `src` only ever comes from a planner-claimed path, which cannot begin
+  `//`. One `.and_then(safe_href)` closes it permanently. `PageChrome.back_href`
+  (`page.rs:92`) skips it too, and is a constant in practice.
+- [ ] **`SAFE_SCHEMES` is duplicated** in `escape.rs:58` and `inline.rs:12`;
+  adding a scheme to one silently diverges the other.
+- [ ] **`userpic_class` silently swallows an over-long id and a sign**
+  (`userpic.rs:68`): a 20-digit id fails to parse and falls back to palette
+  entry 1, and the digit filter drops a leading `-`. Its "gigantic id" test
+  asserts only that the result is in `1..=8`, so it passes on the fallback.
+- [ ] **`escape.rs:96-98` is dead** — subsumed by the `matches!` on the next
+  line. **`index.rs:92` links to `HtmlWriter::finish`**, which is called `close`.
+  **`jpeg_header.rs` was hand-edited after generation** (16 bytes per row where
+  `tools/gen_jpeg_header.py` writes 12), so it no longer round-trips through its
+  generator, against CLAUDE.md's "regenerate rather than hand-edit".
+- **Coverage gap worth knowing:** the corpus contains **zero**
+  `hashtag`/`cashtag`/`bot_command` entities, so the three JS-injection paths in
+  `inline.rs:95-106` are covered by unit tests only and never by the oracle.
+
+---
+
+## Suggested order
+
+1. **2** and **1** first, and in that order — until `release` builds and the
+   corpus legs are visible, every other fix is being verified against a binary
+   and a CI run that may not reflect it. Both are one-line changes.
+2. **3**, then **12** — the two that can destroy or expose the credential.
+3. **4**, **5**, **17**, **31** — the output defects, each small and each
+   pinned by a number from the reference or from the live run. **6** belongs
+   here too: it is three lines and it is the difference between 2FA users being
+   able to sign in or not.
+4. **7**, **9**, **21**, **22** — the cancel and lifecycle holes.
+5. **8**, **13**, **14**, **16** — the oracle's own calibration. Worth doing
+   before the next live run, so that run's report can be trusted.
+6. **20** is a decision rather than a fix: choose whether this tool tracks
+   Desktop or supersedes it, then make the docs and the leg agree.
