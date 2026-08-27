@@ -111,6 +111,8 @@ pub struct Roster {
     /// Separate from `complete`, because hitting our own limit is a different
     /// thing from Telegram cutting us off.
     pub capped: bool,
+    /// `(replaced, kept)` under `own_names` — see `convert::own_name_parts`.
+    pub aliased: (usize, usize),
 }
 
 impl Roster {
@@ -145,7 +147,7 @@ pub async fn fetch_participants(
         // group with no members. Its members ride along with
         // `messages.getFullChat` instead, which the chat-details pass already
         // makes; a group small enough to still be a basic group is never paged.
-        return basic_group_roster(client, peer, tally, on_wait).await;
+        return basic_group_roster(client, peer, settings.own_names, tally, on_wait).await;
     };
 
     let mut offset = 0i32;
@@ -179,7 +181,9 @@ pub async fn fetch_participants(
         let before = roster.members.len();
         for user in &page.users {
             if let tl::enums::User::User(u) = user {
-                roster.members.push(member_json(u));
+                roster
+                    .members
+                    .push(member_json(u, settings.own_names, &mut roster.aliased));
             }
         }
         let gained = roster.members.len() - before;
@@ -360,6 +364,7 @@ fn updates_of(u: &tl::enums::Updates) -> Vec<&tl::enums::Update> {
 async fn basic_group_roster(
     client: &Client,
     peer: PeerRef,
+    own_names: bool,
     tally: &mut Enrichment,
     mut on_wait: impl FnMut(u64),
 ) -> Roster {
@@ -385,7 +390,9 @@ async fn basic_group_roster(
     };
     for user in &full.users {
         if let tl::enums::User::User(u) = user {
-            roster.members.push(member_json(u));
+            roster
+                .members
+                .push(member_json(u, own_names, &mut roster.aliased));
         }
     }
     roster
@@ -393,15 +400,23 @@ async fn basic_group_roster(
 
 /// One roster row. Shared so the two paths cannot describe a member
 /// differently depending on which kind of chat they are in.
-fn member_json(u: &tl::types::User) -> Value {
+///
+/// `own_names` is honoured here as well as in `NameBook`, or
+/// `participants.json` would name a contact one way and every message they
+/// sent another — the export disagreeing with itself about who someone is.
+fn member_json(u: &tl::types::User, own_names: bool, tally: &mut (usize, usize)) -> Value {
+    let username = u.username.as_deref().unwrap_or("");
+    let (first, last) = crate::convert::own_name_parts(
+        own_names,
+        u.contact,
+        username,
+        u.first_name.as_deref().unwrap_or(""),
+        u.last_name.as_deref().unwrap_or(""),
+        tally,
+    );
     json!({
         "id": format!("user{}", u.id),
-        "name": tgx_format::peer::display_name(
-            u.first_name.as_deref().unwrap_or(""),
-            u.last_name.as_deref().unwrap_or(""),
-            u.username.as_deref().unwrap_or(""),
-            u.deleted,
-        ),
+        "name": tgx_format::peer::display_name(first, last, username, u.deleted),
         "username": u.username,
         "bot": u.bot,
     })
@@ -861,6 +876,7 @@ mod tests {
             members: vec![json!({"id": "user1"})],
             complete: false,
             capped: false,
+            ..Default::default()
         };
         assert_eq!(short.to_json()["complete"], false);
         // And our own cap is a different statement from Telegram cutting us off.
@@ -868,6 +884,7 @@ mod tests {
             members: vec![],
             complete: true,
             capped: true,
+            ..Default::default()
         };
         assert_eq!(capped.to_json()["complete"], true);
         assert_eq!(capped.to_json()["capped"], true);

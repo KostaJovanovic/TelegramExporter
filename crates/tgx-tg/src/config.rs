@@ -101,6 +101,24 @@ pub struct Settings {
     /// output.
     pub link_previews: bool,
 
+    /// Write a contact under the name **they** chose, not the one you saved
+    /// them as.
+    ///
+    /// Telegram overwrites `first_name`/`last_name` with your address-book
+    /// entry for anyone you have saved, and sends no second field carrying
+    /// their own — `user#31774388` has exactly one name pair and a `contact`
+    /// flag. So the only identifier guaranteed to be theirs is the username,
+    /// and that is what this substitutes: a contact becomes `@handle`.
+    ///
+    /// **A contact with no username keeps the name you gave them**, because a
+    /// person with no name at all is worse than a person under your name for
+    /// them. `ExportResult::aliased` counts both outcomes so the run says how
+    /// often it could and could not honour this.
+    ///
+    /// Off by default: it moves names away from what Desktop writes, which is
+    /// the same reason `link_previews` is off.
+    pub own_names: bool,
+
     // Extra requests that recover what Telegram sends only when asked. None of
     // these exist in Desktop's format; each is separately switchable because
     // each costs traffic, and each degrades to nothing on failure.
@@ -163,6 +181,7 @@ impl Default for Settings {
             size_limit_mb: 20,
             download_media: true,
             link_previews: false,
+            own_names: false,
             full_reactions: true,
             chat_metadata: true,
             invite_links: true,

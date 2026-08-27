@@ -17,13 +17,25 @@ use serde_json::Value;
 use tgx_media::names::NameBook;
 use tgx_media::topics::{topic_id_for, ReplyHeader, GENERAL_TOPIC_ID};
 use tgx_tg::config::Settings;
-use tgx_tg::convert::{base_message, base_service, NameBook as Names};
+use tgx_tg::convert::{base_message, base_service, NameBook as Names, UserFacts};
 use tgx_tg::plan;
 
 fn names() -> Names {
     let mut n = Names::default();
-    n.learn_user_parts(1, "Ivana", "", "", false, None);
-    n.learn_user_parts(2, "Nada", "Gavrilovic", "", false, None);
+    n.learn(UserFacts {
+        id: 1,
+        first: "Ivana",
+        last: "",
+        username: "",
+        ..Default::default()
+    });
+    n.learn(UserFacts {
+        id: 2,
+        first: "Nada",
+        last: "Gavrilovic",
+        username: "",
+        ..Default::default()
+    });
     n
 }
 
