@@ -119,7 +119,15 @@ pub struct Settings {
     pub split_topics: bool,
 
     // Performance
-    pub chat_concurrency: usize,
+    //
+    // **There is no `chat_concurrency`.** The Python original offers "Chats at
+    // once, 1 to 8"; this engine exports one chat at a time, so the field was
+    // carried over, clamped on load, offered nowhere and read by nothing. A
+    // setting that does nothing is the same lie as a control that does
+    // nothing, and it survived precisely because a struct field that is
+    // written and never read is not dead code. An old `settings.json` naming
+    // it still loads: unknown keys are dropped per field, which is what that
+    // tolerance is for.
     pub download_concurrency: usize,
 
     /// Messages per `messages*.html` page.
@@ -163,7 +171,6 @@ impl Default for Settings {
             member_roster: true,
             member_limit: 10_000,
             split_topics: true,
-            chat_concurrency: 1,
             download_concurrency: 5,
             page_size: 1000,
             sort_mode: "recent".into(),
@@ -219,7 +226,6 @@ impl Settings {
             out.theme = "dark".into();
         }
         out.page_size = out.page_size.max(1);
-        out.chat_concurrency = out.chat_concurrency.max(1);
         out.download_concurrency = out.download_concurrency.max(1);
         out
     }
@@ -582,7 +588,6 @@ mod tests {
             r#"{"page_size": 0, "chat_concurrency": 0, "download_concurrency": 0}"#,
         );
         assert_eq!(s.page_size, 1);
-        assert_eq!(s.chat_concurrency, 1);
         assert_eq!(s.download_concurrency, 1);
     }
 
