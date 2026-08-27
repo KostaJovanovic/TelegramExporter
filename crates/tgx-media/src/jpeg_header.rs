@@ -6,8 +6,13 @@
 //! back is a splice, not a conversion: measured at 0.9us each.
 //!
 //! Ported from Telegram Desktop via Telethon's `stripped_photo_to_jpg`.
+//!
+//! ASCII, LF and 16 bytes to a row are load-bearing: they are what the
+//! generator has to emit for a regeneration to reproduce this file byte for
+//! byte instead of landing three diffs on it.
 
-/// 623 bytes. Offsets 164 and 166 carry the width and height.
+/// 623 bytes. Decoded rather than assumed: SOF0 (`FF C0`) starts at 158,
+/// so 164 is the height's low byte and 166 is the width's.
 pub const HEADER: [u8; 623] = [
     0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
     0x00, 0x01, 0x00, 0x00, 0xff, 0xdb, 0x00, 0x43, 0x00, 0x28, 0x1c, 0x1e, 0x23, 0x1e, 0x19, 0x28,
@@ -50,7 +55,15 @@ pub const HEADER: [u8; 623] = [
     0xfa, 0xff, 0xda, 0x00, 0x0c, 0x03, 0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3f, 0x00,
 ];
 
-/// Offset of the width byte inside [`HEADER`].
-pub const WIDTH_OFFSET: usize = 164;
-/// Offset of the height byte inside [`HEADER`].
-pub const HEIGHT_OFFSET: usize = 166;
+/// Offset of the **height**'s low byte inside [`HEADER`].
+///
+/// SOF0 begins at 158 and lays out `FF C0`, a 2-byte segment length, one
+/// precision byte, then the height at 163..=164 and the width at 165..=166,
+/// both big-endian. These two constants were named the other way round.
+/// [`crate::stripped::expand`] stayed byte-correct throughout -- it copies
+/// tdesktop's `stripped[1] -> 164, stripped[2] -> 166` -- but the swapped
+/// names had already produced a `dimensions()` that returned `(height, width)`
+/// under a doc comment promising `(width, height)`.
+pub const HEIGHT_OFFSET: usize = 164;
+/// Offset of the **width**'s low byte inside [`HEADER`]. See [`HEIGHT_OFFSET`].
+pub const WIDTH_OFFSET: usize = 166;
