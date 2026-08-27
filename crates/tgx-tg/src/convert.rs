@@ -339,9 +339,8 @@ pub fn base_service(m: &tl::types::MessageService, names: &NameBook) -> Map<Stri
 ///   row: 129 `photo_wrap` and 77 `sticker_wrap` in one topic became 0 and 0,
 ///   and `class="fill"` went from 47 to 306.
 /// * Userpic letters derived from the display *string* rather than the name
-///   fields, no self-chosen name colours, no forward-date tooltips, no
-///   `reaction active`, and the `stripped_thumbnail` files we do write on disk
-///   referenced by nothing.
+///   fields, no self-chosen name colours, no forward-date tooltips, and no
+///   `reaction active`.
 ///
 /// **The html leg reads 4 of 4 anyway**, because `html_leg.rs` lifts `_p` out
 /// of Desktop's own HTML before replaying — it proves the writer, not the
@@ -454,8 +453,17 @@ pub fn presentation(
 /// The `<img>` Desktop would put inline for this message, and its CSS size.
 ///
 /// Reads the paths the plan already wrote, so the preview cannot point
-/// somewhere the media does not. A placeholder — a file skipped for size — has
-/// no preview, which is what makes those messages render as a row.
+/// somewhere the media does not.
+///
+/// **A file skipped for size is not previewless.** Telegram sends a blur
+/// thumbnail *inside* the message — no request, no size limit — and `plan.rs`
+/// has always written it to `thumbnails/` and recorded it as
+/// `stripped_thumbnail`. `writer.rs:468` has always known how to draw it, from
+/// `_p.preview.stripped`. Nothing ever set that key, so the two halves never
+/// met: 1,364 JPEGs on disk in the last live run and not one of them displayed,
+/// while every skipped file rendered as a bare coloured row. No leg can see it
+/// either — Desktop's `result.json` has no `stripped_thumbnail`, so a replay
+/// never asks — which is why the test for this lives in `tests/wire.rs`.
 fn preview_of(out: &Map<String, Value>, preview_src: Option<&str>) -> Option<Value> {
     let s = |k: &str| out.get(k).and_then(Value::as_str).unwrap_or("");
     let n = |k: &str| out.get(k).and_then(Value::as_i64).unwrap_or(0);
@@ -465,6 +473,23 @@ fn preview_of(out: &Map<String, Value>, preview_src: Option<&str>) -> Option<Val
         let (_, css) = tgx_html::preview::preview_size(n("width"), n("height"), box_size);
         Some(json!({ "src": src, "width": css.0, "height": css.1 }))
     };
+
+    // First, because the planner only writes this key on the branch that
+    // skipped the download — its presence *is* the skip.
+    let stripped = s("stripped_thumbnail");
+    if !stripped.is_empty() {
+        let (_, css) = tgx_html::preview::preview_size(
+            n("width"),
+            n("height"),
+            tgx_html::preview::PREVIEW_BOX,
+        );
+        return Some(json!({
+            "src": stripped,
+            "stripped": true,
+            "width": css.0,
+            "height": css.1,
+        }));
+    }
 
     // **The planner's name, never one derived here.** `claim` adds a `(1)` on
     // collision, so a path recomputed from `photo` would silently differ from
@@ -668,25 +693,28 @@ pub fn location_of(media: &tl::enums::MessageMedia) -> Option<(Value, Option<i32
 /// already *has* the action, so they exercise the writers and never the
 /// converter.
 ///
-/// The vocabulary is measured, not invented — every name and payload key below
-/// is one the reference export actually contains, and the nine kinds here are
-/// the nine it holds. Anything else returns `None` rather than guessing at a
-/// spelling, which keeps an unmapped action a message with no `action` key
-/// instead of a wrong one.
+/// The vocabulary is measured, not invented — every *payload* key below is one
+/// the reference export actually contains, and the nine kinds carrying one are
+/// the nine it holds. An action outside that table keeps its snake_cased name
+/// and carries nothing, which is what Desktop does with actions its export code
+/// predates; guessing at a payload would be worse than omitting one.
 fn service_action(
     action: &tl::enums::MessageAction,
     m: &tl::types::MessageService,
     names: &NameBook,
-) -> Option<(&'static str, Vec<(String, Value)>)> {
+) -> Option<(String, Vec<(String, Value)>)> {
     use tl::enums::MessageAction as A;
 
     let name_of = |id: i64| json!(names.get(&PeerKey::user(id).to_string()));
-    let no_payload = |n: &'static str| Some((n, Vec::new()));
+    let no_payload = |n: &str| Some((n.to_string(), Vec::new()));
 
     match action {
-        A::ChatEditTitle(a) => Some(("edit_group_title", vec![("title".into(), json!(a.title))])),
+        A::ChatEditTitle(a) => Some((
+            "edit_group_title".to_string(),
+            vec![("title".into(), json!(a.title))],
+        )),
         A::ChatAddUser(a) => Some((
-            "invite_members",
+            "invite_members".to_string(),
             vec![(
                 "members".into(),
                 Value::Array(a.users.iter().map(|u| name_of(*u)).collect()),
@@ -696,17 +724,18 @@ fn service_action(
         // reference's six are all one user apiece, always as a one-element
         // array rather than a bare string.
         A::ChatDeleteUser(a) => Some((
-            "remove_members",
+            "remove_members".to_string(),
             vec![("members".into(), json!([name_of(a.user_id)]))],
         )),
         A::ChatJoinedByLink(a) => Some((
-            "join_group_by_link",
+            "join_group_by_link".to_string(),
             vec![("inviter".into(), name_of(a.inviter_id))],
         )),
         // The migrated-from title, not the current one.
-        A::ChannelMigrateFrom(a) => {
-            Some(("migrate_from_group", vec![("title".into(), json!(a.title))]))
-        }
+        A::ChannelMigrateFrom(a) => Some((
+            "migrate_from_group".to_string(),
+            vec![("title".into(), json!(a.title))],
+        )),
         // The pinned id rides in `reply_to`, which is the only place it exists:
         // the action itself is a bare constructor with no fields.
         A::PinMessage => {
@@ -715,12 +744,15 @@ fn service_action(
                 _ => None,
             };
             Some((
-                "pin_message",
+                "pin_message".to_string(),
                 id.map(|v| vec![("message_id".into(), json!(v))])
                     .unwrap_or_default(),
             ))
         }
-        A::TopicCreate(a) => Some(("topic_created", vec![("title".into(), json!(a.title))])),
+        A::TopicCreate(a) => Some((
+            "topic_created".to_string(),
+            vec![("title".into(), json!(a.title))],
+        )),
         // Both keys are written whenever either changed, and the reference's
         // `new_icon_emoji_id` is the integer `0` — not a string, and not
         // omitted — when the icon was cleared.
@@ -733,14 +765,103 @@ fn service_action(
                 "new_icon_emoji_id".into(),
                 json!(a.icon_emoji_id.unwrap_or(0)),
             ));
-            Some(("topic_edit", p))
+            Some(("topic_edit".to_string(), p))
         }
-        // Telegram's checklists travel as `todo` on the wire and as the poll
-        // vocabulary in Desktop's export. The reference's three carry no
-        // payload beyond the actor, so nothing is inferred but the name.
-        A::TodoAppendTasks(_) => no_payload("poll_append_answer"),
-        _ => None,
+        // `messageActionPollAppendAnswer` is its own constructor. This was
+        // mapped to `TodoAppendTasks` on the inference that Telegram's
+        // checklists travel as `todo` on the wire and as the poll vocabulary in
+        // Desktop's export — they do not, and both exist side by side in
+        // api.tl. The arm therefore never fired: those three messages are the
+        // three `absent: action` of the last live run.
+        //
+        // The reference's three carry **no payload beyond the actor**, measured
+        // rather than assumed. The Python original writes an `answer` key here;
+        // Desktop does not, and Desktop is the format this reproduces.
+        A::PollAppendAnswer(_) => no_payload("poll_append_answer"),
+        A::PollDeleteAnswer(_) => no_payload("poll_delete_answer"),
+        // Not in the reference, so the names come from the Python original
+        // (`serialize.py:731-738`), which is the only other measurement anyone
+        // here has. The payloads it writes are deliberately not carried over —
+        // an unverified key is worse than a missing one, and the `extra` tally
+        // in the wire leg would score it.
+        A::TodoAppendTasks(_) => no_payload("todo_append_tasks"),
+        A::TodoCompletions(_) => no_payload("todo_completions"),
+        // --- names only, ported from the Python original -------------------
+        //
+        // Not in the reference, so there is nothing here to measure against —
+        // but the Python's table *is* a measurement, made against Desktop by
+        // this project's first implementation, and CLAUDE.md is explicit that
+        // its code is the source rather than a paraphrase of it. These are the
+        // ones where Desktop's name is **not** the snake-cased constructor, so
+        // the fallback below would get them wrong rather than merely coarse:
+        //
+        //   ChatCreate → create_group, not chat_create
+        //   HistoryClear → clear_history, not history_clear
+        //   ContactSignUp → joined_telegram, not contact_sign_up
+        //
+        // and so on. Every one of these is an ordinary thing to find in an
+        // ordinary group chat, which is why a name-only port is worth having
+        // before the payloads.
+        A::ChatCreate(_) => no_payload("create_group"),
+        A::ChannelCreate(_) => no_payload("create_channel"),
+        A::ChatEditPhoto(_) => no_payload("edit_group_photo"),
+        A::ChatDeletePhoto => no_payload("delete_group_photo"),
+        A::ChatJoinedByRequest => no_payload("join_group_by_request"),
+        A::ChatMigrateTo(_) => no_payload("migrate_to_supergroup"),
+        A::HistoryClear => no_payload("clear_history"),
+        A::GameScore(_) => no_payload("score_in_game"),
+        A::PaymentSent(_) => no_payload("send_payment"),
+        A::SetChatTheme(_) => no_payload("edit_chat_theme"),
+        A::ContactSignUp => no_payload("joined_telegram"),
+        A::GeoProximityReached(_) => no_payload("proximity_reached"),
+        A::SetChatWallPaper(_) => no_payload("set_chat_wallpaper"),
+        // `messageActionEmpty` is not an action, and Desktop writes no key for
+        // it. Everything else keeps its name.
+        A::Empty => None,
+        // **`_ => None` dropped 57 of api.tl's 67 `messageAction*`
+        // constructors entirely**, so a chat containing a video call, a gift or
+        // a screenshot notice exported it as `"type": "service"` and nothing
+        // more — the same silence that lost all 63 actions in the first live
+        // run, narrowed to everything outside the reference's own nine. Desktop
+        // names an action its export code predates by snake-casing the
+        // constructor, and so does the Python (`snake_action`,
+        // serialize.py:817), which added it after a raw Telethon class name
+        // leaked into one of its reference diffs.
+        //
+        // **The payloads are deliberately not ported yet.** The Python carries
+        // ~20 of them (`custom_action`'s message, `phone_call`'s duration,
+        // `gift_code`'s slug…); reproducing those against grammers' TL shapes
+        // with no oracle would be inference, and the wire leg's new `extra`
+        // tally would score any wrong key. Recorded as follow-up in AUDIT.md
+        // with the Python's table as the specification.
+        other => Some((snake_variant(other), Vec::new())),
     }
+}
+
+/// `TopicEdit(MessageActionTopicEdit { .. })` → `topic_edit`.
+///
+/// Read off `Debug` because the variant name is not otherwise reachable: there
+/// is no `Discriminant`-to-string in `grammers-tl-types`, and matching 57 arms
+/// by hand to produce a string each already derives would be the same table
+/// twice.
+fn snake_variant(action: &tl::enums::MessageAction) -> String {
+    let debug = format!("{action:?}");
+    let camel = debug
+        .split(|c: char| c == '(' || c == '{' || c.is_whitespace())
+        .next()
+        .unwrap_or("");
+    let mut out = String::with_capacity(camel.len() + 4);
+    let bytes = camel.as_bytes();
+    for (i, ch) in camel.char_indices() {
+        // A run of capitals is one word: `SetMessagesTTL` is `set_messages_ttl`,
+        // not `set_messages_t_t_l`. Same rule as the Python's `snake_action`,
+        // which is where this was measured.
+        if ch.is_ascii_uppercase() && i > 0 && !bytes[i - 1].is_ascii_uppercase() {
+            out.push('_');
+        }
+        out.push(ch.to_ascii_lowercase());
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1018,10 +1139,34 @@ mod tests {
                 ],
             ),
             (
-                tl::enums::MessageAction::TodoAppendTasks(
-                    tl::types::MessageActionTodoAppendTasks { list: vec![] },
+                // `messageActionPollAppendAnswer`, which is its own
+                // constructor. This case used to assert the *bug*: the arm was
+                // written against `TodoAppendTasks` on the inference that
+                // Telegram's checklists carry Desktop's poll vocabulary, so it
+                // never fired for the three messages in the reference that
+                // actually hold `poll_append_answer` — and the test named
+                // "every action the reference holds is named the way desktop
+                // names it" passed while none of them was.
+                tl::enums::MessageAction::PollAppendAnswer(
+                    tl::types::MessageActionPollAppendAnswer {
+                        answer: tl::enums::PollAnswer::Answer(tl::types::PollAnswer {
+                            text: tl::enums::TextWithEntities::Entities(
+                                tl::types::TextWithEntities {
+                                    text: "another option".into(),
+                                    entities: vec![],
+                                },
+                            ),
+                            option: vec![1],
+                            added_by: None,
+                            date: None,
+                            media: None,
+                        }),
+                    },
                 ),
                 "poll_append_answer",
+                // No `answer` key: the reference's three carry actor and action
+                // and nothing else. The Python original does write one, and
+                // this follows Desktop.
                 vec![],
             ),
         ];
@@ -1032,7 +1177,101 @@ mod tests {
             for (k, v) in payload {
                 assert_eq!(out.get(k), Some(&v), "{expected} lost {k}");
             }
+            assert!(
+                !out.contains_key("answer"),
+                "{expected} gained a key the reference does not have"
+            );
         }
+    }
+
+    #[test]
+    fn an_action_with_no_arm_keeps_its_name_instead_of_vanishing() {
+        // `_ => None` dropped 57 of api.tl's 67 `messageAction*` constructors,
+        // so a chat with a video call, a gift, a wallpaper change or a
+        // screenshot notice exported it as `"type": "service"` and nothing
+        // more — the same silence that lost all 63 actions before, narrowed to
+        // everything outside the reference's own nine. Desktop snake-cases the
+        // constructor for actions its export code predates, and so does the
+        // Python (`snake_action`, serialize.py:817), after a raw Telethon class
+        // name leaked into one of its reference diffs.
+        let cases = [
+            // Snake-cased straight off the constructor.
+            (
+                tl::enums::MessageAction::ScreenshotTaken,
+                "screenshot_taken",
+            ),
+            (
+                tl::enums::MessageAction::ConferenceCall(tl::types::MessageActionConferenceCall {
+                    missed: false,
+                    active: false,
+                    video: false,
+                    call_id: 1,
+                    duration: None,
+                    other_participants: None,
+                }),
+                "conference_call",
+            ),
+            // And the ones where Desktop's name is *not* the snake-cased
+            // constructor, ported from the Python original's table. The
+            // fallback would get these wrong rather than merely coarse.
+            (tl::enums::MessageAction::HistoryClear, "clear_history"),
+            (tl::enums::MessageAction::ContactSignUp, "joined_telegram"),
+            (
+                tl::enums::MessageAction::ChatDeletePhoto,
+                "delete_group_photo",
+            ),
+            (
+                tl::enums::MessageAction::ChatJoinedByRequest,
+                "join_group_by_request",
+            ),
+        ];
+        for (action, expected) in cases {
+            let out = base_service(&service_with(action), &NameBook::default());
+            assert_eq!(out["action"], expected);
+            // Name only. A payload nobody measured is worse than none, and the
+            // wire leg's `extra` tally would score it.
+            assert_eq!(out.len(), 9, "unexpected keys: {out:?}");
+        }
+        // messageActionEmpty is not an action and gets no key.
+        let out = base_service(
+            &service_with(tl::enums::MessageAction::Empty),
+            &NameBook::default(),
+        );
+        assert!(out.get("action").is_none());
+        assert_eq!(out["type"], "service");
+    }
+
+    #[test]
+    fn snake_variant_reads_the_constructor_name_off_debug() {
+        // The mechanism the fallback rests on. If grammers ever stops deriving
+        // `Debug` in this shape, this is the test that says so rather than an
+        // export quietly filling with `""`.
+        assert_eq!(
+            snake_variant(&tl::enums::MessageAction::PinMessage),
+            "pin_message"
+        );
+        assert_eq!(
+            snake_variant(&tl::enums::MessageAction::TopicEdit(
+                tl::types::MessageActionTopicEdit {
+                    title: None,
+                    icon_emoji_id: None,
+                    closed: None,
+                    hidden: None,
+                }
+            )),
+            "topic_edit"
+        );
+        // A run of capitals is one word.
+        assert_eq!(
+            snake_variant(&tl::enums::MessageAction::SetMessagesTtl(
+                tl::types::MessageActionSetMessagesTtl {
+                    period: 60,
+                    auto_setting_from: None,
+                }
+            )),
+            "set_messages_ttl"
+        );
+        assert!(!snake_variant(&tl::enums::MessageAction::Empty).is_empty());
     }
 
     #[test]
@@ -1083,16 +1322,6 @@ mod tests {
         let out = base_service(&s, &names);
         assert_eq!(out["actor"], "UA KOLAB");
         assert_eq!(out["actor_id"], "channel3586682625");
-    }
-
-    #[test]
-    fn an_action_we_have_not_mapped_leaves_the_key_off_rather_than_guessing() {
-        let out = base_service(
-            &service_with(tl::enums::MessageAction::HistoryClear),
-            &NameBook::default(),
-        );
-        assert!(out.get("action").is_none());
-        assert_eq!(out["type"], "service");
     }
 
     fn emoji_reaction(emoticon: &str, count: i32) -> tl::enums::ReactionCount {
