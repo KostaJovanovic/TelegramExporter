@@ -658,7 +658,21 @@ impl<'a> ChatExporter<'a> {
                                     sink.jobs.len() - before,
                                 )));
                             }
-                            sink.output.add(&payload)?;
+                            // Through `close_all`, not `?`. This was the one
+                            // error return in `run` that did not drain: `Drop`
+                            // keeps the JSON valid, but the index
+                            // (`export_results.html`) is never written and the
+                            // empty-folder pruning never runs — which
+                            // reintroduces exactly the dead back-link a
+                            // previous audit closed. Every other exit here goes
+                            // through `close_all`, and the doc on this function
+                            // says every one does.
+                            if let Err(e) = sink.output.add(&payload) {
+                                Self::close_all(
+                                    &mut sinks, root, chat, topics, split, &mut result, progress,
+                                );
+                                return Err(e.into());
+                            }
                         }
                         done += 1;
                         result.messages += 1;
@@ -822,6 +836,7 @@ impl<'a> ChatExporter<'a> {
                 jobs,
                 self.settings.download_concurrency,
                 Some(tx),
+                cancel,
             );
             tokio::pin!(pool);
             let tally = loop {
@@ -842,8 +857,20 @@ impl<'a> ChatExporter<'a> {
                 secs,
                 human_bytes((tally.bytes as f64 / secs.max(0.001)) as i64)
             )));
-            for m in &tally.missing {
+            // Capped, because the transcript is a 2,000-line ring whose whole
+            // purpose is that the INCOMPLETE warning can still be scrolled to.
+            // A Stop during a 1,781-file folder now records every un-run job as
+            // a stated gap, and listing all of them here would flush the very
+            // thing the ring exists to keep. The file has the full list.
+            const SHOWN: usize = 20;
+            for m in tally.missing.iter().take(SHOWN) {
                 progress(Progress::Log(format!("  not saved: {m}")));
+            }
+            if tally.missing.len() > SHOWN {
+                progress(Progress::Log(format!(
+                    "  … and {} more — all of them in missing_media.txt",
+                    tally.missing.len() - SHOWN
+                )));
             }
             result.media_downloaded += tally.downloaded;
             result.media_failed += tally.failed;
