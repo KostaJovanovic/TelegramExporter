@@ -531,5 +531,9 @@ exit /b !PARITY_FAILED!
 :end
 call :since T0 "total"
 echo.
-pause
+rem The pause is for the double-click case, where the window would otherwise
+rem close before you read the result. Called with an action -- from a terminal,
+rem from CI, from a chained script -- it is just a hang. `save.bat` bare still
+rem pauses, and so does the menu, because %~1 is empty on both.
+if "%~1"=="" pause
 exit /b %SAVE_ERROR%
