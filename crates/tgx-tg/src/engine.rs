@@ -102,6 +102,115 @@ pub enum Progress {
         messages: usize,
     },
     Log(String),
+    /// One line of per-item detail: a message routed, a file fetched.
+    ///
+    /// **Never reaches the window's transcript.** That is a 2,000-line ring
+    /// whose whole purpose is that the INCOMPLETE-export warning can still be
+    /// scrolled to at the end of a long queue — and one chat of six thousand
+    /// messages would push every such line out of it. This goes to `tgx.log`
+    /// and to the CLI's stdout, both of which are files someone chose to read.
+    ///
+    /// Only emitted when [`detail_wanted`] is true, so the formatting cost is
+    /// not paid on an ordinary run.
+    Detail(String),
+}
+
+/// Is anyone listening for per-item detail?
+///
+/// Tied to the log level rather than a setting of our own: `RUST_LOG=debug`
+/// already means "tell me everything", the file logger already honours it, and
+/// a second switch would let the two disagree about what verbose means.
+pub fn detail_wanted() -> bool {
+    log::log_enabled!(log::Level::Debug)
+}
+
+/// A setting, spelled the way a log reader wants to read it.
+fn on_off(v: bool) -> &'static str {
+    if v {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+/// One message, as a single line of log.
+///
+/// Reads the finished payload rather than the TL object, so what it reports is
+/// what was actually written — a line saying "photo" for a message whose photo
+/// was dropped somewhere between the two would be worse than no line at all.
+fn describe(m: &Map<String, Value>, topic: &str, queued: usize) -> String {
+    let s = |k: &str| m.get(k).and_then(Value::as_str).unwrap_or("");
+    let id = m.get("id").and_then(Value::as_i64).unwrap_or(0);
+
+    let mut what: Vec<String> = Vec::new();
+    if let Some(a) = m.get("action").and_then(Value::as_str) {
+        what.push(format!("action={a}"));
+    }
+    if let Some(t) = m.get("media_type").and_then(Value::as_str) {
+        what.push(t.to_string());
+    }
+    for key in ["photo", "file", "thumbnail", "stripped_thumbnail"] {
+        let v = s(key);
+        if v.is_empty() {
+            continue;
+        }
+        // The skip placeholder is the interesting case, so name it as one
+        // rather than printing the whole parenthesised sentence.
+        what.push(if v.starts_with("(File") {
+            format!("{key}=skipped")
+        } else {
+            format!("{key}={v}")
+        });
+    }
+    if m.contains_key("poll") {
+        what.push("poll".into());
+    }
+    if m.contains_key("location_information") {
+        what.push("location".into());
+    }
+    if let Some(r) = m.get("reactions").and_then(Value::as_array) {
+        what.push(format!("reactions={}", r.len()));
+    }
+    if let Some(r) = m.get("reply_to_message_id").and_then(Value::as_i64) {
+        what.push(format!("reply_to={r}"));
+    }
+    if !s("forwarded_from").is_empty() {
+        what.push(format!("fwd={}", s("forwarded_from")));
+    }
+    if queued > 0 {
+        what.push(format!("+{queued} download(s)"));
+    }
+    // The text itself is never logged: `tgx.log` sits beside the executable
+    // and an export is other people's conversation. Its length is enough to
+    // tell an empty message from a lost one.
+    let len = match m.get("text") {
+        Some(Value::String(t)) => t.chars().count(),
+        Some(Value::Array(a)) => a.len(),
+        _ => 0,
+    };
+    let who = if s("from").is_empty() {
+        s("actor")
+    } else {
+        s("from")
+    };
+    format!(
+        "  #{id} [{topic}] {} {who} text:{len}{}{}",
+        s("type"),
+        if what.is_empty() { "" } else { " " },
+        what.join(" ")
+    )
+}
+
+/// Bytes, at the scale a human reads them.
+pub(crate) fn human_bytes(n: i64) -> String {
+    const MB: f64 = 1024.0 * 1024.0;
+    if n >= 1024 * 1024 {
+        format!("{:.1} MB", n as f64 / MB)
+    } else if n >= 1024 {
+        format!("{:.1} kB", n as f64 / 1024.0)
+    } else {
+        format!("{n} B")
+    }
 }
 
 /// The progress sink.
@@ -161,20 +270,60 @@ impl<'a> ChatExporter<'a> {
         progress: ProgressFn<'_>,
         cancel: &Cancel,
     ) -> Result<ExportResult, ExportError> {
+        let started = std::time::Instant::now();
+        let detail = detail_wanted();
         let mut result = ExportResult {
             root: root.to_path_buf(),
             ..Default::default()
         };
 
+        // **The settings, written down before anything uses them.** Nearly
+        // every "why is this export different from the last one" question is
+        // answered by one of these, and a log that records the outcome without
+        // the configuration that produced it cannot answer any of them.
+        let s = self.settings;
+        progress(Progress::Log(format!(
+            "{} ({}, id {}) -> {}",
+            chat.title,
+            chat.kind.export_type(chat.public),
+            chat.id,
+            root.display()
+        )));
+        progress(Progress::Log(format!(
+            "settings: media {}, size limit {}, kinds [{}], {} at a time, \
+             pages of {}, link previews {}, roster {}",
+            on_off(s.download_media),
+            match s.size_limit_bytes() {
+                Some(b) => format!("{} MB", b / (1024 * 1024)),
+                None => "none".into(),
+            },
+            s.media_kinds.join(", "),
+            s.download_concurrency,
+            s.page_size,
+            on_off(s.link_previews),
+            on_off(s.member_roster),
+        )));
+
         // A chat the list already counted costs no extra request. `0` is a
         // count — an empty chat — hence the `is_none` test rather than a falsy
         // one.
         let known = match chat.message_count {
-            Some(n) => Some(n),
+            Some(n) => {
+                progress(Progress::Log(format!(
+                    "count: {n} messages, already known from the list — no request"
+                )));
+                Some(n)
+            }
             None => {
                 let mut probe = self.client.iter_messages(peer);
                 match probe.total().await {
-                    Ok(n) => Some(n as i64),
+                    Ok(n) => {
+                        progress(Progress::Log(format!(
+                            "count: {n} messages, in {:.1}s",
+                            started.elapsed().as_secs_f64()
+                        )));
+                        Some(n as i64)
+                    }
                     Err(e) => {
                         // A count we could not get is not a reason to abandon
                         // the export; it only costs the progress bar.
@@ -205,6 +354,23 @@ impl<'a> ChatExporter<'a> {
         result.expected = total;
 
         let split = self.settings.split_topics && chat.is_forum;
+        if split {
+            progress(Progress::Log(format!(
+                "forum: {} topics, one folder each — {}",
+                topics.len(),
+                topics
+                    .iter()
+                    .map(|t| t.title.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        } else if chat.is_forum {
+            progress(Progress::Log(
+                "forum, but split_topics is off: everything into one folder".into(),
+            ));
+        } else {
+            progress(Progress::Log("not a forum: one folder".into()));
+        }
         let mut sinks: HashMap<i64, TopicSink> = HashMap::new();
         // `chat.public`, not `true`. Hardcoding it made the `false` arm of
         // `export_type` unreachable in production, so every export claimed
@@ -274,6 +440,17 @@ impl<'a> ChatExporter<'a> {
             .await;
             result.members = roster.members.len();
             result.members_complete = roster.complete;
+            progress(Progress::Log(format!(
+                "roster: {} members, {} — {} extra request(s), {:.1}s in",
+                roster.members.len(),
+                if roster.complete {
+                    "complete"
+                } else {
+                    "CAPPED"
+                },
+                tally.requests,
+                started.elapsed().as_secs_f64()
+            )));
             for m in &roster.members {
                 if let Some(id) = m.get("id").and_then(Value::as_str) {
                     if let Some(name) = m.get("name").and_then(Value::as_str) {
@@ -298,6 +475,14 @@ impl<'a> ChatExporter<'a> {
         result.enrich_deferred += tally.deferred;
 
         // --- the single pass ------------------------------------------------
+        progress(Progress::Log(format!(
+            "reading history oldest first{}",
+            if total > 0 {
+                format!(", {total} expected")
+            } else {
+                String::new()
+            }
+        )));
         let mut offset_id: i32 = 0;
         let mut stalled: u32 = 0;
         let mut done = 0usize;
@@ -313,6 +498,11 @@ impl<'a> ChatExporter<'a> {
                 return Err(ExportError::Cancelled);
             }
 
+            if offset_id != 0 {
+                progress(Progress::Log(format!(
+                    "resuming from message {offset_id} ({done} written so far)"
+                )));
+            }
             let mut iter = self
                 .client
                 .iter_messages(peer)
@@ -358,7 +548,15 @@ impl<'a> ChatExporter<'a> {
                             GENERAL_TOPIC_ID
                         };
                         if let Some(sink) = sinks.get_mut(&key) {
+                            let before = sink.jobs.len();
                             let payload = self.payload(&msg, &mut sink.media, &mut sink.jobs);
+                            if detail {
+                                progress(Progress::Detail(describe(
+                                    &payload,
+                                    &sink.title,
+                                    sink.jobs.len() - before,
+                                )));
+                            }
                             sink.output.add(&payload)?;
                         }
                         done += 1;
@@ -412,6 +610,16 @@ impl<'a> ChatExporter<'a> {
             }
         }
 
+        progress(Progress::Log(format!(
+            "read {done} messages in {:.1}s{}",
+            started.elapsed().as_secs_f64(),
+            if total > 0 && (done as i64) < total {
+                format!(" — {} SHORT of the {total} expected", total - done as i64)
+            } else {
+                String::new()
+            }
+        )));
+
         // --- the media pass -------------------------------------------------
         // After the read loop, not during it: the read is bounded by Telegram's
         // paging and the downloads are bounded by the pool, so overlapping them
@@ -455,14 +663,56 @@ impl<'a> ChatExporter<'a> {
                 Self::close_all(&mut sinks, root, chat, topics, split, &mut result, progress);
                 return Err(ExportError::Cancelled);
             }
+            let queued = jobs.len();
+            let expected: i64 = jobs.iter().map(|j| j.job.size).sum();
             progress(Progress::Log(format!(
-                "{}: fetching {} files",
-                title,
-                jobs.len()
+                "{title}: fetching {queued} files ({}) — {} at a time",
+                human_bytes(expected),
+                self.settings.download_concurrency
             )));
-            let tally =
-                download::run_all(self.client, &dir, jobs, self.settings.download_concurrency)
-                    .await;
+            if detail {
+                for j in &jobs {
+                    progress(Progress::Detail(format!(
+                        "  queue #{} {} ({})",
+                        j.job.message_id,
+                        j.job.dest,
+                        human_bytes(j.job.size)
+                    )));
+                }
+            }
+            let batch_started = std::time::Instant::now();
+            // Drained while the pool runs, so the lines arrive during the
+            // batch rather than in a burst after it.
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let pool = download::run_all(
+                self.client,
+                &dir,
+                jobs,
+                self.settings.download_concurrency,
+                Some(tx),
+            );
+            tokio::pin!(pool);
+            let tally = loop {
+                tokio::select! {
+                    t = &mut pool => break t,
+                    Some(p) = rx.recv() => progress(p),
+                }
+            };
+            while let Ok(p) = rx.try_recv() {
+                progress(p);
+            }
+            let secs = batch_started.elapsed().as_secs_f64();
+            progress(Progress::Log(format!(
+                "{title}: {} saved, {} failed, {} in {:.1}s ({}/s)",
+                tally.downloaded,
+                tally.failed,
+                human_bytes(tally.bytes),
+                secs,
+                human_bytes((tally.bytes as f64 / secs.max(0.001)) as i64)
+            )));
+            for m in &tally.missing {
+                progress(Progress::Log(format!("  not saved: {m}")));
+            }
             result.media_downloaded += tally.downloaded;
             result.media_failed += tally.failed;
             result.bytes_downloaded += tally.bytes;
@@ -956,5 +1206,72 @@ mod tests {
     #[test]
     fn the_stall_ceiling_is_documented_and_used() {
         assert_eq!(MAX_STALLED_WAITS, 10);
+    }
+
+    #[test]
+    fn a_detail_line_never_carries_the_message_text() {
+        // `tgx.log` sits beside the executable and an export is other people's
+        // conversation. The line reports the text's *length* so an empty
+        // message can be told from a lost one, and never the text.
+        let secret = "meet me at the usual place";
+        let m = serde_json::json!({
+            "id": 104,
+            "type": "message",
+            "from": "Nada",
+            "text": secret,
+            "media_type": "sticker",
+            "file": "stickers/sticker.webp",
+        });
+        let line = describe(m.as_object().unwrap(), "ćaskanje", 1);
+        assert!(
+            !line.contains(secret),
+            "the text leaked into the log: {line}"
+        );
+        assert!(line.contains("#104"));
+        assert!(line.contains("[ćaskanje]"));
+        assert!(line.contains("Nada"));
+        assert!(line.contains("sticker"));
+        assert!(line.contains("stickers/sticker.webp"));
+        assert!(line.contains("text:26"), "the length is the point: {line}");
+        assert!(line.contains("+1 download"));
+        assert_eq!(line.lines().count(), 1, "one message, one line");
+    }
+
+    #[test]
+    fn a_segmented_text_is_counted_not_quoted() {
+        // A formatted message arrives as an array of segments, and one of them
+        // is the text. Counting the array is what keeps it out of the log.
+        let m = serde_json::json!({
+            "id": 1,
+            "type": "message",
+            "actor": "UA KOLAB",
+            "text": ["private words ", {"type": "mention", "text": "@someone"}],
+        });
+        let line = describe(m.as_object().unwrap(), "t", 0);
+        assert!(!line.contains("private words"));
+        assert!(!line.contains("@someone"));
+        assert!(line.contains("text:2"));
+        // Falls back to the actor when there is no `from`.
+        assert!(line.contains("UA KOLAB"));
+    }
+
+    #[test]
+    fn a_skipped_file_is_named_as_skipped_rather_than_quoted() {
+        let m = serde_json::json!({
+            "id": 7,
+            "type": "message",
+            "text": "",
+            "file": crate::plan::TOO_LARGE,
+        });
+        let line = describe(m.as_object().unwrap(), "t", 0);
+        assert!(line.contains("file=skipped"), "{line}");
+        assert!(!line.contains("exceeds maximum size"), "{line}");
+    }
+
+    #[test]
+    fn bytes_are_reported_at_a_scale_a_reader_can_use() {
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(2048), "2.0 kB");
+        assert_eq!(human_bytes(5 * 1024 * 1024), "5.0 MB");
     }
 }

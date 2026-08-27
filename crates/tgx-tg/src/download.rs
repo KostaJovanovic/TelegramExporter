@@ -49,32 +49,69 @@ pub struct PendingDownload {
     pub media: Option<Media>,
 }
 
+/// Where a running pool reports each file as it lands.
+///
+/// `None` on an ordinary run. The pool spawns its work across tasks, so this
+/// cannot be the engine's `&mut dyn FnMut` sink — that is neither `Sync` nor
+/// shareable — and a channel the caller drains while awaiting is the cheapest
+/// thing that still reports *during* the batch rather than after it. A media
+/// pass of three hundred files was the one stretch of an export that printed
+/// nothing at all until it was over.
+pub type Reporter = tokio::sync::mpsc::UnboundedSender<crate::engine::Progress>;
+
 /// Run every job, at most `concurrency` at a time.
 pub async fn run_all(
     client: &Client,
     root: &Path,
     jobs: Vec<PendingDownload>,
     concurrency: usize,
+    report: Option<Reporter>,
 ) -> MediaTally {
     let permits = Arc::new(Semaphore::new(concurrency.max(1)));
     let mut set = tokio::task::JoinSet::new();
+    let queued = jobs.len();
 
     for pending in jobs {
         let permits = permits.clone();
         let client = client.clone();
         let root = root.to_path_buf();
+        let report = report.clone();
         set.spawn(async move {
             let _permit = permits.acquire_owned().await;
-            run_one(&client, &root, pending).await
+            let dest = pending.job.dest.clone();
+            let started = std::time::Instant::now();
+            let one = run_one(&client, &root, pending).await;
+            if let Some(tx) = &report {
+                let _ = tx.send(crate::engine::Progress::Detail(format!(
+                    "  {} {dest} ({} in {:.1}s)",
+                    if one.failed > 0 { "FAILED" } else { "saved " },
+                    super::engine::human_bytes(one.bytes),
+                    started.elapsed().as_secs_f64()
+                )));
+            }
+            one
         });
     }
 
     let mut tally = MediaTally::default();
+    let mut finished = 0usize;
     while let Some(joined) = set.join_next().await {
         match joined {
             Ok(one) => tally.merge(one),
             // A panicked task must not take the export with it.
             Err(_) => tally.failed += 1,
+        }
+        finished += 1;
+        // A heartbeat for the window, which does not see the per-file lines.
+        // Every twenty-fifth, so a big batch shows movement and a small one
+        // says nothing beyond its own summary.
+        if let Some(tx) = &report {
+            if finished.is_multiple_of(25) && finished < queued {
+                let _ = tx.send(crate::engine::Progress::Log(format!(
+                    "  {finished} of {queued} files, {} so far",
+                    super::engine::human_bytes(tally.bytes)
+                )));
+            }
         }
     }
     tally.missing.sort();

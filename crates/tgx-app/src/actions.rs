@@ -523,11 +523,21 @@ pub async fn export(
                 let _ = tx2.send(Event::FloodWait(seconds));
             }
             Progress::Topic { title, messages } => {
+                log::info!("{title}: {messages}");
                 let _ = tx2.send(Event::Log(format!("  {title}: {messages}")));
             }
             Progress::Log(msg) => {
+                // **Both channels.** The window's transcript is a 2,000-line
+                // ring that dies with the process; `tgx.log` survives it and is
+                // the only thing left to read when someone asks the next day
+                // why an export was short.
+                log::info!("{msg}");
                 let _ = tx2.send(Event::Log(format!("  {msg}")));
             }
+            // Deliberately not sent to the window: one chat of six thousand
+            // messages would flush every other line out of the ring, including
+            // the INCOMPLETE warning the ring exists to preserve.
+            Progress::Detail(msg) => log::debug!("{msg}"),
         };
 
         match exporter
