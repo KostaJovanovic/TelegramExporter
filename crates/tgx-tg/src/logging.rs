@@ -157,6 +157,19 @@ pub fn init() -> Result<PathBuf, String> {
     log::set_max_level(level);
     log::set_boxed_logger(Box::new(logger)).map_err(|e| e.to_string())?;
     log::info!("logging to {}", path.display());
+
+    // `ensure_data_dir()` above is what tries to lock the folder down, and its
+    // failure path calls `log::warn!` — three lines before any logger exists.
+    // So the one warning in this workspace that concerns a bearer credential
+    // was, every single time, written to the no-op logger. Re-stating it here
+    // is what makes this module's "the app says so in the log" true.
+    if let Some(why) = crate::config::lockdown_error() {
+        log::warn!(
+            "{} is NOT restricted to your user: {why} — \
+             it holds the session key, which is a bearer credential",
+            data_dir().display()
+        );
+    }
     Ok(path)
 }
 

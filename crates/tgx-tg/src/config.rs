@@ -101,6 +101,7 @@ pub struct Settings {
     /// output.
     pub link_previews: bool,
 
+
     // Extra requests that recover what Telegram sends only when asked. None of
     // these exist in Desktop's format; each is separately switchable because
     // each costs traffic, and each degrades to nothing on failure.
@@ -203,6 +204,21 @@ impl Settings {
     /// "20"` makes the byte calculation meaningless, and a half-written or
     /// hand-edited file would otherwise stop the app starting. Nothing is
     /// coerced — a guess would be worse than a default.
+    ///
+    /// **Each field is accepted only if the whole struct still deserialises
+    /// with it in place**, and that is the part [`same_shape`] cannot do on its
+    /// own. It compares JSON *kinds*, so `-1` and `1000` are both "a number"
+    /// and both pass — but `page_size` is a `usize`, so `-1` fails serde, and
+    /// this used to be one `from_value` over the merged map with
+    /// `.unwrap_or(defaults)` behind it. One out-of-range number therefore
+    /// discarded the entire file, including `api_id` and `api_hash`, and the
+    /// app came up asking for credentials the user had already given it. The
+    /// same held for `20.5` in an `i64` field and for an integer too large to
+    /// represent.
+    ///
+    /// The cost is one deserialisation of a small struct per key present in the
+    /// file — about 25 on a full one, which is immaterial next to the file read
+    /// that preceded it.
     pub fn load_from_str(raw: &str) -> Self {
         let Ok(Value::Object(map)) = serde_json::from_str::<Value>(raw) else {
             return Self::default();
@@ -219,14 +235,27 @@ impl Settings {
             if !same_shape(slot, &value) {
                 continue;
             }
-            base.insert(key, value);
+            let mut candidate = base.clone();
+            candidate.insert(key, value);
+            if serde_json::from_value::<Self>(Value::Object(candidate.clone())).is_ok() {
+                base = candidate;
+            }
         }
+        // `base` is now known to deserialise — every step preserved that — so
+        // the fallback here is unreachable rather than load-bearing.
         let mut out: Self = serde_json::from_value(Value::Object(base)).unwrap_or(defaults);
         if out.theme != "dark" && out.theme != "light" {
             out.theme = "dark".into();
         }
         out.page_size = out.page_size.max(1);
         out.download_concurrency = out.download_concurrency.max(1);
+        // Zero means unlimited for both of these, and a negative is neither a
+        // limit nor unlimited: `size_limit_bytes` tests `> 0`, so -1 silently
+        // becomes "no limit", while `member_limit` is compared as a cap and a
+        // negative one caps at nothing. Clamping makes the two agree, and makes
+        // the doc comments on the fields true.
+        out.size_limit_mb = out.size_limit_mb.max(0);
+        out.member_limit = out.member_limit.max(0);
         out
     }
 
@@ -240,8 +269,36 @@ impl Settings {
     pub fn save(&self) -> std::io::Result<()> {
         ensure_data_dir()?;
         let body = serde_json::to_string_pretty(self).unwrap_or_else(|_| "{}".into());
-        std::fs::write(settings_file(), body)
+        write_atomically(&settings_file(), body.as_bytes())
     }
+}
+
+/// Write via a sibling temporary file and one rename.
+///
+/// A plain `fs::write` truncates first and fills after, so an interruption —
+/// power, a full disk, the process killed — leaves a *valid file containing
+/// half a document*. A half-written `settings.json` does not parse, and
+/// [`Settings::load_from_str`] then falls back to defaults for the whole file:
+/// the same credential loss the per-field validation just closed, arriving by
+/// another route. The window is small and this file is written on every settings
+/// change, which is precisely the shape of a race that eventually happens.
+///
+/// The temporary sits in the *same directory* because that is what makes the
+/// rename atomic — NTFS and every POSIX filesystem guarantee it within a volume
+/// and nothing guarantees it across one. It also keeps the replacement inside
+/// the ACL-restricted folder, rather than staging a bearer credential in a
+/// world-readable `%TEMP%`.
+fn write_atomically(target: &std::path::Path, body: &[u8]) -> std::io::Result<()> {
+    let mut tmp = target.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, body)?;
+    // Windows' rename replaces an existing target; so does POSIX's.
+    if let Err(e) = std::fs::rename(&tmp, target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Do these two values have the same JSON shape?
@@ -266,20 +323,28 @@ fn same_shape(a: &Value, b: &Value) -> bool {
 
 /// Create the data directory and restrict it to the current user.
 ///
-/// **The restriction runs once per process, not once per call.** This is on the
-/// path of every action the window takes — connect, list chats, list topics,
-/// export — and the Windows implementation shells out to `icacls`, so calling
-/// it per action meant spawning a process on every click. The permissions do
-/// not change between calls; re-asserting them thousands of times only costs.
+/// **The restriction runs once per process, not once per call — once
+/// *successfully*.** This is on the path of every action the window takes —
+/// connect, list chats, list topics, export — and the Windows implementation
+/// shells out to `icacls`, so calling it per action meant spawning a process on
+/// every click. The permissions do not change between calls; re-asserting them
+/// thousands of times only costs.
+///
+/// But the flag used to be set whether or not it worked, so "tried once" and
+/// "succeeded once" were the same state. A transient failure — the folder open
+/// in another process, a momentarily unavailable domain controller for the
+/// grantee lookup — left the bearer credential at default permissions for the
+/// life of the process, and `actions::ready`'s deliberate re-call did nothing.
+/// The Python original got this right (`app/config.py:81-86`) and the port lost
+/// it. A retry costs one process spawn on a path that is already failing.
 pub fn ensure_data_dir() -> std::io::Result<PathBuf> {
-    use std::sync::OnceLock;
-    static RESTRICTED: OnceLock<()> = OnceLock::new();
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static RESTRICTED: AtomicBool = AtomicBool::new(false);
 
     let dir = data_dir();
     std::fs::create_dir_all(&dir)?;
-    if RESTRICTED.get().is_none() {
-        restrict_to_current_user(&dir);
-        let _ = RESTRICTED.set(());
+    if !RESTRICTED.load(Ordering::Relaxed) && restrict_to_current_user(&dir) {
+        RESTRICTED.store(true, Ordering::Relaxed);
     }
     Ok(dir)
 }
@@ -314,9 +379,22 @@ pub fn system32(exe: &str) -> PathBuf {
     PathBuf::from(root).join("System32").join(exe)
 }
 
+/// How long `icacls` gets before it is killed.
+///
+/// It runs on the first line of `main` in both binaries, so an `icacls` that
+/// never returns is an app that never draws. `.output()` waits forever, and
+/// there are real ways to get there: a network path in `SystemRoot`, a hung
+/// filter driver, a domain controller the grantee lookup cannot reach. The
+/// Python original passed `timeout=15` for exactly this reason and the port
+/// dropped it.
 #[cfg(windows)]
-fn restrict_to_current_user(dir: &std::path::Path) {
+const LOCKDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// `true` when the folder is now restricted.
+#[cfg(windows)]
+fn restrict_to_current_user(dir: &std::path::Path) -> bool {
     use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
 
     // icacls is the documented way to do this without pulling in a Win32 ACL
     // crate. A failure is recorded rather than fatal: on FAT32/exFAT there are
@@ -336,32 +414,101 @@ fn restrict_to_current_user(dir: &std::path::Path) {
         set_lockdown_error(Some(
             "USERNAME is not set, so there is no user to grant access to".into(),
         ));
-        return;
+        return false;
     };
 
-    let out = std::process::Command::new(system32("icacls.exe"))
+    // `/t`: apply to what is already in the folder, not only to the folder. A
+    // `dist\` copied from another machine, or restored from a backup, carries
+    // inherited ACEs on `session` itself — and `session` is the bearer
+    // credential. Changing the container's ACL leaves those untouched, so the
+    // one file that matters kept the permissions it arrived with.
+    //
+    // **Deliberately not `/c`.** It reads like the right companion to `/t` —
+    // carry on past a file you could not touch — but measured on this machine,
+    // `icacls <missing path> /t /c` exits **0** while printing "Failed
+    // processing 1 files", and without `/c` the same command exits 3. So `/c`
+    // would convert every partial failure into a reported success, which is
+    // precisely the state `lockdown_error` exists to prevent. Detecting the
+    // failure matters more than finishing the remaining two or three files, and
+    // parsing "Failed processing" out of the text is not an option: icacls is
+    // localised.
+    let spawned = std::process::Command::new(system32("icacls.exe"))
         .arg(dir)
         .arg("/inheritance:r")
         .arg("/grant:r")
         .arg(format!("{grantee}:(OI)(CI)F"))
+        .arg("/t")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    let failure = match out {
-        Ok(o) if o.status.success() => None,
-        Ok(o) => {
-            let said = String::from_utf8_lossy(&o.stderr).trim().to_string();
-            Some(if said.is_empty() {
-                format!("icacls exited {}", o.status)
-            } else {
-                said
-            })
-        }
+        .spawn();
+
+    let failure = match spawned {
         Err(e) => Some(e.to_string()),
+        Ok(child) => wait_bounded(child),
     };
     if let Some(why) = &failure {
         log::warn!("could not restrict {} to your user: {why}", dir.display());
     }
-    set_lockdown_error(failure);
+    set_lockdown_error(failure.clone());
+    failure.is_none()
+}
+
+/// Wait for `icacls`, killing it at [`LOCKDOWN_TIMEOUT`]. `None` on success.
+#[cfg(windows)]
+fn wait_bounded(mut child: std::process::Child) -> Option<String> {
+    use std::io::Read;
+
+    // The pipes are drained on their own threads rather than after the wait.
+    // `/t` prints a line per file processed, and a child that fills its pipe
+    // blocks writing while we sit in try_wait — a deadlock that would look
+    // exactly like the hang the timeout is here to bound.
+    fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<String> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut buf);
+            }
+            String::from_utf8_lossy(&buf).trim().to_string()
+        })
+    }
+    let out = drain(child.stdout.take());
+    let err = drain(child.stderr.take());
+
+    let deadline = std::time::Instant::now() + LOCKDOWN_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Err(e) => return Some(e.to_string()),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Some(format!(
+                        "icacls did not finish within {}s and was stopped",
+                        LOCKDOWN_TIMEOUT.as_secs()
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    };
+    if status.success() {
+        return None;
+    }
+    // stderr *or* stdout, as the original had it: icacls writes most of its
+    // failure text ("Access is denied.", "The system cannot find the path
+    // specified.") to stdout, so reading only stderr degraded every real
+    // explanation to "icacls exited exit code: 1".
+    let err = err.join().unwrap_or_default();
+    let out = out.join().unwrap_or_default();
+    let said = if !err.is_empty() { err } else { out };
+    Some(if said.is_empty() {
+        format!("icacls exited {status}")
+    } else {
+        said
+    })
 }
 
 /// The principal to grant, or `None` when Windows has not told us who we are.
@@ -374,20 +521,34 @@ fn grantee() -> Option<String> {
     }
 }
 
-#[cfg(not(windows))]
-fn restrict_to_current_user(dir: &std::path::Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let failure = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-            .err()
-            .map(|e| e.to_string());
-        if let Some(why) = &failure {
-            log::warn!("could not restrict {}: {why}", dir.display());
-        }
-        set_lockdown_error(failure);
+#[cfg(unix)]
+fn restrict_to_current_user(dir: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let failure = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .err()
+        .map(|e| e.to_string());
+    if let Some(why) = &failure {
+        log::warn!("could not restrict {}: {why}", dir.display());
     }
+    let ok = failure.is_none();
+    set_lockdown_error(failure);
+    ok
+}
+
+/// Neither Windows nor Unix: nothing was attempted, and saying so is the point.
+///
+/// This used to fall through silently, leaving `lockdown_error()` `None` — which
+/// every caller reads as "the folder is restricted". A GUI claiming a protection
+/// nobody attempted is worse than one admitting it cannot.
+#[cfg(not(any(windows, unix)))]
+fn restrict_to_current_user(dir: &std::path::Path) -> bool {
     let _ = dir;
+    set_lockdown_error(Some(
+        "this platform has no file permissions this app knows how to set, \
+         so the session key is readable by anything that can read the folder"
+            .into(),
+    ));
+    false
 }
 
 #[cfg(test)]
@@ -488,6 +649,41 @@ mod tests {
         assert!(!g.ends_with('\\'), "a domain with no user: {g}");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_failed_lockdown_says_why_and_does_not_claim_success() {
+        // Three things at once, because they are one behaviour:
+        //
+        //  - the call reports whether it worked, so `ensure_data_dir` can tell
+        //    "tried once" from "succeeded once" and retry the first;
+        //  - the reason is recorded, not swallowed;
+        //  - the reason is the one icacls gave, which means reading both pipes.
+        //    Measured: a missing path puts "The system cannot find the path
+        //    specified." on stderr and the summary on stdout, and other
+        //    failures put the explanation on stdout. Reading only stderr
+        //    degraded some of them to "icacls exited exit code: 1".
+        let saved = lockdown_error();
+        // Two levels missing, not one: icacls treats the final component as a
+        // name pattern inside its parent, so a missing leaf under a directory
+        // that *does* exist matches nothing, reports "Successfully processed 0
+        // files" and exits 0. A missing parent is what actually fails.
+        let missing = data_dir().join("no-such-folder-b7f3c1").join("deeper");
+        assert!(
+            !restrict_to_current_user(&missing),
+            "icacls cannot have succeeded on a path that does not exist"
+        );
+        let why = lockdown_error().expect("a failure must be recorded, not swallowed");
+        assert!(
+            !why.is_empty() && !why.starts_with("icacls exited"),
+            "the reason icacls gave was thrown away: {why:?}"
+        );
+        // And a real folder still succeeds, so the retry does not become a
+        // spawn on every action.
+        let dir = ensure_data_dir().expect("the data directory");
+        assert!(dir.is_dir());
+        set_lockdown_error(saved);
+    }
+
     #[test]
     fn a_shipped_binary_stays_beside_itself() {
         // The portable design is the point everywhere else: an exe on a stick
@@ -540,6 +736,64 @@ mod tests {
         assert_eq!(s.page_size, 250);
         assert_eq!(s.theme, "light");
         assert_eq!(s.size_limit_mb, 20);
+    }
+
+    #[test]
+    fn a_number_serde_cannot_take_loses_only_that_field() {
+        // The three shapes `same_shape` waves through because it compares JSON
+        // *kinds*: a negative in a usize, a fraction in an i64, and an integer
+        // too large to represent. Each one used to sink the whole file --
+        // including the credentials, so the app restarted asking for an api_id
+        // the user had already entered.
+        for bad in [
+            r#"{"api_id": 12345, "api_hash": "cafebabe", "page_size": -1}"#,
+            r#"{"api_id": 12345, "api_hash": "cafebabe", "size_limit_mb": 20.5}"#,
+            r#"{"api_id": 12345, "api_hash": "cafebabe", "api_id_typo": 0,
+                "download_concurrency": -4}"#,
+            r#"{"api_id": 99999999999999999999999, "api_hash": "cafebabe"}"#,
+        ] {
+            let s = Settings::load_from_str(bad);
+            assert_eq!(s.api_hash, "cafebabe", "api_hash lost by: {bad}");
+        }
+        // And the bad field itself falls back rather than being coerced.
+        let s = Settings::load_from_str(r#"{"page_size": -1}"#);
+        assert_eq!(s.page_size, Settings::default().page_size);
+        // An api_id too large is dropped; the rest of the file is not.
+        let s = Settings::load_from_str(r#"{"api_id": 99999999999999999999999, "phone": "+381"}"#);
+        assert_eq!(s.api_id, 0);
+        assert_eq!(s.phone, "+381");
+    }
+
+    #[test]
+    fn a_settings_write_replaces_the_file_rather_than_truncating_it() {
+        // Not a test of `save()` -- that writes the real TelegramExporterData,
+        // which holds this machine's actual credentials. The property under
+        // test is the one `save()` delegates: the target is never observed
+        // half-written, and an existing file is replaced.
+        let dir = std::env::temp_dir().join(format!("tgx-atomic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("settings.json");
+        std::fs::write(&target, b"{\"page_size\": 1}").unwrap();
+
+        write_atomically(&target, b"{\"page_size\": 2}").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            r#"{"page_size": 2}"#
+        );
+        // No debris left beside it.
+        assert!(!dir.join("settings.json.tmp").exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_negative_limit_does_not_mean_unlimited() {
+        // `size_limit_bytes` tests `> 0`, so -1 read as "no limit" -- the
+        // opposite of what someone typing a minus sign meant, and the opposite
+        // direction to the i64::MAX overflow the saturating multiply guards.
+        let s = Settings::load_from_str(r#"{"size_limit_mb": -1, "member_limit": -50}"#);
+        assert_eq!(s.size_limit_mb, 0);
+        assert_eq!(s.member_limit, 0);
     }
 
     #[test]
