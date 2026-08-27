@@ -257,7 +257,7 @@ async fn export(settings: &Settings, want: &str) -> Result<()> {
     let root = tgx_tg::engine::unique_dir(std::path::Path::new(&settings.output_dir), &chat.title)?;
     println!("  into {}", root.display());
 
-    let mut exporter = ChatExporter::new(&session.client, settings);
+    let mut exporter = ChatExporter::new(&session.client, settings, session.session());
     let mut last_line = String::new();
     let mut on_progress = |p: Progress| match p {
         Progress::Total { total, .. } => println!("  telegram counts {total} messages"),

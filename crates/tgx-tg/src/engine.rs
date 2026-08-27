@@ -23,11 +23,17 @@ use crate::error::{classify, EnrichError, ExportError};
 use crate::output::Output;
 use crate::plan;
 use grammers_client::session::types::PeerRef;
+// The trait, for `peer_ref` on the session store. `SqliteSession` implements
+// it; the method is not inherent.
+use grammers_client::session::storages::SqliteSession;
+use grammers_client::session::types::PeerId;
+use grammers_client::session::Session as _;
 use grammers_client::Client;
 use grammers_tl_types as tl;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tgx_format::peer::PeerKey;
 use tgx_media::names::NameBook as MediaNames;
 use tgx_media::topics::{topic_id_for, ReplyHeader, GENERAL_TOPIC_ID};
@@ -269,6 +275,49 @@ struct MessageExtras {
     poll_results: Option<tl::enums::PollResults>,
 }
 
+/// The forward origin of a message that nothing has named, if there is one.
+///
+/// Split out of [`ChatExporter::learn_forward_origin`] so the decision is
+/// testable: everything around it needs a `Client` and a session store, and this
+/// is the part that decides whether a request is made at all.
+fn unnamed_forward_origin<'m>(
+    m: &'m tl::types::Message,
+    names: &NameBook,
+) -> Option<&'m tl::enums::Peer> {
+    let Some(tl::enums::MessageFwdHeader::Header(fwd)) = &m.fwd_from else {
+        return None;
+    };
+    let peer = fwd.from_id.as_ref()?;
+    // Telegram sends `from_name` when the source is a peer we may not know, and
+    // `convert.rs` already prefers it over an empty lookup. Nothing to recover
+    // when it is there.
+    if fwd.from_name.as_deref().is_some_and(|n| !n.is_empty()) {
+        return None;
+    }
+    if !names
+        .get(&crate::convert::peer_key(peer).to_string())
+        .is_empty()
+    {
+        return None;
+    }
+    Some(peer)
+}
+
+/// A `tl::enums::Peer` as the session store keys it.
+///
+/// Deliberately the checked constructors: `PeerId::user`/`chat`/`channel` return
+/// `None` for an id outside Telegram's valid range, and the `_unchecked` twins
+/// `debug_assert!` — which is a panic in a debug build, on a value that arrives
+/// off the wire. An out-of-range id simply goes unresolved, which is the same
+/// outcome as a peer the store never cached.
+fn session_peer_id(peer: &tl::enums::Peer) -> Option<PeerId> {
+    match peer {
+        tl::enums::Peer::User(p) => PeerId::user(p.user_id),
+        tl::enums::Peer::Chat(p) => PeerId::chat(p.chat_id),
+        tl::enums::Peer::Channel(p) => PeerId::channel(p.channel_id),
+    }
+}
+
 /// One output folder plus the media names it has handed out.
 struct TopicSink {
     output: Output,
@@ -287,14 +336,30 @@ pub struct ChatExporter<'a> {
     /// The only state that may sit on the exporter is what is genuinely global
     /// to Telegram — ids that mean the same thing in every chat.
     names: NameBook,
+    /// The session store, for peers grammers cached but will not hand over.
+    ///
+    /// `Message::peers` is `pub(crate)`, so the only peers reachable from a
+    /// message are its sender and its chat — but the session has been caching
+    /// *every* peer every response carried since the account signed in, forward
+    /// origins included. It holds no names, only ids and access hashes, which is
+    /// exactly the half a `PeerRef` is missing. See
+    /// [`Self::learn_forward_origin`].
+    session: Arc<SqliteSession>,
+    /// Forward origins already looked up, successfully or not.
+    ///
+    /// One request per *person*, not per message: the 94 empty names in the last
+    /// live run belonged to 13 people.
+    forwards_tried: std::collections::HashSet<String>,
 }
 
 impl<'a> ChatExporter<'a> {
-    pub fn new(client: &'a Client, settings: &'a Settings) -> Self {
+    pub fn new(client: &'a Client, settings: &'a Settings, session: Arc<SqliteSession>) -> Self {
         Self {
             client,
             settings,
             names: NameBook::default(),
+            session,
+            forwards_tried: std::collections::HashSet::new(),
         }
     }
 
@@ -669,7 +734,13 @@ impl<'a> ChatExporter<'a> {
                             // says every one does.
                             if let Err(e) = sink.output.add(&payload) {
                                 Self::close_all(
-                                    &mut sinks, root, chat, topics, split, &mut result, progress,
+                                    &mut sinks,
+                                    root,
+                                    chat,
+                                    topics,
+                                    split,
+                                    &mut result,
+                                    progress,
                                 );
                                 return Err(e.into());
                             }
@@ -915,33 +986,83 @@ impl<'a> ChatExporter<'a> {
     /// Add whatever peers this message brought with it to the name book.
     ///
     /// grammers keeps the whole peer set a response carried, but only the
-    /// sender and the chat are reachable from outside the crate — which is
-    /// enough: the names that were missing belonged to people who had posted,
-    /// so they arrive as the sender of their own messages.
+    /// sender and the chat are reachable from outside the crate. This used to
+    /// say "which is enough: the names that were missing belonged to people who
+    /// had posted, so they arrive as the sender of their own messages", and the
+    /// first live run falsified it — 94 `forwarded_from` fields came out empty
+    /// across 13 people, every one with a correct `forwarded_from_id` and every
+    /// one named in Desktop's export of the same chat. Someone you forward
+    /// *from* need never have posted in the chat you are exporting.
+    /// [`Self::learn_forward_origin`] is the other half.
     ///
     /// The chat is learned too, because a migration notice's actor *is* the
     /// chat and had no other source.
     fn learn_peers(&mut self, msg: &grammers_client::message::Message) {
         for peer in [msg.sender(), msg.peer()].into_iter().flatten() {
-            match peer {
-                grammers_client::peer::Peer::User(u) => {
-                    if let tl::enums::User::User(raw) = &u.raw {
-                        self.names.learn_user(raw);
-                    }
-                }
-                grammers_client::peer::Peer::Group(g) => {
-                    let key = match &g.raw {
-                        tl::enums::Chat::Channel(c) => PeerKey::channel(c.id),
-                        _ => PeerKey::chat(g.id().bare_id().unwrap_or(0)),
-                    };
-                    self.names
-                        .learn_chat_title(key, g.title().unwrap_or_default());
-                }
-                grammers_client::peer::Peer::Channel(c) => {
-                    self.names
-                        .learn_chat_title(PeerKey::channel(c.raw.id), c.title());
+            self.learn_peer(peer);
+        }
+    }
+
+    fn learn_peer(&mut self, peer: &grammers_client::peer::Peer) {
+        match peer {
+            grammers_client::peer::Peer::User(u) => {
+                if let tl::enums::User::User(raw) = &u.raw {
+                    self.names.learn_user(raw);
                 }
             }
+            grammers_client::peer::Peer::Group(g) => {
+                let key = match &g.raw {
+                    tl::enums::Chat::Channel(c) => PeerKey::channel(c.id),
+                    _ => PeerKey::chat(g.id().bare_id().unwrap_or(0)),
+                };
+                self.names
+                    .learn_chat_title(key, g.title().unwrap_or_default());
+            }
+            grammers_client::peer::Peer::Channel(c) => {
+                self.names
+                    .learn_chat_title(PeerKey::channel(c.raw.id), c.title());
+            }
+        }
+    }
+
+    /// Name a forward origin that neither the message nor the name book knows.
+    ///
+    /// **This has to happen before the message is converted**, not in a batch at
+    /// the end: `result.json` is streamed, so a name resolved afterwards has
+    /// nowhere left to go.
+    ///
+    /// The route needs no change in grammers. `grammers_session::Session` is a
+    /// public trait; the session has been caching every peer every response
+    /// carried since sign-in; `peer_ref` turns a cached id into the id *plus the
+    /// access hash*; and `Client::resolve_peer` turns that into a named peer with
+    /// one request. `PeerInfo` holds no name, so the request is real — but it is
+    /// one per *person*, and only for people nothing else named: 13 requests
+    /// against 6,643 messages on the last live run.
+    ///
+    /// Every failure degrades to exactly what happens today, an empty name.
+    async fn learn_forward_origin(&mut self, m: &tl::types::Message, tally: &mut Enrichment) {
+        let Some(peer) = unnamed_forward_origin(m, &self.names) else {
+            return;
+        };
+        let key = crate::convert::peer_key(peer).to_string();
+        // Tried, not resolved: a peer the store does not hold must not be looked
+        // up again on every one of that person's messages.
+        if !self.forwards_tried.insert(key) {
+            return;
+        }
+        let Some(id) = session_peer_id(peer) else {
+            return;
+        };
+        let peer_ref = match self.session.peer_ref(id).await {
+            Ok(Some(r)) => r,
+            // Not cached, or the store could not be read. Either way there is no
+            // access hash, and without one the request cannot be made at all.
+            _ => return,
+        };
+        tally.requests += 1;
+        match self.client.resolve_peer(peer_ref).await {
+            Ok(p) => self.learn_peer(&p),
+            Err(_) => tally.deferred += 1,
         }
     }
 
@@ -968,6 +1089,11 @@ impl<'a> ChatExporter<'a> {
             return extras;
         };
         let id = m.id;
+
+        // Before the conversion, like everything else here, and for the sharper
+        // version of the same reason: the JSON is streamed, so a name learned
+        // after `base_message` has run has nowhere left to go.
+        self.learn_forward_origin(m, tally).await;
 
         if self.settings.full_reactions {
             if let Some(tl::enums::MessageReactions::Reactions(r)) = &m.reactions {
@@ -1311,6 +1437,150 @@ pub fn unique_dir(parent: &Path, name: &str) -> std::io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The same minimal fixture `convert`'s tests use; its module is private.
+    fn blank_message() -> tl::types::Message {
+        tl::types::Message {
+            out: false,
+            mentioned: false,
+            media_unread: false,
+            silent: false,
+            post: false,
+            from_scheduled: false,
+            legacy: false,
+            edit_hide: false,
+            pinned: false,
+            noforwards: false,
+            invert_media: false,
+            offline: false,
+            video_processing_pending: false,
+            paid_suggested_post_stars: false,
+            paid_suggested_post_ton: false,
+            id: 1,
+            from_id: None,
+            from_boosts_applied: None,
+            from_rank: None,
+            peer_id: tl::enums::Peer::User(tl::types::PeerUser { user_id: 1 }),
+            saved_peer_id: None,
+            fwd_from: None,
+            via_bot_id: None,
+            via_business_bot_id: None,
+            guestchat_via_from: None,
+            reply_to: None,
+            date: 1_766_071_072,
+            message: String::new(),
+            media: None,
+            reply_markup: None,
+            entities: None,
+            views: None,
+            forwards: None,
+            replies: None,
+            edit_date: None,
+            post_author: None,
+            grouped_id: None,
+            reactions: None,
+            restriction_reason: None,
+            ttl_period: None,
+            quick_reply_shortcut_id: None,
+            effect: None,
+            factcheck: None,
+            report_delivery_until_date: None,
+            paid_message_stars: None,
+            suggested_post: None,
+            schedule_repeat_period: None,
+            summary_from_language: None,
+            rich_message: None,
+        }
+    }
+
+    /// A message forwarded from `from_id`, optionally carrying a `from_name`.
+    fn forwarded(from_id: Option<tl::enums::Peer>, from_name: Option<&str>) -> tl::types::Message {
+        let fwd = tl::types::MessageFwdHeader {
+            imported: false,
+            saved_out: false,
+            from_id,
+            from_name: from_name.map(str::to_string),
+            date: 0,
+            channel_post: None,
+            post_author: None,
+            saved_from_peer: None,
+            saved_from_msg_id: None,
+            saved_from_id: None,
+            saved_from_name: None,
+            saved_date: None,
+            psa_type: None,
+        };
+        let mut m = blank_message();
+        m.fwd_from = Some(tl::enums::MessageFwdHeader::Header(fwd));
+        m
+    }
+
+    fn user_peer(id: i64) -> tl::enums::Peer {
+        tl::enums::Peer::User(tl::types::PeerUser { user_id: id })
+    }
+
+    #[test]
+    fn a_forward_origin_nobody_named_is_worth_one_request() {
+        // 94 `forwarded_from` fields came out empty in the last live run, across
+        // 13 people, every one with a correct id and every one named in
+        // Desktop's export. `learn_peers` reaches only a message's sender and
+        // its chat — and someone you forward *from* need never have posted in
+        // the chat you are exporting.
+        let names = NameBook::default();
+        let m = forwarded(Some(user_peer(42)), None);
+        assert!(unnamed_forward_origin(&m, &names).is_some());
+    }
+
+    #[test]
+    fn a_forward_telegram_already_named_costs_nothing() {
+        // Telegram sends `from_name` when the source is a peer we may not know,
+        // and `convert.rs` prefers it over an empty lookup — so there is nothing
+        // to recover and no reason to spend a request.
+        let names = NameBook::default();
+        let m = forwarded(Some(user_peer(42)), Some("Ivana"));
+        assert!(unnamed_forward_origin(&m, &names).is_none());
+        // An empty `from_name` is not a name.
+        let m = forwarded(Some(user_peer(42)), Some(""));
+        assert!(unnamed_forward_origin(&m, &names).is_some());
+    }
+
+    #[test]
+    fn a_forward_origin_already_in_the_book_costs_nothing() {
+        let mut names = NameBook::default();
+        // Written straight into the book rather than through `learn`: what is
+        // under test is the lookup, not how the name got there.
+        names.names.insert(
+            crate::convert::peer_key(&user_peer(42)).to_string(),
+            "Nađa".into(),
+        );
+        let m = forwarded(Some(user_peer(42)), None);
+        assert!(unnamed_forward_origin(&m, &names).is_none());
+    }
+
+    #[test]
+    fn a_message_that_is_not_a_forward_is_left_alone() {
+        let names = NameBook::default();
+        assert!(unnamed_forward_origin(&blank_message(), &names).is_none());
+        // A hidden forward has a name and no peer; there is no id to resolve.
+        let m = forwarded(None, Some("Someone"));
+        assert!(unnamed_forward_origin(&m, &names).is_none());
+    }
+
+    #[test]
+    fn a_peer_id_out_of_range_is_none_rather_than_a_panic() {
+        // The checked constructors, deliberately: the `_unchecked` twins
+        // `debug_assert!`, which is a panic in a debug build, on a value that
+        // arrives off the wire. An out-of-range id simply goes unresolved.
+        assert!(session_peer_id(&user_peer(42)).is_some());
+        assert!(session_peer_id(&user_peer(-1)).is_none());
+        assert!(session_peer_id(&user_peer(0)).is_none());
+        assert!(
+            session_peer_id(&tl::enums::Peer::Channel(tl::types::PeerChannel {
+                channel_id: 3_586_682_625,
+            }))
+            .is_some()
+        );
+    }
 
     #[test]
     fn a_short_export_does_not_read_as_a_complete_one() {
