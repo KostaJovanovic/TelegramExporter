@@ -17,11 +17,34 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tgx_media::names::{sanitize_extension, NameBook};
 
+/// The ceiling, named rather than counted.
+///
+/// Custom emoji share `stickers/` and its collision suffixes but are referenced
+/// from `document_id` rather than from a message's `file`, so a replay driven by
+/// `result.json` cannot see them: `sticker (55).webp` is a custom emoji, which
+/// is why the next message's sticker is `(56)`. A real export does reserve those
+/// names — this harness simply has no way to know about them. One invisible
+/// reservation shifts every later sticker in the topic by one, which is why the
+/// six are consecutive.
+///
+/// This used to be `exact >= total - 6`, and a count is the wrong shape for it:
+/// six *new* mismatches elsewhere would have scored exactly the same as these
+/// six, and the leg exists to catch that class. Naming them means any seventh
+/// mismatch, or a different sixth, fails.
+const KNOWN_UNMATCHED: &[(&str, &str)] = &[
+    ("7392", "stickers/sticker (56).webp"),
+    ("7395", "stickers/sticker (57).webp"),
+    ("7422", "stickers/sticker (58).webp"),
+    ("7423", "stickers/sticker (59).webp"),
+    ("7841", "stickers/sticker (60).webp"),
+    ("7930", "stickers/sticker (61).webp"),
+];
+
 pub fn run(topics: &[PathBuf]) -> Result<u32> {
     let mut total = 0usize;
     let mut exact = 0usize;
     let mut repeats = 0usize;
-    let mut wrong: Vec<String> = Vec::new();
+    let mut wrong: Vec<Mismatch> = Vec::new();
 
     for topic in topics {
         let name = topic.file_name().unwrap_or_default().to_string_lossy();
@@ -39,7 +62,7 @@ pub fn run(topics: &[PathBuf]) -> Result<u32> {
     if !wrong.is_empty() {
         println!("\nfirst mismatches:");
         for w in wrong.iter().take(15) {
-            println!("  {w}");
+            println!("  {}", w.describe());
         }
         if wrong.len() > 15 {
             println!("  ... and {} more", wrong.len() - 15);
@@ -47,22 +70,54 @@ pub fn run(topics: &[PathBuf]) -> Result<u32> {
     }
     println!("\n{exact} of {total} filenames reproduced exactly ({repeats} repeats)");
 
-    // The ceiling is 830 of 836, and the six are not a defect. Custom emoji
-    // share `stickers/` and its collision suffixes but are referenced from
-    // `document_id` rather than from a message's `file`, so a replay driven by
-    // `result.json` cannot see them: `sticker (55).webp` is a custom emoji,
-    // which is why the next message's sticker is `(56)`. A real export does
-    // reserve those names — this harness simply has no way to know about them.
-    let expected_ceiling = total.saturating_sub(6);
-    if exact >= expected_ceiling {
+    // A run that compared nothing is not a run that agreed about everything.
+    // Pointed at an empty directory this used to compute 0 >= 0 and report the
+    // known ceiling, so the harness's own failure read as the harness passing.
+    if total == 0 {
+        println!("NO filenames were compared — the corpus is empty or unreadable");
+        return Ok(1);
+    }
+
+    let unexplained = unexplained(&wrong);
+    if unexplained.is_empty() {
         println!(
             "at the known ceiling: the {} unmatched are custom emoji, invisible to a JSON replay",
-            total - exact
+            wrong.len()
         );
         return Ok(0);
     }
-    println!("BELOW the known ceiling of {expected_ceiling}/{total} — this is a regression");
+    println!(
+        "\n{} mismatch(es) are NOT the known custom-emoji cascade — this is a regression:",
+        unexplained.len()
+    );
+    for w in unexplained.iter().take(15) {
+        println!("  {}", w.describe());
+    }
     Ok(1)
+}
+
+/// Mismatches that the custom-emoji exception does not account for.
+fn unexplained(wrong: &[Mismatch]) -> Vec<&Mismatch> {
+    wrong
+        .iter()
+        .filter(|w| {
+            !KNOWN_UNMATCHED
+                .iter()
+                .any(|(id, want)| *id == w.id && *want == w.want)
+        })
+        .collect()
+}
+
+struct Mismatch {
+    id: String,
+    want: String,
+    got: String,
+}
+
+impl Mismatch {
+    fn describe(&self) -> String {
+        format!("{}: desktop {:?}, ours {:?}", self.id, self.want, self.got)
+    }
 }
 
 #[derive(Default)]
@@ -70,7 +125,7 @@ struct Report {
     total: usize,
     exact: usize,
     repeats: usize,
-    wrong: Vec<String>,
+    wrong: Vec<Mismatch>,
 }
 
 /// Strip Desktop's `chats/chat_<id>/topic_<n>/` prefix. Our layout is flat, so
@@ -175,14 +230,54 @@ fn check(topic: &Path) -> Result<Report> {
             r.exact += 1;
             seen.insert(want, got);
         } else {
-            r.wrong.push(format!(
-                "{}: desktop {:?}, ours {:?}",
-                m.get("id").map(|v| v.to_string()).unwrap_or_default(),
-                want,
-                got
-            ));
+            r.wrong.push(Mismatch {
+                id: m.get("id").map(|v| v.to_string()).unwrap_or_default(),
+                want: want.clone(),
+                got: got.clone(),
+            });
             seen.insert(want.clone(), got);
         }
     }
     Ok(r)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mismatch(id: &str, want: &str) -> Mismatch {
+        Mismatch {
+            id: id.into(),
+            want: want.into(),
+            got: "stickers/sticker (1).webp".into(),
+        }
+    }
+
+    #[test]
+    fn the_known_custom_emoji_cascade_is_explained() {
+        let wrong: Vec<Mismatch> = KNOWN_UNMATCHED
+            .iter()
+            .map(|(id, want)| mismatch(id, want))
+            .collect();
+        assert!(unexplained(&wrong).is_empty());
+    }
+
+    #[test]
+    fn a_seventh_mismatch_is_not_explained() {
+        // The count-based ceiling could not tell these apart: six known plus one
+        // new still left `exact` one short, and one known replaced by one new
+        // left it exactly at the ceiling and passed.
+        let mut wrong: Vec<Mismatch> = KNOWN_UNMATCHED
+            .iter()
+            .map(|(id, want)| mismatch(id, want))
+            .collect();
+        wrong.push(mismatch("9999", "video_files/clip.mp4"));
+        assert_eq!(unexplained(&wrong).len(), 1);
+    }
+
+    #[test]
+    fn a_known_id_with_a_different_path_is_not_explained() {
+        let wrong = vec![mismatch("7392", "photos/photo_1@01-01-2025_00-00-00.jpg")];
+        assert_eq!(unexplained(&wrong).len(), 1);
+    }
 }
