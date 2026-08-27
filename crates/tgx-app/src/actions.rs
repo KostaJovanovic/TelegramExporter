@@ -454,7 +454,7 @@ pub async fn export(
         }
     };
 
-    let mut exporter = ChatExporter::new(&session.client, &settings);
+    let mut exporter = ChatExporter::new(&session.client, &settings, session.session());
 
     for chat in &chats {
         if cancel.is_cancelled() {
