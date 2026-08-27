@@ -30,28 +30,25 @@ pub fn expand(stripped: &[u8]) -> Option<Vec<u8>> {
     }
     let mut out = Vec::with_capacity(HEADER.len() + stripped.len() + 2);
     out.extend_from_slice(&HEADER);
-    out[WIDTH_OFFSET] = stripped[1];
-    out[HEIGHT_OFFSET] = stripped[2];
+    // stripped[1] to 164 and stripped[2] to 166, exactly as tdesktop does.
+    // Those offsets are the *height* and the *width*, in that order — see
+    // [`HEIGHT_OFFSET`]. The two constants used to be named the other way
+    // round, which left these two lines byte-correct and read backwards.
+    out[HEIGHT_OFFSET] = stripped[1];
+    out[WIDTH_OFFSET] = stripped[2];
     out.extend_from_slice(&stripped[3..]);
     out.extend_from_slice(&[0xff, 0xd9]);
     debug_assert!(out.starts_with(&[0xff, 0xd8]));
     Some(out)
 }
 
-/// The width and height a stripped payload encodes, without expanding it.
-pub fn dimensions(stripped: &[u8]) -> Option<(u8, u8)> {
-    if stripped.len() < 3 || stripped[0] != 1 {
-        return None;
-    }
-    Some((stripped[1], stripped[2]))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn payload(w: u8, h: u8, body: &[u8]) -> Vec<u8> {
-        let mut v = vec![1, w, h];
+    /// Height first: the payload is `[1, height, width]`, not `[1, w, h]`.
+    fn payload(h: u8, w: u8, body: &[u8]) -> Vec<u8> {
+        let mut v = vec![1, h, w];
         v.extend_from_slice(body);
         v
     }
@@ -70,8 +67,8 @@ mod tests {
         let out = expand(&payload(0x28, 0x1e, &[])).unwrap();
         for i in 0..HEADER.len() {
             let expected = match i {
-                WIDTH_OFFSET => 0x28,
-                HEIGHT_OFFSET => 0x1e,
+                HEIGHT_OFFSET => 0x28,
+                WIDTH_OFFSET => 0x1e,
                 _ => HEADER[i],
             };
             assert_eq!(out[i], expected, "header byte {i} changed unexpectedly");
@@ -104,15 +101,38 @@ mod tests {
     }
 
     #[test]
-    fn dimensions_are_readable_without_expanding() {
-        assert_eq!(dimensions(&payload(40, 30, &[])), Some((40, 30)));
-        assert_eq!(dimensions(&[0, 1, 2]), None);
+    fn the_offsets_are_decoded_from_sof0_rather_than_named_by_hand() {
+        // They were named the other way round, and that alone had produced a
+        // second bug: a dimensions() returning (height, width) under a doc
+        // comment promising (width, height). So walk the marker chain instead
+        // of trusting either name — SOF0 is `FF C0`, a 2-byte segment length,
+        // one precision byte, then height and width as big-endian 16-bit.
+        assert_eq!(HEADER.len(), 623);
+        let mut i = 2; // past SOI
+        let sof0 = loop {
+            assert_eq!(HEADER[i], 0xff, "not on a marker boundary at {i}");
+            if HEADER[i + 1] == 0xc0 {
+                break i;
+            }
+            let len = usize::from(u16::from_be_bytes([HEADER[i + 2], HEADER[i + 3]]));
+            i += 2 + len;
+        };
+        assert_eq!(sof0, 158);
+        let (height_field, width_field) = (sof0 + 5, sof0 + 7);
+        assert_eq!(HEIGHT_OFFSET, height_field + 1, "height's low byte");
+        assert_eq!(WIDTH_OFFSET, width_field + 1, "width's low byte");
+        assert_eq!((HEIGHT_OFFSET, WIDTH_OFFSET), (164, 166));
+        // The template ships both fields zeroed; expand fills them in.
+        assert_eq!(&HEADER[height_field..height_field + 2], &[0, 0]);
+        assert_eq!(&HEADER[width_field..width_field + 2], &[0, 0]);
     }
 
     #[test]
-    fn the_header_is_the_documented_size() {
-        assert_eq!(HEADER.len(), 623);
-        assert_eq!(WIDTH_OFFSET, 164);
-        assert_eq!(HEIGHT_OFFSET, 166);
+    fn the_second_payload_byte_is_the_height_not_the_width() {
+        // Cross-checked outside Rust: splicing 40 and 30 in this order and
+        // handing the result to Pillow reports a 30-wide, 40-tall image.
+        let out = expand(&payload(40, 30, &[0xaa; 100])).unwrap();
+        assert_eq!(u16::from_be_bytes([out[163], out[164]]), 40, "height");
+        assert_eq!(u16::from_be_bytes([out[165], out[166]]), 30, "width");
     }
 }

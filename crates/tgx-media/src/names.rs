@@ -79,9 +79,20 @@ pub fn sanitize_filename(name: &str, fallback: &str) -> String {
 /// Raw, it injects separators — and creating parent directories then makes the
 /// junk dirs — plus Windows-illegal characters that make the download fail,
 /// letting a sender guarantee their file is never saved.
+///
+/// It also has to end on the same trailing trim [`sanitize_filename`] does,
+/// **after** the 16-character cut. The extension is appended to a name that
+/// trim has already run on, so it was reintroducing exactly what that trim
+/// exists to remove: a document Telegram named `"invoice "` has no dot, so the
+/// hint is used whole and the result was `files/invoice.invoice ` — Windows
+/// drops the trailing space when it creates the file, and `result.json` then
+/// pointed at a name that is not the one on disk. That is the dangling class
+/// an existence check still answers true for, so it never reached
+/// `missing_media.txt` either.
 pub fn sanitize_extension(raw: &str) -> String {
     let tail = raw.rsplit('.').next().unwrap_or("");
     let cleaned: String = tail.chars().filter(|c| !is_illegal(*c)).take(16).collect();
+    let cleaned = cleaned.trim_end_matches(['.', ' ']);
     if cleaned.is_empty() {
         String::new()
     } else {
@@ -207,11 +218,6 @@ impl NameBook {
         self.used
             .insert(format!("{subdir}/{candidate}").to_lowercase());
         format!("{subdir}/{candidate}")
-    }
-
-    /// Is this path already spoken for?
-    pub fn is_claimed(&self, path: &str) -> bool {
-        self.used.contains(&path.to_lowercase())
     }
 
     /// Decide the file name, advancing the synthesised counter if needed.
@@ -346,6 +352,30 @@ mod tests {
         assert_eq!(sanitize_extension("a.we:rd"), ".werd");
         assert_eq!(sanitize_extension("noext"), ".noext");
         assert_eq!(sanitize_extension(""), "");
+    }
+
+    #[test]
+    fn an_extension_cannot_put_back_the_trailing_space_the_name_lost() {
+        // The extension is appended to a name sanitize_filename has already
+        // trimmed, so a trailing space here defeats that trim. Measured on the
+        // reported case: a document named "invoice " has no dot, the whole
+        // sanitised name is used as the hint, and the result was
+        // "invoice.invoice " — Windows creates "invoice.invoice" and
+        // result.json points at a name that is not on disk.
+        assert_eq!(sanitize_extension("invoice "), ".invoice");
+        assert_eq!(sanitize_extension("a.mp4 "), ".mp4");
+        assert_eq!(
+            sanitize_extension("a.mp4."),
+            "",
+            "the tail after the last dot"
+        );
+        assert_eq!(sanitize_extension(" "), "");
+        // And end to end, the way plan.rs and the media leg call it.
+        let raw = "invoice ";
+        let mut b = NameBook::new();
+        let name = b.reserve_name("files", Some(raw), "s", &sanitize_extension(raw));
+        assert_eq!(name, "invoice.invoice");
+        assert!(!name.ends_with(' '), "got {name}");
     }
 
     #[test]
