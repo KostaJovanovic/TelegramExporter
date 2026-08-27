@@ -434,6 +434,68 @@ fn a_file_skipped_for_size_still_renders_as_a_row() {
 }
 
 #[test]
+fn a_skipped_file_with_a_blur_thumbnail_shows_it() {
+    // The half of that rule nobody wrote. Telegram sends a blur thumbnail
+    // *inside* the message — no request, no size limit — and `plan.rs` has
+    // always written it to `thumbnails/` as `stripped_thumbnail`, while
+    // `writer.rs:468` has always known how to draw it from
+    // `_p.preview.stripped`. Nothing ever set that key, so the two halves never
+    // met: 1,364 JPEGs on disk in the last live run and not one displayed.
+    //
+    // No parity leg can see this. Desktop's `result.json` carries no
+    // `stripped_thumbnail`, so a replay never asks about it, which is why the
+    // test lives here rather than in tgx-parity.
+    let s = Settings {
+        size_limit_mb: 1,
+        ..Settings::default()
+    };
+    let media = photo_media(photo(1, 800, 600, 50 * 1024 * 1024), false);
+    let mut facts = plan::classify(&media, false).unwrap();
+    // A real stripped size arrives as Telegram's 3-byte-header form; `plan`
+    // stores whatever `stripped_of` expanded, and only its presence matters
+    // here.
+    facts.stripped = Some(vec![0xff, 0xd8, 1, 2, 3]);
+    let mut book = NameBook::new();
+    let (fields, job) = plan::plan(&facts, 1, "s", &mut book, &s);
+    assert!(
+        job.as_ref()
+            .is_some_and(|j| j.dest.starts_with("thumbnails/")),
+        "the plan must still queue the blur write"
+    );
+
+    let mut out = base_message(&message(1, 1_766_071_072), &names());
+    for (k, v) in fields {
+        out.insert(k, v);
+    }
+    let mut out = tgx_format::order::ordered(&out);
+    let p = tgx_tg::convert::presentation(&message(1, 1_766_071_072), &out, &names(), None)
+        .expect("a presentation map");
+    let preview = p["preview"].as_object().expect("a preview");
+    assert_eq!(preview["stripped"], true);
+    assert_eq!(preview["src"], out["stripped_thumbnail"]);
+    // 800x600 into the 260 box, same sizing as any other inline image.
+    assert_eq!(preview["width"], 260);
+    assert_eq!(preview["height"], 195);
+
+    // And it reaches the page as an <img>, with the row still below it saying
+    // why the file is not here.
+    out.insert("_p".into(), Value::Object(p));
+    let page = render(&out, "stripped");
+    assert!(page.contains("<img class=\"photo\""), "no <img>: {page}");
+    assert!(page.contains("thumbnails/"), "wrong src: {page}");
+    assert!(
+        page.contains("Exceeds maximum size"),
+        "the row must still say why: {page}"
+    );
+    // Both, in that order: the image shows what the file was, the row below it
+    // still says why it is not here. This is what `writer.rs:468` was written
+    // for and had never once been reached.
+    let img = page.find("<img class=\"photo\"").expect("an image");
+    let row = page.find("Exceeds maximum size").expect("a row");
+    assert!(img < row, "the row must sit below the preview");
+}
+
+#[test]
 fn the_presentation_map_never_reaches_result_json() {
     // `_p` is the one key in the map that Desktop does not write. If it ever
     // leaked, every message in `result.json` would gain a key and the json leg
