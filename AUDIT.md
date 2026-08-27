@@ -1146,3 +1146,83 @@ Smaller, all verified:
    before the next live run, so that run's report can be trusted.
 6. **20** is a decision rather than a fix: choose whether this tool tracks
    Desktop or supersedes it, then make the docs and the leg agree.
+
+---
+
+# What the 2026-08-27 remediation actually landed
+
+`PLAN.md` scheduled the section above into five phases. This records what was
+done, what it cost, and — more usefully — the four places where **the plan
+turned out to be wrong when the code was opened**, since those are the ones a
+future reader will otherwise repeat.
+
+## Where the plan was wrong
+
+- **`icacls /c` must not be added.** 1.4 said to pass `/t /c` so the ACL reaches
+  files that already exist. `/t` is right; `/c` is not. Measured on this machine:
+  `icacls <missing path> /t /c` exits **0** while printing "Failed processing 1
+  files", and the same command without `/c` exits **3**. `/c` would have turned
+  every partial failure into a reported success — precisely the state
+  `lockdown_error` exists to prevent — and parsing "Failed processing" out of the
+  text is not an option, because icacls is localised.
+- **Desktop's action names are not the snake-cased constructor.** 2.3 said the
+  explicit table should own the actions that carry a payload and a snake_case
+  fallback could supply the rest of the names. It cannot: Desktop writes
+  `create_group` for `ChatCreate`, `clear_history` for `HistoryClear`,
+  `joined_telegram` for `ContactSignUp`, `delete_group_photo` for
+  `ChatDeletePhoto`. Thirteen names were ported from the Python original, whose
+  table *is* a measurement against Desktop. The fallback covers the rest.
+- **A cancelled media batch needed a second change nobody scheduled.** Recording
+  every un-run job as a stated gap is right, but the transcript is a 2,000-line
+  ring whose whole purpose is that the INCOMPLETE warning can still be scrolled
+  to — and a Stop during the 1,781-file folder would have flushed it with "not
+  saved" lines. The listing is capped at twenty with a pointer to the file.
+- **Two `--force-with-lease` sites, not three**, and the third hit was prose.
+  Separately, CI's missing `-- -D warnings` was **already covered** by the
+  `RUSTFLAGS: -D warnings` at the top of the workflow — verified with a scratch
+  crate rather than reasoned about. It is spelled out anyway, because that chain
+  is three deniable steps long.
+
+## What each phase closed
+
+| phase | items | landed in |
+|---|---|---|
+| 0 — restore the ability to verify | 1, 2, 8, 13, 14 | `44738ed`, `eacef6f`, `ecf48bd`, `196f66c` |
+| 1 — the credential and startup path | 3, 11, 12, 25, 26, CLI | `023cb53`, `750a390` |
+| 2 — what the export writes | 4, 5, 17, 18, 31 (15 with 3.1) | `fba97f5`, `ccf4811`, `4778446`, `048fc73` |
+| 3 — lifecycle and cancellation | 6, 7, 9, 10, 21, 22, 23, 29, `Bridge::new` | `4778446`, `750a390`, `82b6c55` |
+| 4 — the oracle's own calibration | 16, 24, and the leg's own tests | `5b98057` |
+| 5 — hygiene | 19, 32, 33, the Low list | `63c08a8`, `582ec61`, and the crate sweeps |
+
+## The three numbers to check on the next live run
+
+`PLAN.md`'s prediction table stands. The three that matter most, because each
+was measured from the last run rather than reasoned about:
+
+| | before | predicted after |
+|---|---|---|
+| `absent` fields | 1,290 | **0** — 1,287 `thumbnail_file_size`, 3 `action` |
+| blur previews displayed | 0 of 1,364 | **1,364** |
+| empty `forwarded_from` | 94 across 13 people | **0**, at a cost of 13 requests |
+
+Write the observed numbers in beside them. Where reality disagrees, the
+prediction was wrong and that is the finding.
+
+## Still open, and deliberately
+
+- **D1–D4 in `PLAN.md` are decisions, not defects**, and none is made here.
+- **A sender's name is stamped as it stands now, not as it stood per message.**
+  Desktop records the name a person had *at each message*; we hold one name per
+  peer. Two users in the reference carry two names each in Desktop's export and
+  one in ours (`user6375985771`, `user7884540830`). This is a design change —
+  one name per peer *per message* — and it interacts with the wire leg's new
+  rename bucketing, which would otherwise file the difference as a rename.
+- **The Python's ~20 service-action payloads are not ported.** Only the names
+  are. `custom_action`'s message, `phone_call`'s duration, `gift_code`'s slug
+  and the rest would have to be reproduced against grammers' TL shapes with no
+  oracle, and the wire leg's new `extra` tally would score any wrong key. The
+  Python's `_action_fields` is the specification when someone takes it on.
+- **The `_p` blind spot in the html leg** is unchanged: it still lifts the
+  presentation map out of Desktop's own pages, so it proves the writer and not
+  the pipeline. `crates/tgx-tg/tests/wire.rs` is the compensating control and
+  gained the stripped-preview case.
