@@ -340,6 +340,16 @@ impl Session {
     /// Consumes the token `sign_in` stashed. On a wrong password grammers hands
     /// the token back, so the user can try again rather than restarting the
     /// whole sign-in.
+    ///
+    /// **It hands it back in `InvalidPassword`, not `PasswordRequired`.** The
+    /// two are distinct variants: `PasswordRequired` is Telegram *asking* for a
+    /// password and only ever comes out of `sign_in`, while `InvalidPassword`
+    /// is the answer to one that was wrong. Matching only the first meant the
+    /// wrong-password path fell to the generic arm, the token was dropped by
+    /// the `take()` above, and the next attempt failed with "two-factor sign-in
+    /// is not pending" — so one typo cost the whole exchange, including a fresh
+    /// SMS code. This is why the two variants are matched together and the
+    /// message is the same for both: from here they mean the same thing.
     pub async fn check_password(&mut self, password: &str) -> Result<LoginStep> {
         let token = self
             .password
@@ -356,17 +366,39 @@ impl Session {
                 self.remember_authorized(true).await;
                 Ok(LoginStep::Ready)
             }
-            Err(grammers_client::SignInError::PasswordRequired(token)) => {
-                self.password = Some(token);
-                Err(anyhow!("that password was not accepted"))
-            }
-            Err(e) => Err(anyhow!("checking the password: {e}")),
+            Err(e) => match Self::token_to_retry(e) {
+                Ok(token) => {
+                    self.password = Some(token);
+                    Err(anyhow!("that password was not accepted"))
+                }
+                Err(e) => Err(anyhow!("checking the password: {e}")),
+            },
         }
     }
 
     /// Is a two-factor step waiting for a password?
     pub fn awaiting_password(&self) -> bool {
         self.password.is_some()
+    }
+
+    /// Which sign-in errors hand a token back for another attempt.
+    ///
+    /// Split out from [`Self::check_password`] because it is the only part of
+    /// that function a test can reach without a signed-in account:
+    /// `PasswordToken::new` is public, so both token-bearing variants can be
+    /// built here even though the request that produces them cannot.
+    // `SignInError` is a large enum and clippy would rather it were boxed. It
+    // is grammers' type, not ours, and boxing it here would only move the size
+    // one level down while making both call sites read worse.
+    #[allow(clippy::result_large_err)]
+    fn token_to_retry(
+        e: grammers_client::SignInError,
+    ) -> Result<grammers_client::client::PasswordToken, grammers_client::SignInError> {
+        use grammers_client::SignInError as E;
+        match e {
+            E::InvalidPassword(t) | E::PasswordRequired(t) => Ok(t),
+            other => Err(other),
+        }
     }
 
     /// The signed-in account's own display name.
@@ -467,6 +499,49 @@ pub fn classify_error(e: &grammers_client::InvocationError) -> EnrichError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `PasswordToken` with nothing real in it.
+    ///
+    /// `PasswordToken::new` is public, which is the only reason the two-factor
+    /// retry path is testable at all: the *request* that produces this needs a
+    /// signed-in account, but the token it carries does not.
+    fn a_token() -> grammers_client::client::PasswordToken {
+        use grammers_tl_types as tl;
+        grammers_client::client::PasswordToken::new(tl::types::account::Password {
+            has_recovery: false,
+            has_secure_values: false,
+            has_password: true,
+            current_algo: None,
+            srp_b: None,
+            srp_id: None,
+            hint: Some("the usual".into()),
+            email_unconfirmed_pattern: None,
+            new_algo: tl::enums::PasswordKdfAlgo::Unknown,
+            new_secure_algo: tl::enums::SecurePasswordKdfAlgo::Unknown,
+            secure_random: vec![],
+            pending_reset_date: None,
+            login_email_pattern: None,
+        })
+    }
+
+    #[test]
+    fn a_wrong_two_factor_password_hands_the_token_back() {
+        // grammers answers a *wrong* password with `InvalidPassword(token)`;
+        // `PasswordRequired(token)` is Telegram *asking* and only ever comes out
+        // of `sign_in`. Matching only the second meant the wrong-password path
+        // fell to the generic arm, the token was already consumed by `take()`,
+        // and the next attempt failed with "two-factor sign-in is not pending"
+        // — one typo costing the whole exchange, including a fresh SMS code.
+        use grammers_client::SignInError as E;
+        assert!(
+            Session::token_to_retry(E::InvalidPassword(a_token())).is_ok(),
+            "a wrong password must leave the user able to try again"
+        );
+        assert!(Session::token_to_retry(E::PasswordRequired(a_token())).is_ok());
+        // And an error with no token in it is still an error.
+        assert!(Session::token_to_retry(E::InvalidCode).is_err());
+        assert!(Session::token_to_retry(E::SignUpRequired).is_err());
+    }
 
     #[test]
     fn a_missing_count_is_not_a_count_of_zero() {

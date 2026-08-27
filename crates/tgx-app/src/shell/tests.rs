@@ -4,7 +4,7 @@
 //! painting, and each one is a bug that was found the expensive way.
 
 use super::*;
-use crate::bridge::Event;
+use crate::bridge::{Activity, Event};
 use crate::queue::JobState;
 use tgx_tg::client::ChatKind;
 use tgx_ui::components::{selection_label, ListState};
@@ -258,7 +258,10 @@ fn a_run_that_could_not_start_says_why_and_not_only_how_many() {
     let mut s = shell_with(vec![chat(1, "a", None)]);
     s.exporting = true;
     s.queue.start([(1, "a".to_string())]);
-    s.apply(Event::Failed("cannot write into D:\\gone".into()));
+    s.apply(Event::Failed {
+        activity: Activity::Export,
+        message: "cannot write into D:\\gone".into(),
+    });
     s.apply(Event::Finished { stopped: true });
     assert!(
         s.status.as_ref().contains("cannot write into"),
@@ -267,6 +270,65 @@ fn a_run_that_could_not_start_says_why_and_not_only_how_many() {
     );
     // And the cause is spent, so the next clean run is not haunted by it.
     assert!(s.failure.is_none());
+}
+
+#[test]
+fn a_sign_in_failing_mid_export_does_not_stop_the_export() {
+    // `Failed` was a global switch: any sender cleared `exporting` and
+    // `counting`, and five senders share it. A sign-in probe that could not
+    // reach Telegram while an export ran made the window believe the export had
+    // stopped — the Stop button vanished, the bar froze — while the export went
+    // on writing files until its own `Finished` put the state back.
+    let mut s = shell_with(vec![chat(1, "a", None)]);
+    s.exporting = true;
+    s.counting = true;
+    s.apply(Event::Failed {
+        activity: Activity::SignIn,
+        message: "Telegram did not answer".into(),
+    });
+    assert!(s.exporting, "a sign-in failure is not an export failure");
+    assert!(s.counting, "nor a count failure");
+    // It is still reported.
+    assert!(s.status.as_ref().contains("did not answer"));
+    // And it is not the export's stated cause, so it cannot reach the run's
+    // summary line.
+    assert!(s.failure.is_none());
+
+    // The count's own failure does stop the count, and only the count.
+    s.apply(Event::Failed {
+        activity: Activity::Count,
+        message: "rate limited".into(),
+    });
+    assert!(!s.counting);
+    assert!(s.exporting);
+}
+
+#[test]
+fn a_failure_from_the_last_run_does_not_reach_the_next_ones_summary() {
+    // `failure` is appended to the run's summary and was only ever cleared by
+    // the `Finished` that consumed it — so a run that ended some other way left
+    // its cause behind to be reported as the reason the *next* run ended.
+    let mut s = shell_with(vec![chat(1, "a", None)]);
+    s.failure = Some("cannot write into D:\\gone".into());
+    s.begin_run();
+    assert!(s.failure.is_none(), "a stale cause survived into a new run");
+}
+
+#[test]
+fn a_failed_chat_says_which_chat() {
+    // The transcript prefixes every other line with the chat. This one did not,
+    // so "no messages could be read" in a twenty-chat queue named none of them
+    // — and the queue table that does know is a different panel, sorted
+    // differently.
+    let mut s = shell_with(vec![chat(1, "news", None), chat(2, "other", None)]);
+    s.queue
+        .start([(1, "news".to_string()), (2, "other".to_string())]);
+    s.apply(Event::ChatFailed {
+        chat_id: 2,
+        message: "no messages could be read".into(),
+    });
+    let last = s.journal.to_text();
+    assert!(last.contains("other: no messages could be read"), "{last}");
 }
 
 #[test]

@@ -19,7 +19,7 @@ mod run;
 mod settings;
 mod signin;
 
-use crate::bridge::{Bridge, Event};
+use crate::bridge::{Activity, Bridge, Event};
 use crate::journal::Journal;
 use crate::list::{self, Category, SortMode};
 use crate::login::{LoginDialog, Stage};
@@ -251,8 +251,25 @@ impl Shell {
 
     fn with_settings(settings: Settings) -> Self {
         let palette = Palette::named(&settings.theme);
-        let bridge = crate::bridge::Bridge::new()
-            .expect("a tokio runtime is required for any Telegram work");
+        // **Reported, not panicked.** This runs before `WINDOW_OPENED` is set,
+        // so a panic here takes the hook's other branch and tells the user
+        // their GPU needs working DirectX drivers — for a failure to spawn two
+        // worker threads, which has nothing to do with the renderer and would
+        // send them to fix a graphics card that is fine. `report_startup_failure`
+        // is the path every other startup failure already takes, and it reaches
+        // `startup-error.log`, which is the only channel that survives a
+        // double-click.
+        let bridge = match crate::bridge::Bridge::new() {
+            Ok(b) => b,
+            Err(e) => {
+                crate::report_startup_failure(&format!(
+                    "TelegramExporter could not start its background worker: {e}\n\
+                     Nothing that talks to Telegram can run without it. This is \
+                     not a graphics problem."
+                ));
+                std::process::exit(1);
+            }
+        };
         let view = list::View {
             sort: SortMode::from_key(&settings.sort_mode),
             grouped: settings.group_by_type,
@@ -495,7 +512,15 @@ impl Shell {
                 // truncated run must not leave its own length behind as the
                 // size of the chat.
                 self.queue.failed(chat_id, message.clone());
-                self.journal.warn(message);
+                // Prefixed with the chat, like every other line in the
+                // transcript. Unprefixed, "no messages could be read" in a
+                // twenty-chat queue named none of them — and the queue table
+                // that does know is a different panel, sorted differently.
+                let line = match self.queue.title_of(chat_id) {
+                    Some(title) => format!("{title}: {message}"),
+                    None => message,
+                };
+                self.journal.warn(line);
             }
 
             Event::FloodWait(seconds) => {
@@ -523,12 +548,27 @@ impl Shell {
                 };
                 self.rebuild_rows();
             }
-            Event::Failed(msg) => {
-                self.exporting = false;
-                self.counting = false;
-                self.status = format!("Failed: {msg}").into();
-                self.failure = Some(msg.clone());
-                self.journal.warn(msg);
+            // **Only the activity that failed is switched off.** This used to
+            // clear `exporting` and `counting` on every `Failed`, whoever sent
+            // it — five senders share the variant — so a sign-in probe that
+            // could not reach Telegram while an export was running made the
+            // window believe the export had stopped: the Stop button vanished,
+            // the progress bar froze, and the export went on writing files
+            // until its own `Finished` put the state back.
+            //
+            // `failure` is likewise the export's, because the only reader is
+            // the export's own summary line.
+            Event::Failed { activity, message } => {
+                match activity {
+                    Activity::Export => {
+                        self.exporting = false;
+                        self.failure = Some(message.clone());
+                    }
+                    Activity::Count => self.counting = false,
+                    Activity::SignIn | Activity::Chats => {}
+                }
+                self.status = format!("Failed: {message}").into();
+                self.journal.warn(message);
             }
         }
     }
@@ -741,6 +781,24 @@ impl Shell {
             .spawn(async move { crate::actions::count_chats(settings, ids, cancel, tx).await });
     }
 
+    /// The per-run state a new export resets.
+    ///
+    /// Split out of [`Self::start_export`] because that needs a `Window` and
+    /// this does not, so the reset can be tested — which matters most for
+    /// `failure`, whose whole failure mode is being *left set*.
+    fn begin_run(&mut self) {
+        // An export is the longer job and it claims the progress bar here.
+        // While `exporting` is set, no other handler may write to it.
+        self.cancel.reset();
+        self.exporting = true;
+        // **Cleared on the way in, not on the way out.** `failure` is appended
+        // to the run's summary, so a cause left over from an earlier run — a
+        // sign-in that could not reach Telegram, a destination that was
+        // unwritable last time — was reported as the reason *this* run ended.
+        self.failure = None;
+        self.count_progress = None;
+    }
+
     fn start_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Whatever is in the fields is what the run should use, so the fields
         // are read here rather than trusted to have been committed already.
@@ -763,9 +821,7 @@ impl Shell {
 
         // An export is the longer job and it claims the progress bar here.
         // While `exporting` is set, no other handler may write to it.
-        self.cancel.reset();
-        self.exporting = true;
-        self.count_progress = None;
+        self.begin_run();
         self.queue
             .start(queue.iter().map(|c| (c.id, c.title.clone())));
         self.status = format!("Exporting {} chats…", queue.len()).into();
@@ -861,7 +917,18 @@ impl Shell {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         match i {
                             0 => this.stop(),
-                            1 => crate::actions::open_output_folder(&this.settings.output_dir),
+                            // Reported, not discarded. A silent spawn failure
+                            // is what let `explorer.exe` be looked for in
+                            // System32 — where it is not — for as long as
+                            // nobody happened to watch the button do nothing.
+                            1 => {
+                                if let Err(e) =
+                                    crate::actions::open_output_folder(&this.settings.output_dir)
+                                {
+                                    this.journal.warn(e);
+                                    this.log_copied = false;
+                                }
+                            }
                             _ => {}
                         }
                         cx.notify();
