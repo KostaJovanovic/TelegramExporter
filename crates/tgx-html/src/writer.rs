@@ -11,7 +11,7 @@ use crate::inline::render_entities;
 use crate::join::{parse_date, JoinKey, JoinState};
 use crate::media::{file_row, is_placeholder, row_fields};
 use crate::page::{close_page, open_page, page_name, utc_suffix, PageChrome};
-use crate::preview::{preview_size, MIN_INLINE_PHOTO, PREVIEW_BOX, STICKER_BOX};
+use crate::preview::MIN_INLINE_PHOTO;
 use crate::reactions;
 use crate::service::service_text;
 use crate::tree::{a, Tree};
@@ -46,7 +46,6 @@ pub struct HtmlWriter {
     tree: Option<Tree>,
     page: usize,
     on_page: usize,
-    pub total: usize,
 
     last_day: Option<String>,
     join: JoinState,
@@ -71,7 +70,6 @@ impl HtmlWriter {
             tree: None,
             page: 0,
             on_page: 0,
-            total: 0,
             last_day: None,
             join: JoinState::default(),
             last_group: None,
@@ -234,7 +232,6 @@ impl HtmlWriter {
             self.page_of.insert(id, self.page);
         }
         self.on_page += 1;
-        self.total += 1;
         Ok(())
     }
 
@@ -455,11 +452,18 @@ fn render_media(t: &mut Tree, m: &Map<String, Value>, p: &Presentation) {
             )
         })
         .unwrap_or_default();
+    // `escape.rs` states the rule absolutely: every URL that reaches markup goes
+    // through `safe_href`. This one did not. **It is not reachable from hostile
+    // input today** — the preview `src` is a path our own media planner built,
+    // and the parity harness lifts it out of a reference export — so this closes
+    // the gap between the rule and the code rather than a live hole. The five
+    // `<img>` sites below all read this one binding, so there is no second place
+    // for the next one to be forgotten.
     let src = preview
         .and_then(|pv| pv.get("src"))
         .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
+        .and_then(safe_href)
+        .unwrap_or_default();
 
     // A file we did not save, whose blur preview came free inside the message.
     // Both are drawn: the image shows what the file was, the row below it still
@@ -588,26 +592,6 @@ fn render_media(t: &mut Tree, m: &Map<String, Value>, p: &Presentation) {
     if let Some(row) = row_fields(m) {
         file_row(t, &row);
     }
-}
-
-/// The preview an inline `<img>` should get, for a caller that has the message
-/// but not Desktop's own choice of file name.
-pub fn preview_box_for(media_type: &str) -> i64 {
-    if media_type == "sticker" {
-        STICKER_BOX
-    } else {
-        PREVIEW_BOX
-    }
-}
-
-/// `(css width, css height)` for a message's inline preview.
-pub fn css_preview_size(m: &Map<String, Value>, media_type: &str) -> (i64, i64) {
-    let (_, css) = preview_size(
-        int_of(m, "width"),
-        int_of(m, "height"),
-        preview_box_for(media_type),
-    );
-    css
 }
 
 #[cfg(test)]
@@ -812,6 +796,51 @@ mod tests {
         );
         assert!(
             out.contains("style=\"width: 192px; height: 192px\""),
+            "got:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_preview_src_goes_through_safe_href_like_every_other_url() {
+        // Not reachable from a message today — the src is a path our own
+        // planner built — but `escape.rs` allows no exception, and this is the
+        // <img> path that used to be one.
+        let out = render_one(json!({
+            "id": 1, "type": "message", "date": "2025-12-18T16:00:00",
+            "from": "A", "from_id": "user1",
+            "file": "stickers/sticker.webp", "media_type": "sticker",
+            "width": 512, "height": 512,
+            "_p": { "preview": { "src": "javascript:alert(1)",
+                                 "width": 192, "height": 192 } }
+        }));
+        assert!(!out.contains("javascript:"), "got:\n{out}");
+        assert!(out.contains("src=\"\""), "got:\n{out}");
+        // A host-relative target resolves to a UNC path under file://.
+        let unc = render_one(json!({
+            "id": 1, "type": "message", "date": "2025-12-18T16:00:00",
+            "from": "A", "from_id": "user1",
+            "file": "stickers/sticker.webp", "media_type": "sticker",
+            "width": 512, "height": 512,
+            "_p": { "preview": { "src": "//evil.example/x.png",
+                                 "width": 192, "height": 192 } }
+        }));
+        assert!(!unc.contains("evil.example"), "got:\n{unc}");
+    }
+
+    #[test]
+    fn an_ordinary_preview_src_is_unchanged() {
+        // safe_href trims and scheme-checks; it must not touch a real path,
+        // spaces included — Desktop writes "stickers/sticker (55).webp".
+        let out = render_one(json!({
+            "id": 1, "type": "message", "date": "2025-12-18T16:00:00",
+            "from": "A", "from_id": "user1",
+            "file": "stickers/sticker (55).webp", "media_type": "sticker",
+            "width": 512, "height": 512,
+            "_p": { "preview": { "src": "stickers/sticker (55).webp",
+                                 "width": 192, "height": 192 } }
+        }));
+        assert!(
+            out.contains("src=\"stickers/sticker (55).webp\""),
             "got:\n{out}"
         );
     }

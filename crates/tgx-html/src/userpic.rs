@@ -48,10 +48,6 @@ impl<'a> Presentation<'a> {
     pub fn colour(&self, peer: &str) -> Option<i64> {
         self.map?.get("colours")?.as_object()?.get(peer)?.as_i64()
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.map.is_none_or(|m| m.is_empty())
-    }
 }
 
 /// CSS index for a peer's userpic colour.
@@ -65,12 +61,26 @@ pub fn userpic_class(from_id: &str, override_colour: Option<i64>) -> i64 {
     if let Some(c) = override_colour {
         return c + 1;
     }
-    let digits: String = from_id.chars().filter(char::is_ascii_digit).collect();
-    match digits.parse::<i64>() {
-        Ok(n) => userpic_colour(n) as i64,
+    let bytes = from_id.as_bytes();
+    let Some(first) = bytes.iter().position(u8::is_ascii_digit) else {
         // No digits at all: fall back to the first palette entry.
-        Err(_) => userpic_colour(0) as i64,
+        return userpic_colour(0) as i64;
+    };
+    // Reduced digit by digit rather than parsed. `from_id` is text off the
+    // wire, and `parse::<i64>()` fails on anything past nineteen digits — which
+    // sent every over-long id to the *no-digits* branch, so a hostile id could
+    // pick its own userpic colour by being long. The residue mod 7 is the whole
+    // of what `userpic_colour` needs, and it cannot overflow.
+    let mut rem: i64 = 0;
+    for d in bytes[first..].iter().filter(|b| b.is_ascii_digit()) {
+        rem = (rem * 10 + i64::from(d - b'0')) % 7;
     }
+    // The sign was dropped by the digit filter, leaving `userpic_colour`'s
+    // `rem_euclid` reachable only from its own test.
+    if first > 0 && bytes[first - 1] == b'-' {
+        rem = -rem;
+    }
+    userpic_colour(rem) as i64
 }
 
 /// The letters for a peer: lifted if the harness had them, derived otherwise.
@@ -158,11 +168,26 @@ mod tests {
     }
 
     #[test]
-    fn a_gigantic_id_does_not_overflow() {
-        // Channel ids run into the billions; a 30-digit string must not panic.
-        let huge = "user".to_string() + &"9".repeat(30);
-        let c = userpic_class(&huge, None);
-        assert!((1..=8).contains(&c), "got {c}");
+    fn a_gigantic_id_gets_its_own_colour_not_the_fallback() {
+        // `parse::<i64>()` returns Err past nineteen digits, and Err was the
+        // no-digits branch — so every over-long id silently landed on palette
+        // entry 0 rather than on its own colour. The old test asserted only
+        // `(1..=8).contains(c)`, which the fallback satisfies, so it could not
+        // see this. 10^30 ≡ 1 (mod 7), because 10^6 ≡ 1 and 6 divides 30.
+        let huge = "user1".to_string() + &"0".repeat(30);
+        assert_eq!(userpic_class(&huge, None), userpic_colour(1) as i64);
+        assert_ne!(userpic_class(&huge, None), userpic_colour(0) as i64);
+    }
+
+    #[test]
+    fn a_negative_id_keeps_its_sign() {
+        // The digit filter dropped the minus, so `userpic_colour`'s deliberate
+        // `rem_euclid` — and the test that pins it — was unreachable from the
+        // only caller it has. No negative `from_id` appears in the reference,
+        // so this is consistency with `userpic_colour`, not a measured case.
+        assert_eq!(userpic_class("user-1", None), userpic_colour(-1) as i64);
+        assert_eq!(userpic_class("user-8", None), userpic_colour(-8) as i64);
+        assert_ne!(userpic_class("user-1", None), userpic_class("user1", None));
     }
 
     #[test]
@@ -178,7 +203,6 @@ mod tests {
     fn a_message_with_no_presentation_dict_is_harmless() {
         let m = obj(json!({ "id": 1 }));
         let p = Presentation::of(&m);
-        assert!(p.is_empty());
         assert_eq!(p.colour("user1"), None);
         assert_eq!(p.initials("user1"), None);
         assert_eq!(letters(&p, "user1", "A B"), "AB");

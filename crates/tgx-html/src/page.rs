@@ -6,7 +6,7 @@
 //! boundary landed, and they come out right only if the counter advances once
 //! per message including service messages and date dividers do **not** count.
 
-use crate::escape::esc;
+use crate::escape::{esc, safe_href};
 use crate::tree::{a, Tree};
 
 /// `messages.html`, then `messages2.html`, `messages3.html`, …
@@ -89,11 +89,17 @@ pub fn open_page(t: &mut Tree, chrome: &PageChrome, page: usize) {
     t.open("div", &[a("class", "page_header")]);
     t.open("div", &[a("class", "content")]);
     // The trailing space is Desktop's: its header slot always ends with one.
-    match &chrome.back_href {
+    //
+    // `back_href` goes through `safe_href` for the same reason the media links
+    // do — `escape.rs` allows no exceptions. **Nothing hostile can reach it**:
+    // the only caller is `tgx-tg`'s output, which passes a relative path to the
+    // index page it wrote itself. A target that fails the check drops back to
+    // the plain, unlinked header rather than emitting a dead `<a>`.
+    match chrome.back_href.as_deref().and_then(safe_href) {
         Some(href) => t.leaf(
             "a",
             &format!("&lsaquo; {} ", esc(&chrome.title)),
-            &[a("class", "text bold"), a("href", href.clone())],
+            &[a("class", "text bold"), a("href", href)],
         ),
         None => t.leaf(
             "div",
@@ -170,6 +176,42 @@ mod tests {
             "the trailing space is Desktop's and it is load-bearing:\n{}",
             t.as_str()
         );
+    }
+
+    #[test]
+    fn a_back_link_is_scheme_checked_like_every_other_href() {
+        // Only tgx-tg sets this, and it sets a relative path to the index it
+        // just wrote — so nothing hostile reaches here. The rule in escape.rs
+        // has no exceptions all the same, and an unusable target drops back to
+        // the plain header instead of emitting a dead link.
+        let mut t = Tree::new();
+        open_page(
+            &mut t,
+            &PageChrome {
+                title: "x".into(),
+                back_href: Some("javascript:alert(1)".into()),
+            },
+            1,
+        );
+        assert!(!t.as_str().contains("javascript:"), "{}", t.as_str());
+        assert!(!t.as_str().contains("<a "), "{}", t.as_str());
+
+        // The ordinary case still links.
+        let mut ok = Tree::new();
+        open_page(
+            &mut ok,
+            &PageChrome {
+                title: "x".into(),
+                back_href: Some("../export_results.html".into()),
+            },
+            1,
+        );
+        assert!(
+            ok.as_str().contains("href=\"../export_results.html\""),
+            "{}",
+            ok.as_str()
+        );
+        assert!(ok.as_str().contains("&lsaquo; x "), "{}", ok.as_str());
     }
 
     #[test]

@@ -9,5 +9,4 @@ description = "Telegram Desktop's export JSON schema. No I/O, no network, no UI.
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-indexmap = { workspace = true }
 chrono = { workspace = true }

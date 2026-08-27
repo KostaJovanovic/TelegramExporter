@@ -53,12 +53,6 @@ impl PeerKey {
         }
     }
 
-    /// The bare peer number — what the chat `id` header carries, and what the
-    /// userpic colour is computed from. Never the bot-API `-100…` form.
-    pub fn raw_id(&self) -> i64 {
-        self.id
-    }
-
     /// Parse the `user123` form back. Used by the parity harness, which reads
     /// `from_id` out of a reference `result.json` as a string.
     pub fn parse(s: &str) -> Option<Self> {

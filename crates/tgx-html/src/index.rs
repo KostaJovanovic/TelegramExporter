@@ -89,7 +89,7 @@ pub fn plural(n: usize, word: &str) -> String {
 /// here.
 ///
 /// The assets go down first, exactly as the topic pages do it
-/// ([`crate::writer::HtmlWriter::finish`] calls the same function): this page
+/// ([`crate::writer::HtmlWriter::close`] calls the same function): this page
 /// links `css/style.css`, and an index written into a folder whose export
 /// failed before its pages were flushed would otherwise be an unstyled wall of
 /// text. `write_assets` skips images that are already there at the right size,
