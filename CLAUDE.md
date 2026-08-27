@@ -70,8 +70,17 @@ runs all three legs as an ordinary `cargo test`, sha256-checked against
 `MANIFEST.txt`.
 
 `reference/` is gitignored: it is verbatim chat history from real people and
-this repo has a CI workflow. Without it the corpus test **skips and says so** —
-if you see `no corpus at …` in test output, the parity legs did not run.
+this repo has a CI workflow. Without it the corpus test skips — and *where* that
+skip is visible matters, because libtest discards stdout and stderr for a
+passing test, so for a long time it was visible nowhere:
+
+- `save.bat` sets **`TGX_REQUIRE_CORPUS=1`**, which turns a missing corpus into
+  a panic. This machine owns the export; "the legs did not run" here is a broken
+  setup, not a fact of life. `set TGX_REQUIRE_CORPUS=0` opts back out.
+- CI runs `cargo test --all -- --nocapture` *and* raises a
+  `::warning::` annotation, which lands on the run summary.
+- A plain `cargo test --all` still skips silently, and that is deliberate: a
+  fresh clone has to be able to run the suite.
 
 A corpus cannot be trimmed to "a few interesting messages": pagination and
 message joining are cumulative down a topic, so page 3 only reproduces if pages
