@@ -182,3 +182,38 @@ pub fn photo_media(p: tl::types::Photo, spoiler: bool) -> tl::enums::MessageMedi
         video: None,
     })
 }
+
+/// A link preview carrying an image, a file, or neither.
+pub fn webpage_media(
+    photo: Option<tl::types::Photo>,
+    document: Option<tl::types::Document>,
+) -> tl::enums::MessageMedia {
+    tl::enums::MessageMedia::WebPage(tl::types::MessageMediaWebPage {
+        force_large_media: false,
+        force_small_media: false,
+        manual: false,
+        safe: false,
+        webpage: tl::enums::WebPage::Page(tl::types::WebPage {
+            has_large_media: false,
+            video_cover_photo: false,
+            id: 9,
+            url: "https://example.invalid/a".into(),
+            display_url: "example.invalid/a".into(),
+            hash: 0,
+            r#type: Some("photo".into()),
+            site_name: None,
+            title: None,
+            description: None,
+            photo: photo.map(tl::enums::Photo::Photo),
+            embed_url: None,
+            embed_type: None,
+            embed_width: None,
+            embed_height: None,
+            duration: None,
+            author: None,
+            document: document.map(tl::enums::Document::Document),
+            cached_page: None,
+            attributes: None,
+        }),
+    })
+}

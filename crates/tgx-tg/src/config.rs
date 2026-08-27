@@ -461,11 +461,25 @@ fn restrict_to_current_user(dir: &std::path::Path) -> bool {
         return false;
     };
 
-    // `/t`: apply to what is already in the folder, not only to the folder. A
-    // `dist\` copied from another machine, or restored from a backup, carries
-    // inherited ACEs on `session` itself — and `session` is the bearer
-    // credential. Changing the container's ACL leaves those untouched, so the
-    // one file that matters kept the permissions it arrived with.
+    // **Two calls, and `/t` is not on the first one.**
+    //
+    // `(OI)` and `(CI)` are *inheritance* flags: they say what a container
+    // hands down to the things inside it, and they mean nothing on a file.
+    // Combining them with `/t` — which walks into every file — was measured to
+    // leave `session` with an **empty DACL**: `/inheritance:r` stripped the
+    // inherited ACE from the file, and the `(OI)(CI)F` grant did not apply to
+    // it, so nothing replaced what was removed. The result is a bearer
+    // credential nobody can open, including its owner, and SQLite reports it as
+    // error 14 — `SQLITE_CANTOPEN` — from inside `Session::connect`.
+    //
+    // That is worse than the gap it was added to close: the folder went from
+    // "possibly too permissive" to "unusable", and the app could not sign in at
+    // all. The lockdown must never be able to lock the user out.
+    //
+    // So: set the container's ACL, then make the existing children inherit it.
+    // `/inheritance:e` on a file *restores* the inherited ACE rather than
+    // granting a new explicit one, which is why the second call needs no
+    // grantee and cannot repeat the mistake.
     //
     // **Deliberately not `/c`.** It reads like the right companion to `/t` —
     // carry on past a file you could not touch — but measured on this machine,
@@ -476,22 +490,43 @@ fn restrict_to_current_user(dir: &std::path::Path) -> bool {
     // failure matters more than finishing the remaining two or three files, and
     // parsing "Failed processing" out of the text is not an option: icacls is
     // localised.
-    let spawned = std::process::Command::new(system32("icacls.exe"))
-        .arg(dir)
-        .arg("/inheritance:r")
-        .arg("/grant:r")
-        .arg(format!("{grantee}:(OI)(CI)F"))
-        .arg("/t")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn();
-
-    let failure = match spawned {
-        Err(e) => Some(e.to_string()),
-        Ok(child) => wait_bounded(child),
+    let run = |args: Vec<std::ffi::OsString>| -> Option<String> {
+        let spawned = std::process::Command::new(system32("icacls.exe"))
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
+        match spawned {
+            Err(e) => Some(e.to_string()),
+            Ok(child) => wait_bounded(child),
+        }
     };
+
+    // 1. The container itself, with the flags that make *future* files inherit.
+    let mut failure = run(vec![
+        dir.as_os_str().to_owned(),
+        "/inheritance:r".into(),
+        "/grant:r".into(),
+        format!("{grantee}:(OI)(CI)F").into(),
+    ]);
+
+    // 2. What is already inside it — a `dist\` copied from another machine, or
+    //    restored from a backup, carries whatever ACEs it arrived with, and
+    //    `session` is the file that matters. Re-enabling inheritance points
+    //    those at the ACL just set above.
+    //
+    //    Skipped when the first call failed, because the ACE the children would
+    //    inherit is then not the one we wanted.
+    if failure.is_none() {
+        failure = run(vec![
+            dir.as_os_str().to_owned(),
+            "/inheritance:e".into(),
+            "/t".into(),
+        ]);
+    }
+
     if let Some(why) = &failure {
         log::warn!("could not restrict {} to your user: {why}", dir.display());
     }
@@ -717,6 +752,50 @@ mod tests {
         assert!(!g.contains('%'), "{g}");
         assert!(!g.is_empty());
         assert!(!g.ends_with('\\'), "a domain with no user: {g}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_lockdown_leaves_the_files_inside_readable_by_their_owner() {
+        // **The lockdown must never be able to lock the user out.** Combining
+        // `(OI)(CI)F` — inheritance flags, meaningful only on a container —
+        // with `/t`, which walks into every file, left `session` with an empty
+        // DACL: `/inheritance:r` stripped the file's inherited ACE and the
+        // grant did not apply to a file, so nothing replaced it. The folder
+        // went from "possibly too permissive" to "unusable", and the app could
+        // not sign in at all — SQLite answered `Session::connect` with error
+        // 14, `SQLITE_CANTOPEN`, on a file the owner was standing right next
+        // to.
+        //
+        // Reading a file back is the only check that catches that. Asserting
+        // on the exit status does not: icacls reported success while producing
+        // exactly this state.
+        let dir = data_dir().join("lockdown-check-4e91");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("creating the probe directory");
+        let file = dir.join("session");
+        std::fs::write(&file, b"not a real credential").expect("writing the probe file");
+
+        let saved = lockdown_error();
+        let ok = restrict_to_current_user(&dir);
+        set_lockdown_error(saved);
+
+        // A machine with no ACL support at all — FAT32, exFAT — is a
+        // documented, survivable case and not what this is about.
+        if ok {
+            let read = std::fs::read(&file);
+            let cleanup = std::fs::remove_dir_all(&dir);
+            assert!(
+                read.is_ok(),
+                "the lockdown reported success and made {} unreadable by its \
+                 own owner: {:?}",
+                file.display(),
+                read.err()
+            );
+            assert!(cleanup.is_ok(), "the probe directory could not be removed");
+        } else {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[cfg(windows)]

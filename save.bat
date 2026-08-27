@@ -74,6 +74,7 @@ if /i "%ACTION%"=="tests"   goto test
 if /i "%ACTION%"=="parity"  goto parity
 if /i "%ACTION%"=="corpus"  goto corpus
 if /i "%ACTION%"=="wire"    goto wire
+if /i "%ACTION%"=="clean"   goto clean
 
 :menu
 echo.
@@ -89,11 +90,12 @@ echo   7  test     fmt + clippy + every suite
 echo   8  parity   diff against a real Desktop export
 echo   9  corpus   cut the 7.8 MB parity corpus out of that export
 echo   10 wire     diff a live export against the reference run
-echo   11 quit
+echo   11 clean    report the build cache, and empty it
+echo   12 quit
 echo.
 echo   save.bat --force  runs save and force-with-lease pushes without asking
 echo.
-set /p CHOICE=select [1-11]:
+set /p CHOICE=select [1-12]:
 if "%CHOICE%"=="1" goto save
 if "%CHOICE%"=="2" (set "COMMIT_ONLY=1" & goto save)
 if "%CHOICE%"=="3" goto push
@@ -104,7 +106,8 @@ if "%CHOICE%"=="7" goto test
 if "%CHOICE%"=="8" goto parity
 if "%CHOICE%"=="9" goto corpus
 if "%CHOICE%"=="10" goto wire
-if "%CHOICE%"=="11" exit /b 0
+if "%CHOICE%"=="11" goto clean
+if "%CHOICE%"=="12" exit /b 0
 echo [err]  invalid choice
 goto menu
 
@@ -309,6 +312,13 @@ for /f %%s in ('powershell -NoProfile -Command "'{0:N1}' -f ((Get-Item 'dist\%EX
 echo.
 echo [ok]   dist\%EXENAME%  %EXESIZE% MB
 echo        (the PyInstaller build of the Python original was 46.4 MB)
+
+rem The cache, reported where somebody will actually read it. target\ reached
+rem 45 GB without a single line of this script ever mentioning it, and cargo
+rem never garbage-collects: nothing was going to notice on its own. A few
+rem seconds of scan on the back of a release build is a fair price for that
+rem never happening again, and `save.bat clean` is what to do about the number.
+call :dirsize "target" "target        "
 goto end
 
 
@@ -416,6 +426,68 @@ goto end
 
 
 rem ---------------------------------------------------------------------------
+rem target\ is a cache, and cargo never garbage-collects it: a dep bump, a
+rem feature change or a toolchain move gives an artifact a new metadata hash and
+rem the old one stays for good. Nothing here ever reported the total, so it
+rem reached **45 GB** unremarked -- 41 of it target\debug, and 16 GB of that was
+rem stale generations nothing could link again. The report is the point; the
+rem clean is just what you do about it. Sizes are read once and printed even if
+rem you then pick "nothing", because knowing the number is most of the fix.
+:clean
+echo.
+echo === clean: the build cache ===
+echo.
+call :checkcargo
+if errorlevel 1 goto end
+call :dirsize "target\debug"   "target\debug  "
+call :dirsize "target\release" "target\release"
+echo.
+echo   1  debug    cargo clean --profile dev
+echo   2  release  cargo clean --release
+echo   3  both     cargo clean
+echo   4  nothing
+echo.
+set /p WHAT=remove [1-4]:
+if "%WHAT%"=="1" goto cleandebug
+if "%WHAT%"=="2" goto cleanrelease
+if "%WHAT%"=="3" goto cleanboth
+goto cleankept
+
+:cleandebug
+call :clock TS
+cargo clean --profile dev
+if errorlevel 1 set SAVE_ERROR=1
+call :since TS "clean"
+goto cleandone
+
+:cleanrelease
+call :clock TS
+cargo clean --release
+if errorlevel 1 set SAVE_ERROR=1
+call :since TS "clean"
+goto cleandone
+
+:cleanboth
+call :clock TS
+cargo clean
+if errorlevel 1 set SAVE_ERROR=1
+call :since TS "clean"
+
+:cleandone
+rem Worth saying out loud: the next build is cold, and cold here is 503 crates
+rem with codegen-units = 1 and thin LTO, not the twenty seconds a warm one takes.
+rem dist\%EXENAME% is untouched -- it lives outside target\ for this reason.
+echo.
+echo [ok]   cache emptied - the next build is a cold one
+goto end
+
+:cleankept
+echo.
+echo [ok]   nothing removed
+goto end
+
+
+rem ---------------------------------------------------------------------------
 :push
 echo.
 echo === git: push ===
@@ -495,6 +567,31 @@ rem to escape one inside it. Floor, not [int]: PowerShell rounds to nearest
 rem on a cast, so 752s printed as 13m 32s.
 for /f "usebackq delims=" %%e in (`powershell -NoProfile -Command "$s=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()-!CLKVAL!; if($s -ge 60){'{0}m {1:D2}s' -f [math]::Floor($s/60),($s%%60)}else{'{0}s' -f $s}"`) do set TOOK=%%e
 echo [time] %~2 !TOOK!
+exit /b 0
+
+rem :dirsize <path relative to the repo> <label>
+rem   ->  [size] target\debug   41.26 GB  62,326 files
+rem
+rem A missing directory prints "not built" rather than 0, because those are
+rem different facts and only one of them means "already clean".
+rem
+rem %~dp0, not the relative path as given, so the answer does not depend on the
+rem working directory of whatever cmd hands the command to.
+rem
+rem **No pipe in the PowerShell**, which is why the sum is a foreach and not
+rem `Measure-Object`. `for /f` re-parses the backquoted string through a second
+rem cmd, and a `^|` does not survive both passes intact: the pipeline never ran,
+rem `$s` stayed null, and `'{0:N2}' -f $null` printed a perfectly formatted
+rem **"0.00 GB, 0 files" for a 1.5 GB tree**. A size report that reads zero when
+rem it cannot measure is worse than no report at all -- it says the problem is
+rem solved. Semicolons only here; keep it that way.
+:dirsize
+set "DSPATH=%~dp0%~1"
+if not exist "%DSPATH%" (
+  echo [size] %~2 not built
+  exit /b 0
+)
+for /f "usebackq delims=" %%z in (`powershell -NoProfile -Command "$f=Get-ChildItem -LiteralPath '%DSPATH%' -Recurse -Force -File -ErrorAction SilentlyContinue; $b=0; foreach($x in $f){$b+=$x.Length}; '{0,8:N2} GB  {1,7:N0} files' -f ($b/1GB),$f.Count"`) do echo [size] %~2 %%z
 exit /b 0
 
 :checkcargo

@@ -336,12 +336,14 @@ async fn export(settings: &Settings, want: &str) -> Result<()> {
         "done: {} messages across {} topics ({} empty)",
         result.messages, result.topics, result.empty_topics
     );
-    if result.media_downloaded > 0 || result.media_failed > 0 {
+    if result.media_downloaded > 0 || result.media_missing > 0 {
+        // The count that matches missing_media.txt, for the same reason the
+        // window's warning uses it: a failed job costs more than one file.
         println!(
             "media: {} saved ({:.1} MB), {} could not be fetched",
             result.media_downloaded,
             result.bytes_downloaded as f64 / 1_048_576.0,
-            result.media_failed
+            result.media_missing
         );
     }
     // A short export must not read like a complete one.

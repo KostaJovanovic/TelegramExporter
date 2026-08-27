@@ -652,11 +652,17 @@ fn peer_key(reference: &Map<String, Value>, field: &str) -> String {
 }
 
 /// Paths the export itself declared it could not save.
+///
+/// A path occupies a whole line and starts in column zero; an **indented** line
+/// is the reason for the path above it (`tgx_tg::download::write_missing`).
+/// Filtering on the indent rather than on a separator inside the line is what
+/// keeps the split unambiguous when a Telegram filename contains the separator.
 fn stated_gaps(topic: &Path) -> BTreeSet<String> {
     let Ok(body) = std::fs::read_to_string(topic.join("missing_media.txt")) else {
         return BTreeSet::new();
     };
     body.lines()
+        .filter(|l| !l.starts_with(char::is_whitespace))
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with("These files are referenced"))
         .map(str::to_string)
@@ -997,11 +1003,21 @@ mod tests {
         let msg = one(json!({"id": 1, "type": "message", "file": "files/gone.bin"}));
         let ours = tree("stated-ours", "t", "t", msg.clone());
         let theirs = tree("stated-theirs", "t", "t", msg);
+        // Written the way `tgx_tg::download::write_missing` writes it: the path
+        // owns its line, the reason is an indented continuation. Reading the
+        // reason as a second path would score a phantom gap; reading the two as
+        // one line would lose the real one.
         std::fs::write(
             ours.join("t").join("missing_media.txt"),
-            "These files are referenced by this export but could not be saved.\n\nfiles/gone.bin\n",
+            "These files are referenced by this export but could not be saved.\n\n\
+             files/gone.bin\n    media not downloadable, in 5 attempts\n",
         )
         .unwrap();
+        assert_eq!(
+            stated_gaps(&ours.join("t")).into_iter().collect::<Vec<_>>(),
+            vec!["files/gone.bin"],
+            "a reason line is not a path"
+        );
         let r = compare(&ours.join("t"), &theirs.join("t")).unwrap();
         assert!(r.dangling.is_empty(), "{:?}", r.dangling);
         assert_eq!(r.stated.get("file"), Some(&1));

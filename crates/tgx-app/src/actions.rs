@@ -635,10 +635,14 @@ fn report_result(tx: &Events, title: &str, result: &tgx_tg::engine::ExportResult
             result.expected, result.messages
         )));
     }
-    if result.media_failed > 0 {
+    // `media_missing`, not `media_failed`: this line names a number and points
+    // at a file, so it has to be the number of lines in that file. One failed
+    // job takes its thumbnail and its preview with it, and the run reported 21
+    // over a missing_media.txt that listed 42.
+    if result.media_missing > 0 {
         let _ = tx.send(Event::Warn(format!(
             "{title}: {} files could not be fetched — see missing_media.txt",
-            result.media_failed
+            result.media_missing
         )));
     }
     if result.members > 0 && !result.members_complete {
