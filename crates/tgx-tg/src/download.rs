@@ -222,7 +222,16 @@ async fn run_one(
         tally.downloaded += 1;
         tally.bytes += written;
         fetch_thumb(client, root, &media, &pending.job, &mut tally, cancel).await;
-        fetch_preview(client, root, &media, &pending.job, &dest, &mut tally, cancel).await;
+        fetch_preview(
+            client,
+            root,
+            &media,
+            &pending.job,
+            &dest,
+            &mut tally,
+            cancel,
+        )
+        .await;
     } else {
         tally.failed += 1;
         // Not just `dest`. When the primary file fails, its thumbnail and its
@@ -566,16 +575,14 @@ mod tests {
         assert_eq!(t.missing.len(), 3);
     }
 
-    #[test]
-    fn a_rate_limit_loop_has_an_exit() {
-        // A FLOOD_WAIT deliberately does not spend a retry — it is Telegram
-        // asking for patience, not a failure. With `attempt -= 1` and no second
-        // counter that made the loop unbounded in the one case where it can
-        // genuinely never end: an account under a persistent limit answers
-        // every attempt the same way.
-        assert!(MAX_RATE_LIMIT_WAITS > MAX_RETRIES);
-        assert!(MAX_RATE_LIMIT_WAITS < 100, "patience, not a hang");
-    }
+    // A FLOOD_WAIT deliberately does not spend a retry — it is Telegram asking
+    // for patience, not a failure. With `attempt -= 1` and no second counter
+    // that made the loop unbounded in the one case where it can genuinely never
+    // end: an account under a persistent limit answers every attempt the same
+    // way. A const assertion rather than a test, because it is a statement about
+    // the constants and should fail the build rather than a test run.
+    const _: () = assert!(MAX_RATE_LIMIT_WAITS > MAX_RETRIES);
+    const _: () = assert!(MAX_RATE_LIMIT_WAITS < 100);
 
     #[test]
     fn a_tally_merges_without_losing_anything() {
