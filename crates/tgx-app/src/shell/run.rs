@@ -21,9 +21,9 @@ use tgx_ui::tokens::{type_scale, Palette};
 /// **The Chat column is the stretch section and the only one that says which
 /// row is which**, so it must not be the first thing a narrow panel throws
 /// away. The counts are fixed and Chat takes the rest, with a floor under it —
-/// the same arrangement the original reached by giving its stretch section a
-/// 72px minimum, after measuring it squeezed to 11px while Messages and Topics
-/// kept their full width throughout.
+/// a **72px minimum**. Without one it squeezes to 11px while Messages and
+/// Topics keep their full width throughout, which was measured rather than
+/// guessed at.
 ///
 /// These four plus the gaps and the panel's padding have to leave more than
 /// [`CHAT_MIN_W`] inside [`super::RIGHT_COLUMN_W`], or the row overflows the

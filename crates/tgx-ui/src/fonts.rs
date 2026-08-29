@@ -140,7 +140,7 @@ pub fn register(cx: &mut gpui::App) -> Result<(), FontError> {
 /// hold only `ccmp dnom frac kern liga locl mark mkmk numr pnum tnum`. Asking
 /// DirectWrite for an absent feature is a no-op, not an error, so naming them
 /// here would look applied and do nothing. Restoring them means rebuilding the
-/// fonts upstream, in the original project, not adding a tag to this list.
+/// fonts upstream, where the weights are merged, not adding a tag to this list.
 ///
 /// `tnum` is present and is set: the design puts figures in tables and beside
 /// each other in the queue, and proportional digits make a count that changes

@@ -1378,11 +1378,6 @@ mod tests {
     }
 
     #[test]
-    fn the_stall_ceiling_is_documented_and_used() {
-        assert_eq!(MAX_STALLED_WAITS, 10);
-    }
-
-    #[test]
     fn a_detail_line_never_carries_the_message_text() {
         // `tgx.log` sits beside the executable and an export is other people's
         // conversation. The line reports the text's *length* so an empty

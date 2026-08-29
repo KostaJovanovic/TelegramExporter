@@ -7,13 +7,13 @@
 //! every media message — and the only editable fields anywhere in the app were
 //! the three in the sign-in dialog.
 //!
-//! The sections are the original's four, in its order: Destination, Format,
+//! Four sections, in this order: Destination, Format,
 //! Media, Performance, with the extra requests that have no counterpart in
 //! Desktop's format gathered under Beyond Desktop. No group boxes: the design
 //! has no such thing. A section is a letterspaced heading over a hairline, and
 //! a setting is a muted label on the left with its control on the right.
 //!
-//! **There is no "Chats at once".** The original offers 1 to 8; this engine
+//! **There is no "Chats at once".** This engine
 //! exports one chat at a time, and a control that is enabled and does nothing
 //! teaches that the interface is unreliable. The setting itself is gone too —
 //! keeping the field but offering no control left a switch that did nothing,
@@ -28,8 +28,8 @@ use gpui_component::scroll::Scrollbar;
 use tgx_ui::components::{caps, eyebrow, rule, soft_rule, tick_box};
 use tgx_ui::tokens::{type_scale, Palette};
 
-/// The seven media categories Desktop offers, with the labels the original
-/// uses. Keyed on `tgx_tg::config::MEDIA_KINDS`, which is what `plan.rs`
+/// The seven media categories Desktop offers, with the labels shown for each.
+/// Keyed on `tgx_tg::config::MEDIA_KINDS`, which is what `plan.rs`
 /// compares against — a label mismatch here would silently switch off a
 /// category the settings file names.
 const MEDIA_LABELS: [(&str, &str); 7] = [

@@ -390,8 +390,7 @@ impl Shell {
                             .child(SharedString::from(chat.title.clone())),
                     )
                     // The caption is the kind and the last activity, tracked
-                    // uppercase micro-type in the mono — `theme.mono(T_TINY,
-                    // Normal, LS_CAPS)` in the original's delegate. **The date
+                    // uppercase micro-type in the mono. **The date
                     // is half its point**: the default sort is Recent activity,
                     // and without it the list is ordered on a unix second that
                     // appears nowhere on screen.
@@ -399,8 +398,8 @@ impl Shell {
                     // `caps` letterspaces by splitting the string into one child
                     // per character, so it cannot wrap and it cannot be elided
                     // with `truncate` — a caption too wide for the column is
-                    // clipped by the parent instead, which is the original's
-                    // `ElideRight` minus the ellipsis. Safe to track because it
+                    // clipped by the parent instead: elision without the
+                    // ellipsis. Safe to track because it
                     // is our own bounded wording; the title above it is a user
                     // string and stays one selectable run.
                     .child(

@@ -16,8 +16,7 @@
 //! replaced by Desktop's real one; neither class exists there — 0 rules each —
 //! so the page rendered as unstyled text.
 //! [`tests::every_class_this_page_uses_exists_in_desktops_stylesheet`] checks
-//! each one against [`crate::assets::STYLE_CSS`], the same way the original's
-//! offline suite does.
+//! each one against [`crate::assets::STYLE_CSS`].
 
 use crate::assets::write_assets;
 use crate::escape::{esc, safe_href};
@@ -431,7 +430,7 @@ mod tests {
 
     #[test]
     fn every_class_this_page_uses_exists_in_desktops_stylesheet() {
-        // The original's first index invented `section_chats` and `topics_list`
+        // An earlier index invented `section_chats` and `topics_list`
         // to match a stylesheet that was later thrown away for Desktop's real
         // one. Both had 0 rules there, so the page rendered as unstyled text and
         // nothing failed. Desktop's stylesheet is the vocabulary; this test is

@@ -145,9 +145,8 @@ pub fn tracked(text: impl Into<SharedString>, size: gpui::Pixels, track_em: f32)
 
 /// A letterspaced uppercase micro-heading — `MICRO` at `TRACK_MICRO`.
 ///
-/// The design leans hard on these; in Qt they needed a hand-built `QFont`
-/// because a stylesheet has no letter-spacing at all, and here they need
-/// [`tracked`] for the same reason.
+/// The design leans hard on these, and letter-spacing is not something every
+/// text system exposes — here it needs [`tracked`].
 pub fn eyebrow(text: impl Into<SharedString>, palette: &Palette) -> Div {
     tracked(uppercase(text), type_scale::MICRO, rhythm::TRACK_MICRO).text_color(palette.muted)
 }
@@ -226,7 +225,7 @@ fn bar_fill(fraction: Option<f32>) -> f32 {
 
 /// One progress bar. `None` is *indeterminate*.
 ///
-/// 6px tall, as the original's `setFixedHeight(6)`: the bar is a status line,
+/// 6px tall and fixed: the bar is a status line,
 /// not a widget, and anything taller starts competing with the type.
 pub fn progress_bar(fraction: Option<f32>, palette: &Palette) -> Div {
     div()

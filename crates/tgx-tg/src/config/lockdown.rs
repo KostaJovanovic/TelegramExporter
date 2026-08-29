@@ -239,7 +239,7 @@ pub(crate) fn wait_bounded(mut child: std::process::Child) -> Option<String> {
     if status.success() {
         return None;
     }
-    // stderr *or* stdout, as the original had it: icacls writes most of its
+    // stderr *or* stdout: icacls writes most of its
     // failure text ("Access is denied.", "The system cannot find the path
     // specified.") to stdout, so reading only stderr degraded every real
     // explanation to "icacls exited exit code: 1".

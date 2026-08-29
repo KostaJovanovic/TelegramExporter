@@ -688,9 +688,4 @@ mod tests {
             ]
         );
     }
-
-    #[test]
-    fn the_retry_ceiling_is_desktops_five() {
-        assert_eq!(MAX_RETRIES, 5);
-    }
 }

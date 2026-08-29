@@ -170,7 +170,7 @@ mod tests {
 
     #[test]
     fn a_rate_limit_and_a_refusal_are_different_types() {
-        // The property that makes the original bug class unrepresentable: a
+        // The property that makes that bug class unrepresentable: a
         // handler written for one cannot silently absorb the other.
         let flood = EnrichError::Transient(Duration::from_secs(30));
         let refused = EnrichError::Refused("CHAT_ADMIN_REQUIRED".into());

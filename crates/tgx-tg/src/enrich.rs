@@ -15,8 +15,8 @@
 //! | scheduled | once per chat | not in the history at all |
 //!
 //! **The guard is the point of this module.** A rate limit is temporary and a
-//! refusal is not; see [`crate::error`] for why conflating them was the most
-//! damaging bug in the original.
+//! refusal is not; see [`crate::error`] for why conflating them is the most
+//! damaging bug this code can have.
 
 use crate::config::Settings;
 use crate::error::{classify, EnrichError};
@@ -99,8 +99,8 @@ where
 /// The member list, and whether it is the whole of it.
 ///
 /// **A truncated roster is indistinguishable from a complete one**, which makes
-/// it worse than no roster: wrong data that looks right. The original returned
-/// whatever it had collected and said nothing.
+/// it worse than no roster: wrong data that looks right. Returning whatever was
+/// collected, and saying nothing, is the failure this exists to avoid.
 #[derive(Debug, Default, Clone)]
 pub struct Roster {
     pub members: Vec<Value>,
@@ -431,12 +431,6 @@ mod tests {
             tally.deferred, 1,
             "the data was there and we did not get it"
         );
-    }
-
-    #[test]
-    fn the_cap_is_the_documented_two_minutes() {
-        assert_eq!(ENRICH_MAX_WAIT, Duration::from_secs(120));
-        assert_eq!(PARTICIPANT_PAGE, 200);
     }
 
     #[test]

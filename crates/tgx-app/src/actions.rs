@@ -15,9 +15,9 @@ use tgx_tg::error::EnrichError;
 /// Connect and report whether the session is already authorised.
 ///
 /// **Reaching Telegram without being signed in is a success, not an error** —
-/// the caller opens the sign-in dialog on it. Conflating the two is what put
-/// two modal dialogs on top of each other in the original, which the user
-/// experienced as the app freezing the moment it logged them in.
+/// the caller opens the sign-in dialog on it. Conflating the two puts two modal
+/// dialogs on top of each other, which a user experiences as the app freezing
+/// the moment it logs them in.
 pub async fn sign_in(settings: Settings, tx: Events) {
     let _ = tx.send(Event::Status("Connecting…".into()));
     let session = match Session::connect(&settings).await {
