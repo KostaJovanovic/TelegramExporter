@@ -231,13 +231,27 @@ pub(crate) async fn fetch_thumb(
     }
 }
 
+/// The box Desktop rescales an inline preview into, in pixels.
+///
+/// Measured from a reference export: Desktop renders the preview locally with an
+/// image scaler and fits it to 520px on the longer side.
+const PREVIEW_BOX: i32 = 520;
+
 /// Put the inline preview on disk beside the file it previews.
 ///
-/// Desktop renders this one locally with an image scaler. We take Telegram's
-/// next size down instead, which needs no decoder in the binary and lands a
-/// real image at the name Desktop uses. **The bytes therefore differ from
+/// Desktop renders this one locally with an image scaler. We take one of
+/// Telegram's own sizes instead, which needs no decoder in the binary and lands
+/// a real image at the name Desktop uses. **The bytes therefore differ from
 /// Desktop's**; the file, its path and its role do not, and no parity leg reads
 /// media bytes — the media leg diffs names.
+///
+/// **Chosen by pixel box, not by byte count.** Taking the largest size under the
+/// original meant the preview landed on whichever of Telegram's 320/800/1280
+/// boxes happened to be heaviest — usually far past Desktop's 520px rescale. In
+/// one export that was 54 MB of surplus across 552 previews, a median of 3.1x
+/// and a worst case of 22x, while 13 others came out too small. Byte size is not
+/// a proxy for picture size: that is the whole reason `photoSizeProgressive`
+/// exists.
 ///
 /// When Telegram advertises nothing smaller, the full-size file is copied. That
 /// costs page weight and is the deliberate trade: `_p.preview` has already been
@@ -257,16 +271,23 @@ pub(crate) async fn fetch_preview(
         return;
     };
     let dest = root.join(rel);
+    // **A sticker's thumbs count too.** Only `Media::Photo` was matched here, so
+    // every sticker fell through to the copy below and its `_thumb.webp` hashed
+    // identically to the sticker itself — for stickers that branch was not a
+    // fallback, it was the only path.
+    let thumbs = match media {
+        Media::Photo(p) => p.thumbs(),
+        Media::Sticker(s) => s.document.thumbs(),
+        Media::Document(d) => d.thumbs(),
+        _ => Vec::new(),
+    };
     // Strictly smaller than the file itself, or it is not a downscale.
-    let smaller = match media {
-        Media::Photo(p) => p
-            .thumbs()
+    let smaller = pick_preview(
+        thumbs
             .into_iter()
             .filter(|t| !matches!(t, PhotoSize::Stripped(_)))
-            .filter(|t| (t.size() as i64) < job.size)
-            .max_by_key(|t| t.size()),
-        _ => None,
-    };
+            .filter(|t| (t.size() as i64) < job.size),
+    );
     if let Some(t) = smaller {
         if let Ok(written) = fetch_with_retry(client, &t, &dest, cancel).await {
             tally.downloaded += 1;
@@ -287,6 +308,47 @@ pub(crate) async fn fetch_preview(
                 format!("no smaller size, and the full-size copy failed: {e}"),
             ));
         }
+    }
+}
+
+/// The advertised size closest to Desktop's [`PREVIEW_BOX`] on its longer edge.
+fn pick_preview(sizes: impl Iterator<Item = PhotoSize>) -> Option<PhotoSize> {
+    sizes
+        .min_by_key(|t| preview_rank(longer_edge(t), t.size() as i64))
+        .filter(|t| t.size() > 0)
+}
+
+/// How good a candidate preview is: lower sorts first.
+///
+/// Distance from [`PREVIEW_BOX`] decides it. A tie — 320 and 720 are both 200px
+/// off — goes to the **bigger picture**, because one that came out too small
+/// cannot be made bigger and one that came out too large still shows the
+/// picture. Byte count breaks a tie only between two sizes reporting no
+/// dimensions at all (`Path`, `Empty`), which sort last for the same reason they
+/// cannot be judged: they are not pictures.
+///
+/// **The tie-break is pixels, not bytes**, which is the whole premise of this
+/// function — a heavier file is not a bigger picture, and treating it as one is
+/// what put 54 MB of surplus previews in an export.
+///
+/// Split from [`pick_preview`] because grammers keeps `PhotoSize`'s fields
+/// private and constructs it only through a `pub(crate)` function, so the rule
+/// is not otherwise reachable from a test.
+fn preview_rank(edge: Option<i32>, bytes: i64) -> (i32, i32, i64) {
+    match edge {
+        Some(e) => ((e - PREVIEW_BOX).abs(), -e, -bytes),
+        None => (i32::MAX, 0, -bytes),
+    }
+}
+
+/// The longer of a size's two edges, when it reports any.
+fn longer_edge(t: &PhotoSize) -> Option<i32> {
+    match t {
+        PhotoSize::Size(s) => Some(s.width.max(s.height)),
+        PhotoSize::Cached(s) => Some(s.width.max(s.height)),
+        PhotoSize::Progressive(s) => Some(s.width.max(s.height)),
+        // Stripped is filtered out before this; the rest carry no picture.
+        _ => None,
     }
 }
 
@@ -365,4 +427,68 @@ pub fn write_missing(root: &Path, missing: &[MissingFile]) -> std::io::Result<()
         body.push('\n');
     }
     std::fs::write(path, body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pick from `(longer edge, bytes)` pairs the way `pick_preview` does.
+    fn best(candidates: &[(Option<i32>, i64)]) -> (Option<i32>, i64) {
+        *candidates
+            .iter()
+            .min_by_key(|(edge, bytes)| preview_rank(*edge, *bytes))
+            .expect("a candidate")
+    }
+
+    #[test]
+    fn a_preview_is_picked_by_picture_size_not_file_size() {
+        // Telegram's own boxes, with the byte counts inverted against them so
+        // that the two rules cannot agree by accident. Largest-by-bytes takes
+        // the 1280 — 2.5x past Desktop's 520px rescale, and the shape of the
+        // 54 MB of surplus in the last export.
+        let boxes = [
+            (Some(100), 400_000),
+            (Some(320), 8_000),
+            (Some(800), 40_000),
+            (Some(1280), 900_000),
+        ];
+        assert_eq!(best(&boxes), (Some(320), 8_000));
+
+        // 800 is nearer 520 than 320 is when it is on the other side.
+        assert_eq!(
+            best(&[(Some(200), 5_000), (Some(800), 50_000)]),
+            (Some(800), 50_000)
+        );
+    }
+
+    #[test]
+    fn a_tie_goes_to_the_bigger_picture() {
+        // 320 and 720 are both 200px from the box. Too small cannot be undone;
+        // too large still shows the picture.
+        assert_eq!(
+            best(&[(Some(320), 90_000), (Some(720), 10_000)]),
+            (Some(720), 10_000)
+        );
+    }
+
+    #[test]
+    fn a_size_with_no_dimensions_is_the_last_resort() {
+        // `Path` and `Empty` report no picture, so they must never beat one
+        // that does — however far off the box it is.
+        assert_eq!(
+            best(&[(None, 900_000), (Some(2560), 1_000)]),
+            (Some(2560), 1_000)
+        );
+        // But between two unmeasurable ones, the larger still wins.
+        assert_eq!(best(&[(None, 10), (None, 20)]), (None, 20));
+    }
+
+    #[test]
+    fn an_exact_box_beats_everything() {
+        assert_eq!(
+            best(&[(Some(519), 1), (Some(520), 1), (Some(521), 1)]),
+            (Some(520), 1)
+        );
+    }
 }

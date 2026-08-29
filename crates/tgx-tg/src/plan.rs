@@ -75,16 +75,67 @@ pub struct MediaFacts {
     pub spoiler: bool,
 }
 
-/// The largest `(width, height, bytes)` a photo advertises.
+/// The `(width, height, bytes)` of the size a download will actually fetch.
+///
+/// **Selected the way grammers selects it, not the way a reader would.** This
+/// used to take the largest by *area*, while `Downloadable for Photo` builds its
+/// `InputPhotoFileLocation` from `thumbs().max_by_key(|x| x.size())` — the
+/// largest by *bytes*. The two disagree whenever Telegram serves a
+/// `photoSizeProgressive`, which advertises a bigger picture in fewer bytes: we
+/// recorded the progressive entry's dimensions and then downloaded a plain
+/// `photoSize`, so `result.json` described a file that was not on disk. Four
+/// photos in the reference, and in three of them the *lower*-resolution file was
+/// the larger one — so the mismatch was not even consistently in one direction.
+///
+/// Nothing catches this. The media leg diffs names, the json leg replays
+/// Desktop's own numbers, and the file itself is never opened.
+///
+/// [`thumb_bytes`] already says this for thumbnails: one observable, used by
+/// both ends. This is the same rule for the photo itself.
 fn photo_size(photo: &tl::types::Photo) -> (i64, i64, i64) {
-    let mut best = (0i64, 0i64, 0i64);
-    for s in &photo.sizes {
-        let (w, h, size) = size_entry(s);
-        if w * h >= best.0 * best.1 {
-            best = (w, h, size);
+    photo
+        .sizes
+        .iter()
+        .max_by_key(|s| download_rank(s))
+        .map(size_entry)
+        .unwrap_or((0, 0, 0))
+}
+
+/// Does Desktop render an inline preview for this sticker?
+///
+/// Measured from the reference: every one of its 66 `.webp` stickers has a
+/// `_thumb.webp` beside it and not one of its eight `.tgs` files has anything.
+/// A `.tgs` is a gzipped Lottie animation, so there is no still frame to write
+/// without an animation renderer — which is presumably why Desktop, which does
+/// have one for display, still writes no preview file.
+fn previewable_sticker(dest: &str) -> bool {
+    dest.rsplit_once('.')
+        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("webp"))
+}
+
+/// `grammers_client::types::PhotoSize::size`, reproduced.
+///
+/// Not `size_entry`'s third field, which is the size we *report*: grammers
+/// counts a stripped size as its bytes plus the 622-byte JPEG header it would be
+/// expanded with, and that offset decides ties. Mirrored rather than
+/// approximated, because the whole point of the function is that our choice and
+/// the downloader's choice cannot differ.
+fn download_rank(s: &tl::enums::PhotoSize) -> i64 {
+    use tl::enums::PhotoSize as P;
+    match s {
+        P::Empty(_) => 0,
+        P::Size(v) => v.size as i64,
+        P::PhotoCachedSize(v) => v.bytes.len() as i64,
+        P::PhotoStrippedSize(v) => {
+            if v.bytes.len() < 3 || v.bytes[0] != 0x01 {
+                0
+            } else {
+                v.bytes.len() as i64 + 622
+            }
         }
+        P::Progressive(v) => v.sizes.iter().copied().max().unwrap_or(0) as i64,
+        P::PhotoPathSize(v) => v.bytes.len() as i64,
     }
-    best
 }
 
 fn size_entry(s: &tl::enums::PhotoSize) -> (i64, i64, i64) {
@@ -509,8 +560,20 @@ pub fn plan(
     // itself, on its own name. Claimed here rather than derived later because
     // `claim` may add a `(1)` on collision, and a preview computed from the
     // path afterwards would miss it and point at nothing.
+    //
+    // **Not every sticker gets one.** Desktop previews a still sticker and not
+    // an animated one: its export of this chat carries `sticker (1)_thumb.webp`
+    // for all 66 WebP stickers and no `_thumb` whatsoever beside any of the
+    // eight `AnimatedSticker*.tgs`, which is decisive because a `.tgs` is a
+    // gzipped Lottie animation and no browser will draw one in an `<img>`. We
+    // claimed a name for every sticker, so an animated one got
+    // `AnimatedSticker_thumb.tgs` — an extra file Desktop does not write, under
+    // a name that promises an image and holds a Lottie.
     let preview_dest = match (&path, facts.kind) {
-        (Some(dest), "photos" | "stickers") => Some(book.claim_rendered_preview(dest)),
+        (Some(dest), "photos") => Some(book.claim_rendered_preview(dest)),
+        (Some(dest), "stickers") if previewable_sticker(dest) => {
+            Some(book.claim_rendered_preview(dest))
+        }
         _ => None,
     };
 
@@ -550,6 +613,97 @@ mod tests {
 
     fn settings() -> Settings {
         Settings::default()
+    }
+
+    fn plain(t: &str, w: i32, h: i32, size: i32) -> tl::enums::PhotoSize {
+        tl::enums::PhotoSize::Size(tl::types::PhotoSize {
+            r#type: t.to_string(),
+            w,
+            h,
+            size,
+        })
+    }
+
+    fn progressive(t: &str, w: i32, h: i32, sizes: Vec<i32>) -> tl::enums::PhotoSize {
+        tl::enums::PhotoSize::Progressive(tl::types::PhotoSizeProgressive {
+            r#type: t.to_string(),
+            w,
+            h,
+            sizes,
+        })
+    }
+
+    fn photo_with(sizes: Vec<tl::enums::PhotoSize>) -> tl::types::Photo {
+        tl::types::Photo {
+            has_stickers: false,
+            id: 1,
+            access_hash: 2,
+            file_reference: Vec::new(),
+            date: 0,
+            sizes,
+            video_sizes: None,
+            dc_id: 1,
+        }
+    }
+
+    #[test]
+    fn only_a_still_sticker_gets_an_inline_preview() {
+        // Counted in the reference export's own HTML: 66 `_thumb.webp` beside
+        // its 66 `.webp` stickers, and nothing at all beside any of its eight
+        // `AnimatedSticker*.tgs`. We claimed a name for every sticker, so an
+        // animated one produced `AnimatedSticker_thumb.tgs` — a file Desktop
+        // does not write, under a name promising an image and holding a gzipped
+        // Lottie no browser will draw.
+        assert!(previewable_sticker("stickers/sticker (1).webp"));
+        assert!(previewable_sticker(
+            "stickers/file_1@19-12-2025_14-51-08.WEBP"
+        ));
+        assert!(!previewable_sticker("stickers/AnimatedSticker.tgs"));
+        assert!(!previewable_sticker("stickers/AnimatedSticker (7).tgs"));
+        // A name with no extension has nothing to promise either.
+        assert!(!previewable_sticker("stickers/sticker"));
+    }
+
+    #[test]
+    fn a_photo_is_measured_by_the_size_that_will_be_downloaded() {
+        // grammers builds its `InputPhotoFileLocation` from
+        // `thumbs().max_by_key(|x| x.size())` — the largest by *bytes*. Picking
+        // the largest by *area* here meant the JSON described the progressive
+        // entry and the pool fetched the plain one: four photos in the
+        // reference, and in three of them the lower-resolution file was the
+        // larger file, so the mismatch did not even lean one way.
+        //
+        // Bigger picture, fewer bytes — which is what progressive is for.
+        let photo = photo_with(vec![
+            plain("x", 800, 600, 90_000),
+            progressive("y", 2560, 1706, vec![1_000, 20_000, 60_000]),
+        ]);
+        assert_eq!(photo_size(&photo), (800, 600, 90_000));
+
+        // And when the progressive entry really is the heaviest, it wins.
+        let photo = photo_with(vec![
+            plain("x", 800, 600, 30_000),
+            progressive("y", 2560, 1706, vec![1_000, 20_000, 60_000]),
+        ]);
+        assert_eq!(photo_size(&photo), (2560, 1706, 60_000));
+    }
+
+    #[test]
+    fn a_blur_placeholder_never_wins_the_measurement() {
+        // A stripped size reports 0x0, so under the old area comparison it could
+        // not win — under a byte comparison it can, if the real sizes are tiny.
+        // grammers counts it as its bytes plus the 622-byte header it would be
+        // expanded with, and `download_rank` mirrors that exactly so our choice
+        // and the downloader's cannot differ even here.
+        let stripped = tl::enums::PhotoSize::PhotoStrippedSize(tl::types::PhotoStrippedSize {
+            r#type: "i".to_string(),
+            bytes: vec![0x01; 180],
+        });
+        assert_eq!(download_rank(&stripped), 802);
+        assert_eq!(download_rank(&plain("x", 90, 60, 803)), 803);
+
+        let photo = photo_with(vec![stripped, plain("x", 90, 60, 803)]);
+        assert_eq!(photo_size(&photo), (90, 60, 803));
     }
 
     fn photo_facts(size: i64) -> MediaFacts {
