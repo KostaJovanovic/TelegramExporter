@@ -81,8 +81,18 @@ impl NameBook {
         // `color` is an enum: a plain palette index, or one of the collectible
         // forms which carry no index at all. Only the plain one is a colour
         // Desktop would write.
+        //
+        // **Stored one-based, because that is what this field means.** Telegram
+        // numbers its palette from zero and Desktop's class from one, so a
+        // custom colour of 18 is `userpic19` there. Kept raw, it round-tripped
+        // through `presentation`'s `- 1` and `userpic_class`'s `+ 1` back to
+        // itself and emitted `userpic18` — 494 times in one live export, against
+        // a `userpic19` Desktop wrote and we never did. The html leg cannot see
+        // it: the harness lifts `_p.colours` out of *Desktop's* HTML as class
+        // minus one, so the leg replays Desktop's own number and never once
+        // exercises the wire-to-colour path this line is on.
         let colour = match &u.color {
-            Some(tl::enums::PeerColor::Color(c)) => c.color.map(|v| v as i64),
+            Some(tl::enums::PeerColor::Color(c)) => c.color.map(|v| v as i64 + 1),
             _ => None,
         };
         self.learn(UserFacts {
