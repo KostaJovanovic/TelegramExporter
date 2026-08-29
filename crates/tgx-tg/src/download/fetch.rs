@@ -231,11 +231,21 @@ pub(crate) async fn fetch_thumb(
     }
 }
 
-/// The box Desktop rescales an inline preview into, in pixels.
+/// The pixel box Desktop stores an inline preview at, for this media.
 ///
-/// Measured from a reference export: Desktop renders the preview locally with an
-/// image scaler and fits it to 520px on the longer side.
-const PREVIEW_BOX: i32 = 520;
+/// **Taken from `tgx_html::preview`, not restated here.** Those constants are
+/// the CSS box — 260 for a photo, 192 for a sticker — and Desktop stores the
+/// *file* at twice that for high-density screens, which is the doubling
+/// `preview_size` does. They are pinned against the reference by
+/// `tgx-html/tests/preview_parity.rs`, so a second copy of the number in this
+/// crate would be a fact with two writers and no test tying them together.
+fn preview_box(media: &Media) -> i32 {
+    let css = match media {
+        Media::Sticker(_) => tgx_html::preview::STICKER_BOX,
+        _ => tgx_html::preview::PREVIEW_BOX,
+    };
+    (css * 2) as i32
+}
 
 /// Put the inline preview on disk beside the file it previews.
 ///
@@ -287,6 +297,7 @@ pub(crate) async fn fetch_preview(
             .into_iter()
             .filter(|t| !matches!(t, PhotoSize::Stripped(_)))
             .filter(|t| (t.size() as i64) < job.size),
+        preview_box(media),
     );
     if let Some(t) = smaller {
         if let Ok(written) = fetch_with_retry(client, &t, &dest, cancel).await {
@@ -311,21 +322,21 @@ pub(crate) async fn fetch_preview(
     }
 }
 
-/// The advertised size closest to Desktop's [`PREVIEW_BOX`] on its longer edge.
-fn pick_preview(sizes: impl Iterator<Item = PhotoSize>) -> Option<PhotoSize> {
+/// The advertised size closest to `box_px` on its longer edge.
+fn pick_preview(sizes: impl Iterator<Item = PhotoSize>, box_px: i32) -> Option<PhotoSize> {
     sizes
-        .min_by_key(|t| preview_rank(longer_edge(t), t.size() as i64))
+        .min_by_key(|t| preview_rank(longer_edge(t), t.size() as i64, box_px))
         .filter(|t| t.size() > 0)
 }
 
 /// How good a candidate preview is: lower sorts first.
 ///
-/// Distance from [`PREVIEW_BOX`] decides it. A tie — 320 and 720 are both 200px
-/// off — goes to the **bigger picture**, because one that came out too small
-/// cannot be made bigger and one that came out too large still shows the
-/// picture. Byte count breaks a tie only between two sizes reporting no
-/// dimensions at all (`Path`, `Empty`), which sort last for the same reason they
-/// cannot be judged: they are not pictures.
+/// Distance from the box decides it. A tie — against a 520px box, 320 and 720
+/// are both 200px off — goes to the **bigger picture**, because one that came
+/// out too small cannot be made bigger and one that came out too large still
+/// shows the picture. Byte count breaks a tie only between two sizes reporting
+/// no dimensions at all (`Path`, `Empty`), which sort last for the same reason
+/// they cannot be judged: they are not pictures.
 ///
 /// **The tie-break is pixels, not bytes**, which is the whole premise of this
 /// function — a heavier file is not a bigger picture, and treating it as one is
@@ -334,9 +345,9 @@ fn pick_preview(sizes: impl Iterator<Item = PhotoSize>) -> Option<PhotoSize> {
 /// Split from [`pick_preview`] because grammers keeps `PhotoSize`'s fields
 /// private and constructs it only through a `pub(crate)` function, so the rule
 /// is not otherwise reachable from a test.
-fn preview_rank(edge: Option<i32>, bytes: i64) -> (i32, i32, i64) {
+fn preview_rank(edge: Option<i32>, bytes: i64, box_px: i32) -> (i32, i32, i64) {
     match edge {
-        Some(e) => ((e - PREVIEW_BOX).abs(), -e, -bytes),
+        Some(e) => ((e - box_px).abs(), -e, -bytes),
         None => (i32::MAX, 0, -bytes),
     }
 }
@@ -435,9 +446,14 @@ mod tests {
 
     /// Pick from `(longer edge, bytes)` pairs the way `pick_preview` does.
     fn best(candidates: &[(Option<i32>, i64)]) -> (Option<i32>, i64) {
+        pick(candidates, 520)
+    }
+
+    /// The same, against an explicit box.
+    fn pick(candidates: &[(Option<i32>, i64)], box_px: i32) -> (Option<i32>, i64) {
         *candidates
             .iter()
-            .min_by_key(|(edge, bytes)| preview_rank(*edge, *bytes))
+            .min_by_key(|(edge, bytes)| preview_rank(*edge, *bytes, box_px))
             .expect("a candidate")
     }
 
@@ -490,5 +506,21 @@ mod tests {
             best(&[(Some(519), 1), (Some(520), 1), (Some(521), 1)]),
             (Some(520), 1)
         );
+    }
+
+    #[test]
+    fn a_sticker_aims_at_a_smaller_box_than_a_photo() {
+        // Desktop's boxes are 260 CSS px for a photo and 192 for a sticker, and
+        // it stores the file at twice each. Taken from `tgx_html::preview`,
+        // where `preview_parity` pins them against the reference — a second
+        // copy of the number in this crate would be a fact with two writers.
+        assert_eq!((tgx_html::preview::PREVIEW_BOX * 2) as i32, 520);
+        assert_eq!((tgx_html::preview::STICKER_BOX * 2) as i32, 384);
+
+        // The same candidates resolve differently under the two boxes, which is
+        // the whole reason the box is a parameter.
+        let candidates = [(Some(320), 5_000), (Some(560), 50_000)];
+        assert_eq!(pick(&candidates, 520), (Some(560), 50_000));
+        assert_eq!(pick(&candidates, 384), (Some(320), 5_000));
     }
 }

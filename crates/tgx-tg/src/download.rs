@@ -338,7 +338,16 @@ async fn run_one(
     // they are used: 450,817 messages took over an hour to read and 20.6% of
     // that chat's media was refused as expired, against 6 files in the
     // 162,132-message chat exported next to it.
-    let mut outcome = fetch_with_retry(client, &media, &dest, cancel).await;
+    // An earlier message carried this same file id and it is already on disk
+    // under this name. Its thumbnail and preview took fresh names and are still
+    // owed, so the job continues — only the bytes are skipped. Reported as
+    // downloaded because the export does hold the file; the size is not counted
+    // twice, which is the point of not fetching it.
+    let mut outcome = if pending.job.already_saved {
+        Ok(0)
+    } else {
+        fetch_with_retry(client, &media, &dest, cancel).await
+    };
     if outcome.as_ref().err().is_some_and(|f| f.stale) {
         match refreshed_media(client, refresh, &pending.job).await {
             Ok(fresh) => {
@@ -421,6 +430,7 @@ mod tests {
         let root = tmp("inline");
         let pending = PendingDownload {
             job: DownloadJob {
+                already_saved: false,
                 dest: "thumbnails/a.jpg".into(),
                 thumb_dest: None,
                 preview_dest: None,
@@ -444,6 +454,7 @@ mod tests {
     /// A job for a photo of `size` bytes, named as the JSON already named it.
     fn photo_job(size: i64) -> DownloadJob {
         DownloadJob {
+            already_saved: false,
             dest: "photos/photo_1@01-01-2026_00-00-00.jpg".into(),
             thumb_dest: None,
             preview_dest: None,
@@ -586,6 +597,7 @@ mod tests {
 
     fn job_with_all_three() -> DownloadJob {
         DownloadJob {
+            already_saved: false,
             dest: "video_files/clip.mp4".into(),
             thumb_dest: Some("video_files/clip.mp4_thumb.jpg".into()),
             preview_dest: Some("photos/photo_1.jpg".into()),

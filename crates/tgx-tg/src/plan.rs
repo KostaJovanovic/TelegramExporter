@@ -41,6 +41,14 @@ pub struct DownloadJob {
     pub inline_bytes: Option<Vec<u8>>,
     /// Which message this belongs to, for `missing_media.txt`.
     pub message_id: i64,
+    /// This file was already written by an earlier message carrying the same
+    /// Telegram id, so `dest` is a path to fetch *nothing* into.
+    ///
+    /// The thumbnail and the preview are still outstanding: their names collide
+    /// with the first message's and take a ` (1)` suffix, which is why the
+    /// reference export contains `file_1@19-12-2025_14-51-08_thumb (1).webp`
+    /// beside a single `file_1@19-12-2025_14-51-08.webp`.
+    pub already_saved: bool,
 }
 
 /// Desktop's verbatim placeholder strings for a file it did not save.
@@ -51,6 +59,12 @@ pub const TOO_LARGE: &str =
 /// What a message's media is, in the vocabulary `tgx-media` speaks.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MediaFacts {
+    /// Telegram's own id for this photo or document, or 0 if it has none.
+    ///
+    /// The identity a repeat is recognised by. It is known before a byte is
+    /// fetched, which is what lets the *name* be decided the way Desktop decides
+    /// it — see [`NameBook::saved_at`].
+    pub id: i64,
     /// The `_LAYOUT` kind — `photos`, `video_files`, `stickers`, …
     pub kind: &'static str,
     /// The JSON `media_type`, which can disagree with the folder: a WebM video
@@ -208,6 +222,7 @@ pub fn classify(media: &tl::enums::MessageMedia, follow_webpage: bool) -> Option
             };
             let (w, h, size) = photo_size(photo);
             Some(MediaFacts {
+                id: photo.id,
                 kind: "photos",
                 media_type: None,
                 file_name: None,
@@ -241,6 +256,7 @@ pub fn classify(media: &tl::enums::MessageMedia, follow_webpage: bool) -> Option
             if let Some(tl::enums::Photo::Photo(photo)) = page.photo.as_ref() {
                 let (w, h, size) = photo_size(photo);
                 return Some(MediaFacts {
+                    id: photo.id,
                     kind: "photos",
                     media_type: None,
                     file_name: None,
@@ -387,6 +403,7 @@ fn document_facts(doc: &tl::types::Document, spoiler: bool) -> MediaFacts {
     let (thumb_size, has_thumb) = thumb_bytes(doc.thumbs.as_deref().unwrap_or(&[]));
 
     MediaFacts {
+        id: doc.id,
         kind,
         media_type: if declared.is_empty() {
             None
@@ -451,13 +468,23 @@ pub fn plan(
         TOO_LARGE
     };
 
-    let path = if write {
+    // **A repeat reuses the path and claims nothing.** Desktop saves a file once
+    // and points every later message at it; note that the *counter* still moved,
+    // above — `media_leg` replays exactly that order against the reference and
+    // reproduces 830 of 836 names, which it could not do if a repeat consumed no
+    // number. What a repeat must not do is take a second name.
+    let reused = book.saved_at(facts.id).map(str::to_string);
+    let path = match (&reused, write) {
+        (Some(existing), _) => Some(existing.clone()),
         // The collision suffix is claimed **only when the file is written**,
         // unlike the counter. Claiming it up front drops the match rate from
         // 830/836 to 809/836.
-        Some(book.claim(subdir, &name))
-    } else {
-        None
+        (None, true) => {
+            let claimed = book.claim(subdir, &name);
+            book.remember(facts.id, &claimed);
+            Some(claimed)
+        }
+        (None, false) => None,
     };
 
     // --- the JSON fields ---------------------------------------------------
@@ -585,6 +612,9 @@ pub fn plan(
             size: facts.size,
             inline_bytes: None,
             message_id,
+            // The bytes are already on disk under this name; only the thumbnail
+            // and the preview, which took fresh names, still have to be fetched.
+            already_saved: reused.is_some(),
         }),
         // A file we did not save, whose blur preview came free inside the
         // message. **A skipped file must not consume a `photo_N`**, so the
@@ -600,6 +630,7 @@ pub fn plan(
                 size: bytes.len() as i64,
                 inline_bytes: Some(bytes.clone()),
                 message_id,
+                already_saved: false,
             }
         }),
     };
@@ -644,6 +675,59 @@ mod tests {
             video_sizes: None,
             dc_id: 1,
         }
+    }
+
+    #[test]
+    fn the_same_file_sent_twice_is_saved_once() {
+        // Desktop saves a file once and points every later message at it. We
+        // were strictly one-to-one: 46 references in the reference collapse to
+        // 20 basenames there, nine of them redundant photos worth 3.33 MB, and
+        // each surplus name shifted 74 file and 74 thumbnail paths after it.
+        //
+        // The counter still advances — `media_leg` replays exactly that order
+        // and reproduces 830 of 836 names, which it could not do otherwise —
+        // so the *second* photo is the one that keeps `photo_1.jpg`, and a
+        // third, different photo lands on `photo_3.jpg` with `photo_2` spent.
+        let mut book = NameBook::new();
+        let mut facts = photo_facts(1000);
+        facts.id = 77;
+
+        let (first, job) = plan(&facts, 1, "stamp", &mut book, &settings());
+        assert_eq!(first["photo"], "photos/photo_1@stamp.jpg");
+        assert!(!job.expect("a job").already_saved);
+
+        let (second, job) = plan(&facts, 2, "stamp", &mut book, &settings());
+        assert_eq!(
+            second["photo"], "photos/photo_1@stamp.jpg",
+            "a repeat reuses it"
+        );
+        assert!(
+            job.expect("a job").already_saved,
+            "a repeat must not fetch the bytes again"
+        );
+
+        let mut other = photo_facts(2000);
+        other.id = 78;
+        let (third, _) = plan(&other, 3, "stamp", &mut book, &settings());
+        assert_eq!(
+            third["photo"], "photos/photo_3@stamp.jpg",
+            "the repeat still spent photo_2"
+        );
+    }
+
+    #[test]
+    fn a_file_telegram_gave_no_id_is_never_treated_as_a_repeat() {
+        // `id: 0` is "unknown", not "the same one again". Collapsing those
+        // would point every unidentified file at the first one's path.
+        let mut book = NameBook::new();
+        let facts = photo_facts(1000);
+        assert_eq!(facts.id, 0);
+
+        let (first, _) = plan(&facts, 1, "stamp", &mut book, &settings());
+        let (second, job) = plan(&facts, 2, "stamp", &mut book, &settings());
+        assert_eq!(first["photo"], "photos/photo_1@stamp.jpg");
+        assert_eq!(second["photo"], "photos/photo_2@stamp.jpg");
+        assert!(!job.expect("a job").already_saved);
     }
 
     #[test]
@@ -708,6 +792,7 @@ mod tests {
 
     fn photo_facts(size: i64) -> MediaFacts {
         MediaFacts {
+            id: 0,
             kind: "photos",
             media_type: None,
             file_name: None,
@@ -802,6 +887,7 @@ mod tests {
     fn a_document_records_its_name_size_and_mime() {
         let mut book = NameBook::new();
         let facts = MediaFacts {
+            id: 0,
             kind: "files",
             media_type: None,
             file_name: Some("report.pdf".into()),
@@ -837,6 +923,7 @@ mod tests {
         // function already does.
         let mut book = NameBook::new();
         let base = MediaFacts {
+            id: 0,
             kind: "stickers",
             media_type: Some("sticker"),
             file_name: Some("sticker.webp".into()),
@@ -861,6 +948,7 @@ mod tests {
         );
 
         let with = MediaFacts {
+            id: 0,
             sticker_emoji: Some("👍".into()),
             ..base
         };
@@ -888,6 +976,7 @@ mod tests {
             ..settings()
         };
         let facts = MediaFacts {
+            id: 0,
             kind: "video_files",
             media_type: Some("video_file"),
             file_name: Some("clip.mp4".into()),
@@ -934,6 +1023,7 @@ mod tests {
         // fail. The plan's job must carry the destination.
         let mut book = NameBook::new();
         let facts = MediaFacts {
+            id: 0,
             kind: "video_files",
             media_type: Some("video_file"),
             file_name: Some("clip.mp4".into()),
