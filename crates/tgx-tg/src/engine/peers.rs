@@ -98,15 +98,55 @@ impl<'a> ChatExporter<'a> {
         let Some(peer) = unnamed_forward_origin(m, &self.names) else {
             return;
         };
-        let key = crate::convert::peer_key(peer).to_string();
-        // Tried, not resolved: a peer the store does not hold must not be looked
-        // up again on every one of that person's messages.
-        if !self.forwards_tried.insert(key) {
-            return;
-        }
         let Some(id) = session_peer_id(peer) else {
             return;
         };
+        self.resolve_and_learn(crate::convert::peer_key(peer).to_string(), id, tally)
+            .await;
+    }
+
+    /// Name the people a **service message** is about.
+    ///
+    /// The same problem as a forward origin and the same cure: the inviter on a
+    /// `join_group_by_link` joined before the exported history begins, so no
+    /// message carries their user object, and the roster holds them only if they
+    /// are still a member. 26 `inviter` fields and 2 `members[0]` came out empty
+    /// in one live export, each beside a correct id, each named in Desktop's
+    /// export of the same chat. No replay leg can see it: all three start from a
+    /// Desktop `result.json` that already has the name.
+    ///
+    /// **Before the conversion**, like every other name: `result.json` is
+    /// streamed, so one resolved afterwards has nowhere left to go.
+    ///
+    /// Cheap for the same reason the forward path is — one request per *person*,
+    /// tried once whether or not it worked, and only for people nothing else
+    /// named. The reference's 63 service messages name 28 fields between them.
+    pub(super) async fn learn_service_actors(
+        &mut self,
+        s: &tl::types::MessageService,
+        tally: &mut Enrichment,
+    ) {
+        for id in crate::convert::action_user_ids(&s.action) {
+            let key = PeerKey::user(id).to_string();
+            if !self.names.get(&key).is_empty() {
+                continue;
+            }
+            let Some(peer) = PeerId::user(id) else {
+                continue;
+            };
+            self.resolve_and_learn(key, peer, tally).await;
+        }
+    }
+
+    /// One name, from the session's peer store and one request.
+    ///
+    /// `tried` is recorded whether or not the lookup worked: a peer the store
+    /// does not hold must not be looked up again on every one of that person's
+    /// messages.
+    async fn resolve_and_learn(&mut self, key: String, id: PeerId, tally: &mut Enrichment) {
+        if !self.peers_tried.insert(key) {
+            return;
+        }
         let peer_ref = match self.session.peer_ref(id).await {
             Ok(Some(r)) => r,
             // Not cached, or the store could not be read. Either way there is no
@@ -139,8 +179,17 @@ impl<'a> ChatExporter<'a> {
         progress: ProgressFn<'_>,
     ) -> MessageExtras {
         let mut extras = MessageExtras::default();
-        let tl::enums::Message::Message(m) = &msg.raw else {
-            return extras;
+        let m = match &msg.raw {
+            tl::enums::Message::Message(m) => m,
+            // A service message has no media, no poll and no reaction sample to
+            // top up, but it does name people — and until this arm existed it
+            // came through here untouched and reached `base_service` with an
+            // empty name book for anyone who had not posted.
+            tl::enums::Message::Service(s) => {
+                self.learn_service_actors(s, tally).await;
+                return extras;
+            }
+            tl::enums::Message::Empty(_) => return extras,
         };
         let id = m.id;
 

@@ -366,11 +366,12 @@ pub struct ChatExporter<'a> {
     /// exactly the half a `PeerRef` is missing. See
     /// [`Self::learn_forward_origin`].
     session: Arc<SqliteSession>,
-    /// Forward origins already looked up, successfully or not.
+    /// Peers already looked up through the session store, successfully or not.
     ///
-    /// One request per *person*, not per message: the 94 empty names in the last
-    /// live run belonged to 13 people.
-    forwards_tried: std::collections::HashSet<String>,
+    /// One request per *person*, not per message: the 94 empty forward names in
+    /// the last live run belonged to 13 people. Shared by the forward-origin and
+    /// service-message paths, which ask the same question about the same store.
+    peers_tried: std::collections::HashSet<String>,
 }
 
 impl<'a> ChatExporter<'a> {
@@ -383,7 +384,7 @@ impl<'a> ChatExporter<'a> {
                 ..NameBook::default()
             },
             session,
-            forwards_tried: std::collections::HashSet::new(),
+            peers_tried: std::collections::HashSet::new(),
         }
     }
 
@@ -577,14 +578,13 @@ impl<'a> ChatExporter<'a> {
                 tally.requests,
                 started.elapsed().as_secs_f64()
             )));
-            for m in &roster.members {
-                if let Some(id) = m.get("id").and_then(Value::as_str) {
-                    if let Some(name) = m.get("name").and_then(Value::as_str) {
-                        self.names.names.insert(id.to_string(), name.to_string());
-                        self.names.html.insert(id.to_string(), name.to_string());
-                    }
-                }
-            }
+            // **Everything the roster learned, not the display name twice.**
+            // This used to reach into `names` and `html` by hand and write the
+            // same string into both, which left the userpic letters and the
+            // name colour unset for anyone the message stream never carried —
+            // and the HTML then derived initials by splitting the display name,
+            // the one rule Desktop provably does not use. See `Roster::book`.
+            self.names.absorb(&roster.book);
             if !roster.members.is_empty() {
                 let body =
                     serde_json::to_string_pretty(&roster.to_json()).unwrap_or_else(|_| "{}".into());
