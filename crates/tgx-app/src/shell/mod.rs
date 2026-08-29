@@ -45,9 +45,8 @@ use tgx_ui::tokens::{metrics, Palette};
 /// **Sized from the queue, not from the settings.** The queue is a five-column
 /// table and the settings are a stack of rows that will fit anything; get this
 /// wrong and it is the table that breaks, silently, by pushing the column that
-/// names the chat off the panel. The original gave its right pane 620px of an
-/// 1180px window — a proportion this holds at the 900px minimum, where 400
-/// leaves the chat list 480.
+/// names the chat off the panel. 400px against the 900px minimum leaves the
+/// chat list 480, which is the proportion this figure is chosen to hold.
 pub const RIGHT_COLUMN_W: gpui::Pixels = px(400.0);
 
 /// One row as the list paints it.

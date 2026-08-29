@@ -360,8 +360,8 @@ fn buckets<'a>(chats: &'a [ChatInfo], view: &View) -> Vec<(Option<Category>, Vec
 /// heading during a search removed a fold nobody could see and nothing moved;
 /// it took two clicks to close a category the screen already showed as open.
 /// Here the two can never disagree, and the user can still fold a category
-/// while a search is running — which is what the original does, `_apply_filter`
-/// calling `setExpanded(True)` being a real state change and not a paint rule.
+/// while a search is running, because folding is a real state change and not a
+/// paint rule.
 ///
 /// Call it when the filter changes. Calling it on every frame would make a fold
 /// during a search impossible to keep.
