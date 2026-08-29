@@ -4,11 +4,11 @@
 //! its stylesheet references, taken byte for byte from an export Desktop itself
 //! produced.
 //!
-//! An earlier version of the Python original carried a hand-written
-//! reproduction of the stylesheet: 6.2 KB against Desktop's 43 KB, with no
-//! images at all, so every `media_file` / `media_photo` / `media_voice` row
-//! rendered as a blank square. **Reproducing a stylesheet by eye cannot
-//! converge**; shipping the real one is both smaller work and exact.
+//! A hand-written reproduction of the stylesheet was tried once and abandoned:
+//! 6.2 KB against Desktop's 43 KB, with no images at all, so every
+//! `media_file` / `media_photo` / `media_voice` row rendered as a blank square.
+//! **Reproducing a stylesheet by eye cannot converge**; shipping the real one
+//! is both smaller work and exact.
 //!
 //! They are embedded in the binary rather than shipped beside it, so there is
 //! no `_MEIPASS` branch, no spec file and no `datas` list — the whole class of

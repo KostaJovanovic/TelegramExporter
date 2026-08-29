@@ -9,10 +9,10 @@
 //! by a test — a palette is a struct, so a colour that exists in light and not
 //! in dark will not compile.
 //!
-//! This is deliberately *not* a port of the Qt `theme.py`. Roughly a third of
-//! that file's comments are apologies for what a Qt stylesheet cannot express —
-//! letter-spacing, transitions, shadows — and GPUI can express all three, so
-//! the tokens come from the stylesheet directly.
+//! The tokens come from the design's stylesheet directly, rather than from any
+//! intermediate theme file: letter-spacing, transitions and shadows are all
+//! expressible here, so there is nothing to work around and nothing to
+//! reinterpret.
 
 use gpui::{hsla, Hsla};
 
@@ -136,7 +136,7 @@ pub mod rhythm {
     pub const LINE_BODY: f32 = 1.5;
     /// `--lh-prose`
     pub const LINE_PROSE: f32 = 1.65;
-    /// `--ls-caps`, in em. Qt could not express this at all.
+    /// `--ls-caps`, in em.
     pub const TRACK_CAPS: f32 = 0.08;
     /// `--ls-micro`, in em.
     pub const TRACK_MICRO: f32 = 0.15;

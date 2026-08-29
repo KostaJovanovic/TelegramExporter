@@ -3,8 +3,7 @@
 //! grammers requires tokio; GPUI owns the main thread and has its own executor.
 //! So a tokio runtime lives on a dedicated thread for the app's lifetime, work
 //! is submitted to it, and results come back over a channel that the UI drains
-//! on its own schedule. This is the direct analogue of the Python
-//! `worker.py::AsyncBridge`, including the part that matters most:
+//! on its own schedule. The part that matters most:
 //!
 //! **Shutdown drains, it does not stop.** Returning immediately abandons
 //! in-flight tasks where they sit, so an export's cleanup — and therefore

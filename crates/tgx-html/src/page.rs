@@ -25,8 +25,8 @@ pub fn page_name(index: usize) -> String {
 /// both +01:00 and +02:00 and the export was taken during summer time — so it
 /// is neither the offset at export time nor the offset at message time.
 ///
-/// Python read `time.timezone`, which is defined as the non-DST offset. chrono
-/// has no equivalent, so it is recovered as the **smaller** of the January and
+/// It is the zone's **non-DST** offset. chrono exposes no such value directly,
+/// so it is recovered as the **smaller** of the January and
 /// July offsets, which is standard time in both hemispheres: northern zones are
 /// on DST in July (larger), southern ones in January (larger).
 pub fn utc_suffix() -> String {

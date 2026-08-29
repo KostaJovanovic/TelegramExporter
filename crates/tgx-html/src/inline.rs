@@ -207,7 +207,7 @@ mod tests {
         // Do NOT substring-match for "alert(1)": it appears twice here and is
         // inert both times — once inside the JS string literal and once as the
         // link's escaped text. Asserting its absence is a false failure, which
-        // is the exact trap the Python suite documents.
+        // is the trap this kind of assertion sets.
         //
         // The property that actually matters is that the JS string cannot be
         // terminated early, so decode the attribute and check the quoting.

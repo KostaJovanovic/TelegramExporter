@@ -3,9 +3,9 @@
 //! Everything here paints the Swiss language: hairline rules instead of boxes,
 //! square corners, letterspaced uppercase micro-type, one red.
 //!
-//! **Nothing here animates.** GPUI can express transitions where Qt could not,
-//! and the design's `--dur-*` tokens were carried over for them — but the only
-//! thing that ever used one was the drifting grid backdrop, and that is gone by
+//! **Nothing here animates.** The design's `--dur-*` tokens exist for
+//! transitions, but the only thing that ever used one was the drifting grid
+//! backdrop, and that is gone by
 //! decision (see `ROADMAP.md`, Phase 6). The durations went with it rather than
 //! sit here looking applied. If motion is wanted again, `analyser.css` is the
 //! source and it is three constants.

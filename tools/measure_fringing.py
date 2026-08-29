@@ -1,9 +1,9 @@
 """Measure DirectWrite colour fringing on a rendered window.
 
-Risk 4 in ROADMAP.md, carried over from the Qt original: light text over
-near-black is exactly where subpixel antialiasing shows a colour cast, and in
-the Python project DirectWrite ignored ``NoSubpixelAntialias`` entirely — 81% of
-inked pixels fringed — which is why that project abandoned it for FreeType.
+Light text over near-black is exactly where subpixel antialiasing shows a
+colour cast. A previous toolkit on this machine measured 81% of inked pixels
+fringed, because DirectWrite ignored ``NoSubpixelAntialias`` entirely, and had
+to abandon it for FreeType. See the risk register in ROADMAP.md.
 
 **The measurement has to be taken on a rendered window, not an offscreen
 paint.** Under FreeType those two paths disagreed 0% against 90%, so a headless

@@ -1,11 +1,11 @@
 //! Entity offsets, which Telegram counts in **UTF-16 code units**.
 //!
 //! Indexing the text by anything else corrupts formatting in every message
-//! containing an emoji. Python had to build an explicit list of code units to
-//! get this right; Rust has `str::encode_utf16`, and — the part that matters —
-//! `String::from_utf16` *returns an error* where Python silently produced a
-//! string it could not later encode, which is what killed one real export
-//! thousands of messages after the offending message went past.
+//! containing an emoji. `str::encode_utf16` gives the units directly, and —
+//! the part that matters — `String::from_utf16` *returns an error* rather than
+//! handing back a string that cannot later be encoded. Producing one silently
+//! is what kills a real export thousands of messages after the offending
+//! message went past.
 
 use serde_json::{json, Map, Value};
 
@@ -27,7 +27,7 @@ pub fn units(text: &str) -> Vec<u16> {
 
 /// Decode a slice of code units, replacing any unpaired surrogate with U+FFFD.
 ///
-/// This is Python's `_drop_lone_surrogates` and `_join_units` in one. A lone
+/// Dropping lone surrogates and joining the units, in one pass. A lone
 /// surrogate cannot be encoded as UTF-8, so one reaching a writer takes down
 /// the export of the whole chat; `snap_cuts` stops entity boundaries from
 /// creating them and this is the backstop for anything that arrives already
@@ -49,9 +49,10 @@ fn is_low_surrogate(unit: u16) -> bool {
 /// formatting fidelity.
 ///
 /// Clamped at zero. A text starting with an *unpaired* low surrogate puts index
-/// 0 in the low set, and the unclamped form turned cut 0 into -1 — which Python
-/// read as a slice from the end, so the first segment came out empty and took
-/// its characters with it.
+/// 0 in the low set, and without the clamp cut 0 would go below zero — an
+/// underflow here, and in any language that reads a negative index as a slice
+/// from the end, a first segment that comes out empty having taken its
+/// characters with it.
 pub fn snap_cuts(cuts: impl IntoIterator<Item = usize>, units: &[u16]) -> Vec<usize> {
     let mut out: Vec<usize> = cuts
         .into_iter()

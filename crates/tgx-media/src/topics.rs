@@ -195,8 +195,8 @@ mod tests {
     fn control_characters_become_underscores_before_the_collapse() {
         // A tab and a newline are path-illegal on Windows, so they are
         // replaced *first* and the survivors are then collapsed as ordinary
-        // text. "a \t\n b" is therefore "a __ b", not "a b" — verified against
-        // the Python implementation, which orders the two steps the same way.
+        // text. "a \t\n b" is therefore "a __ b", not "a b" — the order of
+        // those two steps is the whole of what decides which.
         assert_eq!(sanitize_component("  a \t\n b  ", "x"), "a __ b");
     }
 

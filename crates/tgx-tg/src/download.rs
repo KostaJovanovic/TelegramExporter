@@ -402,9 +402,8 @@ async fn run_one(
 /// **Shared by the file, its thumbnail and its preview.** The thumbnail used to
 /// be fetched by a bare call: one rate limit cost it outright while the file
 /// beside it was retried five times — and the JSON has already named the
-/// thumbnail by then, so losing it leaves a broken `<img>`. The Python original
-/// carries a comment recording exactly that, which is the reason this is one
-/// function rather than three loops.
+/// thumbnail by then, so losing it leaves a broken `<img>`. That is the reason
+/// this is one function rather than three loops.
 async fn fetch_with_retry<D: Downloadable>(
     client: &Client,
     media: &D,

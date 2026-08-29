@@ -846,25 +846,23 @@ fn service_action(
         // three `absent: action` of the last live run.
         //
         // The reference's three carry **no payload beyond the actor**, measured
-        // rather than assumed. The Python original writes an `answer` key here;
-        // Desktop does not, and Desktop is the format this reproduces.
+        // rather than assumed. An `answer` key here would be an invention:
+        // Desktop does not write one, and Desktop is the format this reproduces.
         A::PollAppendAnswer(_) => no_payload("poll_append_answer"),
         A::PollDeleteAnswer(_) => no_payload("poll_delete_answer"),
-        // Not in the reference, so the names come from the Python original
-        // (`serialize.py:731-738`), which is the only other measurement anyone
-        // here has. The payloads it writes are deliberately not carried over —
-        // an unverified key is worse than a missing one, and the `extra` tally
-        // in the wire leg would score it.
+        // Not in the reference, so these rest on an earlier measurement of
+        // Desktop's output rather than on the corpus. Names only: the payloads
+        // are deliberately left out, because an unverified key is worse than a
+        // missing one and the wire leg's `extra` tally would score it.
         A::TodoAppendTasks(_) => no_payload("todo_append_tasks"),
         A::TodoCompletions(_) => no_payload("todo_completions"),
-        // --- names only, ported from the Python original -------------------
+        // --- names only, measured against Desktop --------------------------
         //
-        // Not in the reference, so there is nothing here to measure against —
-        // but the Python's table *is* a measurement, made against Desktop by
-        // this project's first implementation, and CLAUDE.md is explicit that
-        // its code is the source rather than a paraphrase of it. These are the
-        // ones where Desktop's name is **not** the snake-cased constructor, so
-        // the fallback below would get them wrong rather than merely coarse:
+        // Not in the reference, so the corpus cannot check these; they come
+        // from an earlier measurement of Desktop's own output, which is the
+        // only evidence there is. These are the ones where Desktop's name is
+        // **not** the snake-cased constructor, so the fallback below would get
+        // them wrong rather than merely coarse:
         //
         //   ChatCreate → create_group, not chat_create
         //   HistoryClear → clear_history, not history_clear
@@ -895,16 +893,14 @@ fn service_action(
         // more — the same silence that lost all 63 actions in the first live
         // run, narrowed to everything outside the reference's own nine. Desktop
         // names an action its export code predates by snake-casing the
-        // constructor, and so does the Python (`snake_action`,
-        // serialize.py:817), which added it after a raw Telethon class name
-        // leaked into one of its reference diffs.
+        // constructor, so the fallback does the same. Without it a raw TL class
+        // name leaks into the export.
         //
-        // **The payloads are deliberately not ported yet.** The Python carries
-        // ~20 of them (`custom_action`'s message, `phone_call`'s duration,
+        // **The payloads are deliberately not written.** Roughly 20 actions
+        // carry one (`custom_action`'s message, `phone_call`'s duration,
         // `gift_code`'s slug…); reproducing those against grammers' TL shapes
-        // with no oracle would be inference, and the wire leg's new `extra`
-        // tally would score any wrong key. Recorded as follow-up in AUDIT.md
-        // with the Python's table as the specification.
+        // with no oracle would be inference, and the wire leg's `extra` tally
+        // would score any wrong key. Recorded as follow-up in ROADMAP.md.
         other => Some((snake_variant(other), Vec::new())),
     }
 }
@@ -925,8 +921,7 @@ fn snake_variant(action: &tl::enums::MessageAction) -> String {
     let bytes = camel.as_bytes();
     for (i, ch) in camel.char_indices() {
         // A run of capitals is one word: `SetMessagesTTL` is `set_messages_ttl`,
-        // not `set_messages_t_t_l`. Same rule as the Python's `snake_action`,
-        // which is where this was measured.
+        // not `set_messages_t_t_l`.
         if ch.is_ascii_uppercase() && i > 0 && !bytes[i - 1].is_ascii_uppercase() {
             out.push('_');
         }
@@ -1248,8 +1243,7 @@ mod tests {
                 ),
                 "poll_append_answer",
                 // No `answer` key: the reference's three carry actor and action
-                // and nothing else. The Python original does write one, and
-                // this follows Desktop.
+                // and nothing else, and Desktop is what this follows.
                 vec![],
             ),
         ];
@@ -1275,8 +1269,7 @@ mod tests {
         // more — the same silence that lost all 63 actions before, narrowed to
         // everything outside the reference's own nine. Desktop snake-cases the
         // constructor for actions its export code predates, and so does the
-        // Python (`snake_action`, serialize.py:817), after a raw Telethon class
-        // name leaked into one of its reference diffs.
+        // fallback here.
         let cases = [
             // Snake-cased straight off the constructor.
             (
@@ -1295,8 +1288,8 @@ mod tests {
                 "conference_call",
             ),
             // And the ones where Desktop's name is *not* the snake-cased
-            // constructor, ported from the Python original's table. The
-            // fallback would get these wrong rather than merely coarse.
+            // constructor, taken from the measured table. The fallback would
+            // get these wrong rather than merely coarse.
             (tl::enums::MessageAction::HistoryClear, "clear_history"),
             (tl::enums::MessageAction::ContactSignUp, "joined_telegram"),
             (

@@ -1,16 +1,15 @@
-//! Typed errors, and the one distinction the Python original kept losing.
+//! Typed errors, and the one distinction that is easiest to lose.
 //!
 //! **A rate limit is temporary; a refusal is not. Never treat them alike.**
 //!
-//! In the Python implementation four separate places collapsed a `FloodWait`
-//! into a permanent refusal, because the `except Exception` around them was
+//! The way the two get collapsed is always the same: a catch-all handler is
 //! written for an admin-only method being *refused* — a permanent condition
-//! where giving up quietly is correct — and a rate limit landed in the same
-//! net. In two of those places it made every line of the retry guard
-//! **unreachable**: the guard saw an ordinary "no" and could not retry, could
-//! not wait, could not count.
+//! where giving up quietly is correct — and a rate limit lands in the same net.
+//! Where a retry guard sits behind such a handler, every line of it becomes
+//! **unreachable**: the guard sees an ordinary "no" and cannot retry, cannot
+//! wait, cannot count.
 //!
-//! That is the single most damaging bug class in the original, and it is
+//! That is the most damaging bug class this code can have, and it is
 //! unrepresentable here: a [`Transient`] cannot be absorbed by a handler that
 //! matches on [`Refused`], because they are different variants and the compiler
 //! will not let a match on one silently swallow the other.

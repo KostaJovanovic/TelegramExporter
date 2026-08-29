@@ -14,10 +14,9 @@
 //!
 //! Exit status is the number of topics that did not match exactly.
 //!
-//! **This exists before the code it judges.** In the Python original the
-//! equivalent harness arrived late and immediately found five media-naming bugs
-//! that no unit test had caught — because a unit test encodes what you believed,
-//! and this encodes what Desktop actually did.
+//! **This exists before the code it judges.** A harness that arrives late finds
+//! bugs no unit test caught, every time — because a unit test encodes what you
+//! believed, and this encodes what Desktop actually did.
 
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;

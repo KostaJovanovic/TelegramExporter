@@ -2,9 +2,8 @@
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-rem Same shape as the Python project's save.bat: run it bare for a menu, or pass
-rem the action as an argument. Exit code is non-zero if anything failed, so it
-rem can be chained.
+rem Run it bare for a menu, or pass the action as an argument. Exit code is
+rem non-zero if anything failed, so it can be chained.
 
 set REPO=https://github.com/KostaJovanovic/TelegramExporter.git
 set EXENAME=TelegramExporter.exe
@@ -125,8 +124,8 @@ for /f %%i in ('git rev-list --count HEAD 2^>nul') do set COMMIT_COUNT=%%i
 if not defined COMMIT_COUNT set COMMIT_COUNT=0
 set /a NEXT_COUNT=%COMMIT_COUNT%+1
 
-rem Version label, same scheme as the Python project's: commits crowned as major
-rem releases go in RELEASES (ascending) and each one reads X.0 and restarts the
+rem Version label: commits crowned as major releases go in RELEASES
+rem (ascending) and each one reads X.0 and restarts the
 rem minor counter. Nothing has been crowned yet, so this reads v0.NN.
 set RELEASES=
 for /f %%v in ('powershell -NoProfile -Command "$n=%NEXT_COUNT%; $major=0; $base=0; foreach($r in @(%RELEASES%)){ if($n -ge $r){ $major++; $base=$r } else { break } }; if($major -eq 0){ '0.{0:D2}' -f $n } elseif(($n-$base) -eq 0){ '{0}.0' -f $major } else { '{0}.{1:D2}' -f $major,($n-$base) }"') do set VERLABEL=%%v
@@ -311,7 +310,6 @@ if errorlevel 1 (
 for /f %%s in ('powershell -NoProfile -Command "'{0:N1}' -f ((Get-Item 'dist\%EXENAME%').Length/1MB)"') do set EXESIZE=%%s
 echo.
 echo [ok]   dist\%EXENAME%  %EXESIZE% MB
-echo        (the PyInstaller build of the Python original was 46.4 MB)
 
 rem The cache, reported where somebody will actually read it. target\ reached
 rem 45 GB without a single line of this script ever mentioning it, and cargo

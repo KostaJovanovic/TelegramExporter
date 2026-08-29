@@ -14,18 +14,24 @@ even valid UTF-8) and turned every LF into CRLF, and the 12-byte rows were
 reflowed to 16 by rustfmt, which fills the 100-column width. Three diffs
 against a file whose whole claim is that it is reproducible.
 
-telethon is not on the system path; it lives in the Python original's venv:
+Needs telethon, which is only used to read its baked-in JPEG header constants.
+Any interpreter that has it will do:
 
-    C:\Users\Kosta\Projekti\telegram\.venv\Scripts\python.exe tools/gen_jpeg_header.py
+    py -m venv .venv && .venv\Scripts\pip install telethon
+    .venv\Scripts\python.exe tools/gen_jpeg_header.py
 """
 import pathlib
 import sys
 
-ORIGINAL = pathlib.Path(r"C:\Users\Kosta\Projekti\telegram")
-sys.path.insert(0, str(ORIGINAL))
-sys.path.insert(0, str(ORIGINAL / ".venv" / "Lib" / "site-packages"))
-
-from telethon import utils  # noqa: E402
+try:
+    from telethon import utils
+except ImportError:
+    sys.exit(
+        "telethon is not importable. It is needed only to read its baked-in\n"
+        "JPEG header constants:\n"
+        r"    py -m venv .venv && .venv\Scripts\pip install telethon" "\n"
+        r"    .venv\Scripts\python.exe tools/gen_jpeg_header.py"
+    )
 
 OUT = pathlib.Path(__file__).resolve().parents[1] / "crates" / "tgx-media" / "src" / "jpeg_header.rs"
 

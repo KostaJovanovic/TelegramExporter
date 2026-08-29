@@ -134,8 +134,8 @@ pub fn synth_prefix(subdir: &str) -> &'static str {
         "photos" => "photo",
         "video_files" | "round_video_messages" => "video",
         "voice_messages" => "audio",
-        // Matches the Python original: N:\telegram export\UA KOLAB
-        // PYTHON\0001 - ćaskanje\thumbnails\thumb_10@08-03-2026_23-17-42.jpg.
+        // A thumbnail is stemmed `thumb`, giving names of the shape
+        // `thumbnails/thumb_10@08-03-2026_23-17-42.jpg`.
         "thumbnails" => "thumb",
         _ => "file",
     }

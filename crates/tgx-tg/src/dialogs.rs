@@ -182,9 +182,9 @@ pub type WaitingFn<'a> = &'a mut (dyn FnMut(u64) + Send);
 /// reported at all, which is what separates "not counted" from "counted as
 /// nothing".
 ///
-/// **One chat refusing must not end the run.** The Python original's counting
-/// pass collapsed a rate limit into a permanent refusal and abandoned the
-/// remaining chats; here a [`EnrichError::Transient`] waits and retries that one
+/// **One chat refusing must not end the run.** A counting pass that collapses a
+/// rate limit into a permanent refusal abandons every chat behind it; here a
+/// [`EnrichError::Transient`] waits and retries that one
 /// chat *once*, then gives up on it with `None` and moves on. A second wait for
 /// the same chat means Telegram is throttling in earnest and spending the rest
 /// of the queue's patience on it helps nobody.

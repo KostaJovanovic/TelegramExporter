@@ -58,9 +58,9 @@ pub struct Enrichment {
 /// Retries once. Anything up to [`ENRICH_MAX_WAIT`] is waited out; past that
 /// the loss is *counted* rather than hidden.
 ///
-/// The original gave up instantly and uncounted, because its `except Exception`
-/// was written for an admin-only method being refused — a permanent condition
-/// where giving up quietly is correct — and a rate limit landed in the same
+/// Giving up instantly and uncounted is what happens when a catch-all written
+/// for an admin-only method being refused — a permanent condition where giving
+/// up quietly is correct — also catches a rate limit, which lands in the same
 /// net. That is unrepresentable here: `Transient` and `Refused` are different
 /// variants.
 pub async fn guarded<T, F, Fut>(
@@ -311,9 +311,9 @@ pub async fn fetch_reactors(
 /// fix that and was read by nothing.
 ///
 /// `poll_hash: 0` is required and means "I have nothing cached, send it in
-/// full". The Python original records that omitting it raised before any
-/// request went out, and that the surrounding `except` then swallowed the
-/// error — so the feature silently never worked until a test caught it.
+/// full". Omitting it raises before any request goes out, and an error
+/// swallowed at that point leaves the feature silently never working — which
+/// is how this last failed, and why the test below exists.
 pub async fn fetch_poll_results(
     client: &Client,
     peer: PeerRef,

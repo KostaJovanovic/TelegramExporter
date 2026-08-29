@@ -471,9 +471,9 @@ impl Shell {
                             // label promises an exclusive selection, and adding
                             // to one meant clicking All and then this left every
                             // chat ticked with the footer still counting the lot.
-                            // The Python `_select_forums` assigns the set
-                            // outright; the replacement is scoped to the visible
-                            // rows like the other three, so a tick on a chat the
+                            // Assigning the set outright would do it, but the
+                            // replacement is scoped to the visible rows like
+                            // the other three, so a tick on a chat the
                             // filter is hiding is left where it is rather than
                             // silently dropped.
                             3 => {
