@@ -82,6 +82,19 @@ pub struct ExportResult {
     /// **A short member list says so.** A truncated roster is
     /// indistinguishable from a complete one, which makes it worse than none.
     pub members_complete: bool,
+    /// Whether this chat has an invite link in its header.
+    ///
+    /// A flag, not the link. `export_results.html` says the group has one and
+    /// prints `[INVITE LINK]` in its place: the link is a **working credential
+    /// to a private group** — anyone holding the page can join — and the index
+    /// is the file most likely to be opened, mailed or archived somewhere less
+    /// careful than `result.json`. Desktop writes the link there in full and
+    /// that is where it stays.
+    ///
+    /// Carried on the result rather than passed down because the header is
+    /// built before the read pass and the index is written after it, on nine
+    /// different paths including every error return.
+    pub has_invite_link: bool,
 }
 
 impl ExportResult {
@@ -522,6 +535,7 @@ impl<'a> ChatExporter<'a> {
         if !invites.is_empty() {
             chat_head.insert("invite_links".into(), Value::Array(invites.clone()));
         }
+        result.has_invite_link = !invites.is_empty() || chat_head.contains_key("invite_link");
         if !chat_head.is_empty() {
             progress(Progress::Log(format!(
                 "chat details: {} ({} invite link(s))",
@@ -666,7 +680,16 @@ impl<'a> ChatExporter<'a> {
             // two-minute wait the loop comes back to the top of `'resume`, not
             // to the top of a message.
             if cancel.is_cancelled() {
-                Self::close_all(&mut sinks, root, chat, topics, split, &mut result, progress);
+                Self::close_all(
+                    &mut sinks,
+                    root,
+                    chat,
+                    topics,
+                    &self.names,
+                    split,
+                    &mut result,
+                    progress,
+                );
                 return Err(ExportError::Cancelled);
             }
 
@@ -688,7 +711,16 @@ impl<'a> ChatExporter<'a> {
                 // goes; `result.complete()` is what tells it apart from a whole
                 // one.
                 if cancel.is_cancelled() {
-                    Self::close_all(&mut sinks, root, chat, topics, split, &mut result, progress);
+                    Self::close_all(
+                        &mut sinks,
+                        root,
+                        chat,
+                        topics,
+                        &self.names,
+                        split,
+                        &mut result,
+                        progress,
+                    );
                     return Err(ExportError::Cancelled);
                 }
                 match iter.next().await {
@@ -751,6 +783,7 @@ impl<'a> ChatExporter<'a> {
                                     root,
                                     chat,
                                     topics,
+                                    &self.names,
                                     split,
                                     &mut result,
                                     progress,
@@ -780,6 +813,7 @@ impl<'a> ChatExporter<'a> {
                                     root,
                                     chat,
                                     topics,
+                                    &self.names,
                                     split,
                                     &mut result,
                                     progress,
@@ -798,6 +832,7 @@ impl<'a> ChatExporter<'a> {
                                 root,
                                 chat,
                                 topics,
+                                &self.names,
                                 split,
                                 &mut result,
                                 progress,
@@ -869,7 +904,16 @@ impl<'a> ChatExporter<'a> {
         // already whole — so this returns the JSON and HTML rather than
         // throwing them away for the sake of the media nobody waited for.
         if cancel.is_cancelled() {
-            Self::close_all(&mut sinks, root, chat, topics, split, &mut result, progress);
+            Self::close_all(
+                &mut sinks,
+                root,
+                chat,
+                topics,
+                &self.names,
+                split,
+                &mut result,
+                progress,
+            );
             return Err(ExportError::Cancelled);
         }
         // Keyed rather than `values_mut`: the cancel path below has to hand the
@@ -900,7 +944,16 @@ impl<'a> ChatExporter<'a> {
             // interrupting it mid-flight would leave part-written files that
             // the HTML already links to.
             if cancel.is_cancelled() {
-                Self::close_all(&mut sinks, root, chat, topics, split, &mut result, progress);
+                Self::close_all(
+                    &mut sinks,
+                    root,
+                    chat,
+                    topics,
+                    &self.names,
+                    split,
+                    &mut result,
+                    progress,
+                );
                 return Err(ExportError::Cancelled);
             }
             let queued = jobs.len();
@@ -998,7 +1051,16 @@ impl<'a> ChatExporter<'a> {
             }
         }
 
-        Self::close_all(&mut sinks, root, chat, topics, split, &mut result, progress);
+        Self::close_all(
+            &mut sinks,
+            root,
+            chat,
+            topics,
+            &self.names,
+            split,
+            &mut result,
+            progress,
+        );
         progress(Progress::Messages {
             chat_id: chat.id,
             done,

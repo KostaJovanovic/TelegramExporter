@@ -292,9 +292,24 @@ pub fn location_of(media: &tl::enums::MessageMedia) -> Option<(Value, Option<i32
     let mut out = Map::new();
     // Desktop writes latitude first, and `order.rs` does not reach inside a
     // nested object, so the insertion order here is the file's order.
-    out.insert("latitude".into(), json!(p.lat));
-    out.insert("longitude".into(), json!(p.long));
+    out.insert("latitude".into(), json!(coord(p.lat)));
+    out.insert("longitude".into(), json!(coord(p.long)));
     Some((Value::Object(out), period))
+}
+
+/// Desktop's coordinate precision: six decimal places.
+///
+/// It writes `44.857507`; the `f64` Telegram sends prints as
+/// `44.857507352853844`, so writing it verbatim put eleven invented digits into
+/// the file — about a ten-thousandth of a millimetre of claimed accuracy on a
+/// value Telegram rounds before it sends it. These are the only floats in a
+/// whole export, so nothing else in the format shares the rule and nothing else
+/// would have caught it.
+///
+/// It shows up twice per message: here, and in the map URL the HTML builds from
+/// this same value.
+fn coord(v: f64) -> f64 {
+    (v * 1e6).round() / 1e6
 }
 
 #[cfg(test)]
@@ -1039,9 +1054,12 @@ mod tests {
 
     #[test]
     fn a_location_is_latitude_then_longitude_and_a_live_one_carries_its_period() {
+        // The full-precision pair Telegram actually sends. Desktop writes six
+        // decimal places, so writing these verbatim invented eleven digits of
+        // accuracy the source never had.
         let point = tl::enums::GeoPoint::Point(tl::types::GeoPoint {
-            long: 20.370197,
-            lat: 44.857507,
+            long: 20.370196752853844,
+            lat: 44.857507352853844,
             access_hash: 0,
             accuracy_radius: None,
         });
@@ -1052,6 +1070,10 @@ mod tests {
             .expect("a point");
         assert_eq!(place["latitude"], 44.857507);
         assert_eq!(place["longitude"], 20.370197);
+        // The written form, not just the value: this is the one place in the
+        // format where a float reaches the file, and the digits are the defect.
+        assert_eq!(place["latitude"].to_string(), "44.857507");
+        assert_eq!(place["longitude"].to_string(), "20.370197");
         assert_eq!(period, None);
         // Desktop writes latitude first and `order.rs` does not reach inside a
         // nested object, so insertion order is the file's order.
