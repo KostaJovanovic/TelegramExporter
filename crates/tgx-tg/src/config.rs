@@ -138,9 +138,9 @@ pub struct Settings {
 
     // Performance
     //
-    // **There is no `chat_concurrency`.** The Python original offers "Chats at
-    // once, 1 to 8"; this engine exports one chat at a time, so the field was
-    // carried over, clamped on load, offered nowhere and read by nothing. A
+    // **There is no `chat_concurrency`.** This engine exports one chat at a
+    // time, so a "chats at once" field is clamped on load, offered nowhere and
+    // read by nothing. A
     // setting that does nothing is the same lie as a control that does
     // nothing, and it survived precisely because a struct field that is
     // written and never read is not dead code. An old `settings.json` naming
@@ -362,8 +362,7 @@ fn same_shape(a: &Value, b: &Value) -> bool {
 /// in another process, a momentarily unavailable domain controller for the
 /// grantee lookup — left the bearer credential at default permissions for the
 /// life of the process, and `actions::ready`'s deliberate re-call did nothing.
-/// The Python original got this right (`app/config.py:81-86`) and the port lost
-/// it. A retry costs one process spawn on a path that is already failing.
+/// A retry costs one process spawn on a path that is already failing.
 pub fn ensure_data_dir() -> std::io::Result<PathBuf> {
     use std::sync::atomic::{AtomicBool, Ordering};
     static RESTRICTED: AtomicBool = AtomicBool::new(false);
@@ -429,8 +428,8 @@ fn windows_dir() -> PathBuf {
 /// never returns is an app that never draws. `.output()` waits forever, and
 /// there are real ways to get there: a network path in `SystemRoot`, a hung
 /// filter driver, a domain controller the grantee lookup cannot reach. The
-/// Python original passed `timeout=15` for exactly this reason and the port
-/// dropped it.
+/// timeout is the only thing standing between any of those and a window that
+/// never opens.
 #[cfg(windows)]
 const LOCKDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 

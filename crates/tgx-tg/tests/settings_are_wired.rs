@@ -11,8 +11,8 @@
 //! That is the worst shape a defect can take here: it is invisible from the
 //! inside, invisible from the tests, and from the outside it looks exactly like
 //! a feature that works. The only way it surfaced was somebody comparing a real
-//! export against the Python original's and noticing the reaction lists were
-//! short.
+//! export against another export of the same chat and noticing the reaction
+//! lists were short.
 //!
 //! So the check is mechanical rather than a matter of remembering: parse the
 //! field names out of `Settings`, and require each to appear in code that is

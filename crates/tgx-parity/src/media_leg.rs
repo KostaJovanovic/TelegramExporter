@@ -1,9 +1,9 @@
 //! The media leg: replay the reference's own message sequence through the
 //! naming rules and compare against the filenames Desktop actually wrote.
 //!
-//! This is the check that found five bugs in the Python implementation, none of
-//! which any unit test had caught — because `tools/diff_reference.py` replays
-//! `result.json` through the *HTML writer* and so never touches the naming.
+//! A harness that replays `result.json` through the *HTML writer* alone never
+//! touches the naming rules, so a media-naming bug survives every test it runs.
+//! This leg is the one that reads them.
 //!
 //! **What it can and cannot see.** The reference JSON records the final path
 //! but not Telegram's document id, so a file Desktop saved once and pointed

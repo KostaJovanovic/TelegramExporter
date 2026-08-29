@@ -11,10 +11,10 @@
 //! archive opened with a dead link out of it.
 //!
 //! **Built only from classes Desktop's own stylesheet defines**, which is not a
-//! small constraint. The Python original's first version of this page used
-//! `section_chats` and `topics_list`, invented to match a hand-written
-//! stylesheet that was later replaced by Desktop's real one; neither exists
-//! there — 0 rules each — so the page rendered as unstyled text.
+//! small constraint. An earlier attempt at this page used `section_chats` and
+//! `topics_list`, invented to match a hand-written stylesheet that was later
+//! replaced by Desktop's real one; neither class exists there — 0 rules each —
+//! so the page rendered as unstyled text.
 //! [`tests::every_class_this_page_uses_exists_in_desktops_stylesheet`] checks
 //! each one against [`crate::assets::STYLE_CSS`], the same way the original's
 //! offline suite does.
@@ -145,8 +145,8 @@ fn render(
     t.close("head");
     // No `js/script.js` and no `onload="CheckLocation();"`, unlike a topic page.
     // Nothing on this page calls a handler — there are no spoilers, no
-    // `GoToMessage` links and no map thumbnails — and the specimen at
-    // `N:\telegram export\UA KOLAB PYTHON\export_results.html` carries neither.
+    // `GoToMessage` links and no map thumbnails — and the specimen this page
+    // was modelled on carries neither.
     t.open("body", &[]);
     t.open("div", &[a("class", "page_wrap")]);
 
@@ -268,8 +268,10 @@ mod tests {
 
     #[test]
     fn the_page_has_every_landmark_the_specimen_has() {
-        // Checked against `N:\telegram export\UA KOLAB PYTHON\export_results.html`,
-        // which is what a reader of this archive actually sees.
+        // **This page has no oracle.** Desktop writes no `export_results.html`
+        // at all, because it cannot split a forum into topics — so no leg can
+        // judge it. Checked against a specimen export instead, which is what a
+        // reader of the archive actually sees.
         let entries = [
             entry("0001 - ćaskanje/messages.html", "ćaskanje"),
             entry("0012 - foto video/messages.html", "foto video"),

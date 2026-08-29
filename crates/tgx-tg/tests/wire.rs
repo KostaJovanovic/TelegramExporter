@@ -6,8 +6,8 @@
 //! structurally cannot reach — `convert.rs` and `plan.rs` — with the shapes
 //! most likely to break them.
 //!
-//! Every case below is drawn from something the reference export or the Python
-//! notes record as having actually happened.
+//! Every case below is drawn from something the reference export or a past
+//! live run records as having actually happened.
 
 mod fixtures;
 

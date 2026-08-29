@@ -8,19 +8,19 @@
 //!
 //! 1. Everything interpolated into markup goes through [`esc`].
 //! 2. Every href goes through [`safe_href`]. *Every* one — the media rows and
-//!    the inline previews included. Five hrefs in the Python original were
-//!    escaped but never scheme-checked, and sat green for months because the
-//!    test that should have caught them fed markup to a URL field, which
-//!    passes the scheme check vacuously.
+//!    the inline previews included. An href that is escaped but never
+//!    scheme-checked sits green indefinitely, because the test that should
+//!    catch it feeds markup to a URL field — which passes the scheme check
+//!    vacuously.
 //! 3. **Escaping is not enough inside a JavaScript expression.** Reproducing
 //!    Desktop's markup means emitting `onclick="return GoToMessage(12)"`, and
 //!    an id interpolated there is code, not text. See [`message_number`].
 
 /// Escape for HTML the way Desktop does.
 ///
-/// Python's `html.escape` turns an apostrophe into `&#x27;` where Desktop
-/// writes `&apos;`. Both are correct HTML and both render identically; the
-/// named form is used so output diffs clean against a real export.
+/// Desktop writes `&apos;` for an apostrophe where most escapers emit `&#x27;`.
+/// Both are correct HTML and both render identically; the named form is used so
+/// output diffs clean against a real export.
 pub fn esc(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -165,8 +165,8 @@ mod tests {
 
     #[test]
     fn apostrophe_is_named_not_numeric() {
-        // Desktop writes &apos;. Python's html.escape writes &#x27;, which
-        // renders the same and diffs on every line carrying one.
+        // Desktop writes &apos;. The numeric &#x27; renders the same and diffs
+        // on every line carrying one.
         assert_eq!(esc("it's"), "it&apos;s");
     }
 

@@ -17,6 +17,6 @@ the assets at run time from a Desktop installation the user already has, or by
 going back to a reproduction and accepting that the HTML will no longer match
 byte for byte.
 
-Do not edit these files. `tools/diff_reference.py` compares our output against a
-real Desktop export, and a local edit here would show up as a difference in
-every single exported page.
+Do not edit these files. The parity legs compare our output against a real
+Desktop export, and a local edit here would show up as a difference in every
+single exported page.

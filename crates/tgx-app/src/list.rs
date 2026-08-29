@@ -1,10 +1,8 @@
 //! What the chat list paints: the sort, the five buckets, folding, the filter.
 //!
-//! Pure logic, deliberately. Nothing here touches gpui, so the rules below are
-//! testable without opening a window — and they are rules worth testing: every
-//! one is a bug found the expensive way in the Python original
-//! (`app/ui/main_window.py`), where they lived inside a `QTreeWidget` and could
-//! only be checked by looking at the screen.
+//! Pure logic, deliberately. Nothing here touches the UI framework, so the
+//! rules below are testable without opening a window — and every one of them
+//! is a rule that would otherwise only be checkable by looking at the screen.
 //!
 //! The window calls [`rows`] once per frame to get what to paint, and
 //! [`visible`] to find what All / None / Invert / Only forums act on.
@@ -72,8 +70,9 @@ pub enum SortMode {
 impl SortMode {
     /// The name this mode is stored under in `settings.json`.
     ///
-    /// These are the Python original's keys unchanged, so a settings file
-    /// written by either version opens on the sort its owner chose.
+    /// These strings are the on-disk settings format. Renaming one does not
+    /// fail loudly: it silently resets every existing user to the default
+    /// sort, because the key their file holds no longer matches anything.
     pub fn key(self) -> &'static str {
         match self {
             SortMode::Recent => "recent",
@@ -166,7 +165,8 @@ impl Category {
         }
     }
 
-    /// The name a fold is remembered under — the Python original's keys.
+    /// The name a fold is remembered under. On-disk format, like
+    /// [`SortMode::key`] — renaming one silently forgets a user's folds.
     pub fn key(self) -> &'static str {
         match self {
             Category::Channels => "channel",
@@ -195,11 +195,9 @@ pub enum Row<'a> {
         ///
         /// Carried as a number rather than glued onto the label, because a
         /// count inside the string is something the filter would then search.
-        /// (The Python appended it to the heading's text before the delegate
-        /// took over painting it.) It counts what is painted rather than the
-        /// bucket's full size, so a heading can never contradict the rows
-        /// under it — the Python kept the pre-filter child count and read
-        /// "Channels 40" above three matches.
+        /// It counts what is painted rather than the bucket's full size, so a
+        /// heading can never contradict the rows under it: a pre-filter count
+        /// reads "Channels 40" above three matches.
         total: usize,
         /// Whether this category is folded shut.
         ///
@@ -236,9 +234,8 @@ impl Default for View {
 
 /// Apply a descending mode's direction to a *primary* key, and to nothing else.
 ///
-/// Qt inverted the whole result of `__lt__` for a descending sort, so the
-/// Python original needed a `stable()` helper to un-invert everything that has
-/// to hold whichever way the sort runs. Writing the comparator directly
+/// A framework that inverts the whole comparison for a descending sort forces
+/// every tie-break to be un-inverted by hand. Writing the comparator directly
 /// reverses that burden: nothing is inverted unless it is passed through here,
 /// so this is called on the primary key alone.
 ///
@@ -256,8 +253,7 @@ fn directed(ordering: Ordering, descending: bool) -> Ordering {
 
 /// The form of a title that sorting and filtering compare.
 ///
-/// `to_lowercase` is the closest std has to Python's `casefold`; both exist so
-/// that a title's capitalisation never decides its place in the list.
+/// Exists so that a title's capitalisation never decides its place in the list.
 fn folded_title(title: &str) -> String {
     title.to_lowercase()
 }
@@ -283,10 +279,10 @@ fn compare(a: &ChatInfo, b: &ChatInfo, sort: SortMode) -> Ordering {
             // **A missing count is not a count of zero**, and an uncounted chat
             // sorts below every counted one *in both directions* — the row is
             // blank, and a column of blanks at the top reads as an empty list.
-            // Kept out of `directed` on purpose: the Python used -1 as the key
-            // for exactly this and got it only half right, because the
-            // direction flip applied to the sentinel too and floated the blanks
-            // to the top of the ascending sort.
+            // Kept out of `directed` on purpose. A sentinel value — -1 for "no
+            // count" — gets this only half right, because the direction flip
+            // applies to the sentinel too and floats the blanks to the top of
+            // the ascending sort.
             (None, Some(_)) => Ordering::Greater,
             (Some(_), None) => Ordering::Less,
             (None, None) => Ordering::Equal,
@@ -409,9 +405,7 @@ pub fn rows<'a>(chats: &'a [ChatInfo], view: &View) -> Vec<Row<'a>> {
 /// **A folded category's chats still count as visible.** Folding is a way of
 /// looking at the list, not a second filter: if it excluded chats, tidying the
 /// view would silently change what All selects, with nothing on screen saying
-/// so, and the ticks would disagree with the footer's total. This is also what
-/// the Python did, though by accident of Qt — collapsing a parent never sets a
-/// child's `isHidden`, which is what `_visible_chats` tested.
+/// so, and the ticks would disagree with the footer's total.
 ///
 /// Returned in painting order, so a caller may zip it against [`rows`].
 pub fn visible<'a>(chats: &'a [ChatInfo], view: &View) -> Vec<&'a ChatInfo> {

@@ -272,10 +272,9 @@ pub type ProgressFn<'a> = &'a mut (dyn FnMut(Progress) + Send);
 /// What the two per-message requests recovered, if either fired.
 ///
 /// Carried alongside the message rather than grafted onto it: `grammers`'
-/// `Message` is not ours to mutate, and the Python original's in-place
-/// `msg.reactions.recent_reactions = ...` is exactly the kind of edit that
-/// makes it hard to tell afterwards what came off the wire and what we asked
-/// for separately.
+/// `Message` is not ours to mutate, and an in-place edit of
+/// `reactions.recent_reactions` is exactly the kind that makes it hard to tell
+/// afterwards what came off the wire and what we asked for separately.
 #[derive(Debug, Default)]
 struct MessageExtras {
     /// Everyone who reacted, when the message's own sample was short.

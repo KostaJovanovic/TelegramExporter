@@ -1,9 +1,9 @@
-//! The typefaces, embedded in the binary and handed to GPUI's text system.
+//! The typefaces, embedded in the binary and handed to the text system.
 //!
-//! `fonts/*.ttf` are a **build artefact copied verbatim** from the PySide6
-//! original's `app/ui/fonts/`. They are Geist and Geist Mono with Latin and
-//! Cyrillic *merged into one file per weight*, because Qt had no equivalent of
-//! CSS `unicode-range` and could not stitch two files into one family. Do not
+//! `fonts/*.ttf` are a **build artefact, checked in rather than generated**.
+//! They are Geist and Geist Mono with Latin and Cyrillic *merged into one file
+//! per weight*, because a toolkit with no equivalent of CSS `unicode-range`
+//! cannot stitch two files into one family. Do not
 //! regenerate or subset them: the merge is the reason a Russian or Ukrainian
 //! chat title renders in the design's typeface instead of dropping to a
 //! system fallback halfway through a word.

@@ -41,9 +41,9 @@ lto = "thin"
 codegen-units = 1
 strip = true
 
-# The Python build was 46.4 MB via PyInstaller. Record the Rust number so a
-# sudden jump is visible, the way the Git-Bash-vs-PowerShell OpenSSL
-# discovery was (+2.5 MB from the wrong build shell).
+# Record the binary size so a sudden jump is visible, the way the
+# Git-Bash-vs-PowerShell OpenSSL discovery was (+2.5 MB from the wrong build
+# shell).
 #
 # **20.3 MB on 2026-08-27**, and the number this comment asked for had never
 # actually been written down. It splits 14.9 MB `.text` / 4.6 MB `.rdata`, with

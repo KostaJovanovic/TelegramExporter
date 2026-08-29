@@ -12,8 +12,8 @@
 
 use std::collections::VecDeque;
 
-/// How many lines are kept. The Python original's `setMaximumBlockCount(2000)`,
-/// carried across for the same reason: a long queue with a chatty chat can
+/// How many lines are kept, and why there is a cap at all: a long queue with a
+/// chatty chat can
 /// produce thousands of lines, and an unbounded transcript nobody reads is
 /// still memory somebody paid for.
 pub const CAPACITY: usize = 2000;

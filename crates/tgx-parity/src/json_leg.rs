@@ -1,9 +1,8 @@
 //! The JSON leg: re-emit a reference `result.json` and byte-diff it.
 //!
-//! The Python original never tested this direction — its harness replayed
-//! `result.json` through the *HTML* writer only, so the JSON emitter itself was
-//! covered by unit tests that encoded what we believed Desktop did. This leg
-//! checks the belief.
+//! A harness that replays `result.json` through the *HTML* writer alone never
+//! tests this direction: the JSON emitter stays covered only by unit tests that
+//! encode what we believed Desktop did. This leg checks the belief.
 //!
 //! It tests four things at once, independently of everything upstream:
 //!

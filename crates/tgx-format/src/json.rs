@@ -3,17 +3,16 @@
 //! Four things define it, all recovered from a reference export:
 //!
 //! * **One-space indent.** `JSON_INDENT = 1`.
-//! * **Raw UTF-8**, not `\uXXXX` escapes. Python's `ensure_ascii=False`;
-//!   serde_json's default.
+//! * **Raw UTF-8**, not `\uXXXX` escapes — which is serde_json's default.
 //! * **Desktop's key order** — see [`crate::order`].
 //! * **`reactions` is indented one level too deep**, a quirk of Desktop's own
 //!   writer that is part of the format because the file is compared line by
 //!   line.
 //!
 //! The escaping question is the one that can hide a silent byte difference, so
-//! it is tested directly rather than reasoned about: see the tests at the foot
-//! of this file, which pin every case where `json.dumps(ensure_ascii=False)`
-//! and `serde_json` could conceivably disagree.
+//! it is pinned directly rather than reasoned about — see the tests at the foot
+//! of this file, and the note there about which of them the reference actually
+//! witnesses and which only pin serde_json against changing under us.
 
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -127,11 +126,11 @@ pub fn header_prelude(header: &Map<String, Value>) -> String {
 /// final `}` and nothing else — verified by `xxd` on the reference, which tails
 /// `...\n }\n}` with no `0a` after it.
 ///
-/// The Python exporter emitted `}\n` here and had done so since the first
-/// commit. Its parity harness replayed `result.json` through the *HTML* writer
-/// only, so the JSON emitter was covered by tests encoding what we believed,
-/// and one byte per file went unnoticed. This is the first thing the JSON leg
-/// caught, on its first run.
+/// One byte, and the kind that hides: a harness that replays `result.json`
+/// through the *HTML* writer alone never reads the JSON emitter's own output,
+/// so a stray `\n` here survives every test that encodes what we believed. The
+/// json leg exists to read the bytes instead, and this is the first thing it
+/// caught.
 pub fn footer() -> String {
     format!("\n{}]\n}}", " ".repeat(INDENT))
 }
@@ -171,7 +170,7 @@ mod tests {
 
     #[test]
     fn non_ascii_is_raw_never_escaped() {
-        // Desktop writes raw UTF-8. This is `ensure_ascii=False`.
+        // Desktop writes raw UTF-8; nothing outside ASCII is escaped.
         let v = json!({ "name": "bitno pročitaj ❤ 👍" });
         let s = to_string(&v);
         assert!(s.contains("bitno pročitaj ❤ 👍"), "got {s}");
@@ -180,17 +179,27 @@ mod tests {
 
     #[test]
     fn empty_containers_stay_on_one_line() {
-        // Python's json.dumps(indent=1) writes [] and {}, not [\n] — and the
-        // reference is full of `"text_entities": []`.
+        // The reference is full of `"text_entities": []`, always on one line.
         let s = to_string(&json!({ "text_entities": [], "o": {} }));
         assert!(s.contains("\"text_entities\": []"), "got {s}");
         assert!(s.contains("\"o\": {}"), "got {s}");
     }
 
-    // ---- escaping parity with Python's json.dumps(ensure_ascii=False) ------
-    // Each of these is a case where the two encoders could differ. Verified
-    // against CPython 3.14: the expected strings below are what json.dumps
-    // actually produces.
+    // ---- escaping, and what each case actually rests on --------------------
+    //
+    // The json leg is the authority here: it diffs our whole output against a
+    // real Desktop export, byte for byte, across 6,643 messages. These tests
+    // exist so a regression names the case instead of surfacing as a whole-file
+    // diff, and so serde_json cannot quietly change its escaping under us.
+    //
+    // **What the reference actually witnesses, counted across the four
+    // topics:** 244 short escapes (`\b \f \n \r \t`). Zero `\u00xx` escapes,
+    // zero DEL, zero U+2028, zero U+2029.
+    //
+    // So the short-form case is grounded in Desktop's own output. The rest pin
+    // serde_json's behaviour for inputs the reference never demonstrates —
+    // right as far as anything here can show, but not measured against Desktop,
+    // because Desktop was never observed writing one.
 
     #[test]
     fn quote_and_backslash_escape() {
@@ -199,10 +208,10 @@ mod tests {
 
     #[test]
     fn control_characters_use_the_short_forms_then_lowercase_u() {
-        // Verified against CPython 3.14, json.dumps(ensure_ascii=False).
-        // The five short forms, then lowercase-u escapes for the rest.
-        // Hex digits are lowercase in both encoders; an uppercase escape
-        // would diff on every message carrying a control character.
+        // The five short forms are what the reference's 244 escapes are made
+        // of. The lowercase-u half below is unwitnessed — see the note above.
+        // Hex digits must stay lowercase: an uppercase escape would diff on
+        // every message carrying a control character.
         assert_eq!(to_string(&json!("\u{8}\t\n\u{c}\r")), r#""\b\t\n\f\r""#);
         assert_eq!(to_string(&json!("\u{1}")), r#""\u0001""#);
         assert_eq!(to_string(&json!("\u{1f}")), r#""\u001f""#);
@@ -210,9 +219,9 @@ mod tests {
 
     #[test]
     fn del_and_line_separators_are_not_escaped() {
-        // Python leaves 0x7F, U+2028 and U+2029 raw under ensure_ascii=False.
-        // serde_json must agree or the two files differ on any message
-        // containing one.
+        // Unwitnessed: the reference contains none of these three. JSON
+        // requires escaping only for the C0 range, the quote and the backslash,
+        // so all three stay raw — this pins serde_json to that, no more.
         assert_eq!(to_string(&json!("\u{7f}")), "\"\u{7f}\"");
         assert_eq!(to_string(&json!("\u{2028}")), "\"\u{2028}\"");
         assert_eq!(to_string(&json!("\u{2029}")), "\"\u{2029}\"");
@@ -322,7 +331,7 @@ mod tests {
     fn the_file_ends_on_the_brace_with_no_trailing_newline() {
         // Measured on the reference with xxd: the last bytes are
         //   20 5d 0a 7d      i.e. " ]\n}"  — and then EOF.
-        // The Python exporter appended a newline here; Desktop does not.
+        // Desktop ends on the brace; a trailing newline is one byte of drift.
         assert_eq!(footer(), "\n ]\n}");
         assert!(!footer().ends_with('\n'));
     }
