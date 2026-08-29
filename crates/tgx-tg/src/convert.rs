@@ -26,9 +26,9 @@ mod entities;
 mod names;
 mod presentation;
 
-pub(crate) use actions::service_action;
+pub(crate) use actions::{action_user_ids, service_action};
 pub use entities::entities_of;
-pub(crate) use names::own_name_parts;
+pub(crate) use names::{own_name_parts, peer_colour};
 pub use names::{peer_key, NameBook, UserFacts};
 pub use presentation::presentation;
 

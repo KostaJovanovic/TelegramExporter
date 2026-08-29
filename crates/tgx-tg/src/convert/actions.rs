@@ -9,6 +9,28 @@
 
 use super::*;
 
+/// The users an action's payload will be asked to name.
+///
+/// **A service message names people who need never have posted.** The inviter
+/// on a `join_group_by_link` joined long before the history being exported, so
+/// no message carries their user object and the roster only holds them if they
+/// are still a member — `names.get` returned the empty string and Desktop, which
+/// resolves all of them, did not. 26 `inviter` fields and 2 `members[0]` came
+/// out blank in one live export beside a perfectly correct id.
+///
+/// Only the three arms below take a user id at all; the rest of the vocabulary
+/// carries titles, ids and nothing resolvable. Returned as bare ids rather than
+/// peer keys because the caller needs the number to reach the session store.
+pub(crate) fn action_user_ids(action: &tl::enums::MessageAction) -> Vec<i64> {
+    use tl::enums::MessageAction as A;
+    match action {
+        A::ChatAddUser(a) => a.users.clone(),
+        A::ChatDeleteUser(a) => vec![a.user_id],
+        A::ChatJoinedByLink(a) => vec![a.inviter_id],
+        _ => Vec::new(),
+    }
+}
+
 /// Desktop's `action` name for a service message, and the fields it carries.
 ///
 /// **This did not exist.** `base_service` wrote id/type/date/actor/text and
@@ -220,5 +242,70 @@ mod tests {
             "set_messages_ttl"
         );
         assert!(!snake_variant(&tl::enums::MessageAction::Empty).is_empty());
+    }
+
+    #[test]
+    fn the_three_actions_that_name_people_hand_over_their_ids() {
+        // What decides whether a name is looked up at all. Miss an arm and the
+        // field goes out empty beside a correct id, which is the shape of the
+        // 26 blank `inviter` fields in the last live export — and no replay leg
+        // can see it, because all three start from a Desktop `result.json` that
+        // already has the name.
+        use tl::enums::MessageAction as A;
+        assert_eq!(
+            action_user_ids(&A::ChatJoinedByLink(
+                tl::types::MessageActionChatJoinedByLink { inviter_id: 12 }
+            )),
+            vec![12]
+        );
+        assert_eq!(
+            action_user_ids(&A::ChatAddUser(tl::types::MessageActionChatAddUser {
+                users: vec![7, 9],
+            })),
+            vec![7, 9]
+        );
+        assert_eq!(
+            action_user_ids(&A::ChatDeleteUser(tl::types::MessageActionChatDeleteUser {
+                user_id: 3,
+            })),
+            vec![3]
+        );
+        // Everything else carries titles and ids, not people to resolve.
+        assert!(action_user_ids(&A::PinMessage).is_empty());
+        assert!(action_user_ids(&A::Empty).is_empty());
+        assert!(
+            action_user_ids(&A::ChatEditTitle(tl::types::MessageActionChatEditTitle {
+                title: "x".to_string(),
+            }))
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn every_action_with_a_name_in_its_payload_is_covered() {
+        // The register the other test cannot be: any arm of `service_action`
+        // that writes an `inviter` or a `members` key must also appear in
+        // `action_user_ids`, or that key resolves to the empty string.
+        use tl::enums::MessageAction as A;
+        let naming: [(&str, A); 3] = [
+            (
+                "join_group_by_link",
+                A::ChatJoinedByLink(tl::types::MessageActionChatJoinedByLink { inviter_id: 1 }),
+            ),
+            (
+                "invite_members",
+                A::ChatAddUser(tl::types::MessageActionChatAddUser { users: vec![1] }),
+            ),
+            (
+                "remove_members",
+                A::ChatDeleteUser(tl::types::MessageActionChatDeleteUser { user_id: 1 }),
+            ),
+        ];
+        for (name, action) in naming {
+            assert!(
+                !action_user_ids(&action).is_empty(),
+                "{name} names a person but hands over no id to resolve"
+            );
+        }
     }
 }

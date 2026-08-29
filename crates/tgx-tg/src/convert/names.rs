@@ -77,24 +77,27 @@ impl NameBook {
         }
     }
 
+    /// Take everything another book learned, without overwriting what this one
+    /// already knows.
+    ///
+    /// The roster is fetched before the read pass, so a name the messages
+    /// themselves supply is the later and better one and must win.
+    pub fn absorb(&mut self, other: &NameBook) {
+        for (k, v) in &other.names {
+            self.names.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (k, v) in &other.html {
+            self.html.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (k, v) in &other.initials {
+            self.initials.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (k, v) in &other.colour {
+            self.colour.entry(k.clone()).or_insert(*v);
+        }
+    }
+
     pub fn learn_user(&mut self, u: &tl::types::User) {
-        // `color` is an enum: a plain palette index, or one of the collectible
-        // forms which carry no index at all. Only the plain one is a colour
-        // Desktop would write.
-        //
-        // **Stored one-based, because that is what this field means.** Telegram
-        // numbers its palette from zero and Desktop's class from one, so a
-        // custom colour of 18 is `userpic19` there. Kept raw, it round-tripped
-        // through `presentation`'s `- 1` and `userpic_class`'s `+ 1` back to
-        // itself and emitted `userpic18` — 494 times in one live export, against
-        // a `userpic19` Desktop wrote and we never did. The html leg cannot see
-        // it: the harness lifts `_p.colours` out of *Desktop's* HTML as class
-        // minus one, so the leg replays Desktop's own number and never once
-        // exercises the wire-to-colour path this line is on.
-        let colour = match &u.color {
-            Some(tl::enums::PeerColor::Color(c)) => c.color.map(|v| v as i64 + 1),
-            _ => None,
-        };
         self.learn(UserFacts {
             id: u.id,
             first: u.first_name.as_deref().unwrap_or(""),
@@ -102,7 +105,7 @@ impl NameBook {
             username: u.username.as_deref().unwrap_or(""),
             deleted: u.deleted,
             contact: u.contact,
-            colour,
+            colour: peer_colour(u),
         });
     }
 
@@ -125,6 +128,26 @@ impl NameBook {
             .or_else(|| self.names.get(key))
             .map(String::as_str)
             .unwrap_or("")
+    }
+}
+
+/// A user's self-chosen name colour, as Desktop's `userpicN` numbers it.
+///
+/// `color` is an enum: a plain palette index, or one of the collectible forms
+/// which carry no index at all. Only the plain one is a colour Desktop writes.
+///
+/// **Returned one-based, because that is what the field means downstream.**
+/// Telegram numbers its palette from zero and Desktop's class from one, so a
+/// custom colour of 18 is `userpic19` there. Kept raw, it round-tripped through
+/// `presentation`'s `- 1` and `userpic_class`'s `+ 1` back to itself and emitted
+/// `userpic18` — 494 times in one live export, against a `userpic19` Desktop
+/// wrote and we never did. The html leg cannot see it: the harness lifts
+/// `_p.colours` out of *Desktop's* HTML as class minus one, so the leg replays
+/// Desktop's own number and never once exercises this path.
+pub(crate) fn peer_colour(u: &tl::types::User) -> Option<i64> {
+    match &u.color {
+        Some(tl::enums::PeerColor::Color(c)) => c.color.map(|v| v as i64 + 1),
+        _ => None,
     }
 }
 

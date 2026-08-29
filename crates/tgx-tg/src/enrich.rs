@@ -113,6 +113,23 @@ pub struct Roster {
     pub capped: bool,
     /// `(replaced, kept)` under `own_names` — see `convert::own_name_parts`.
     pub aliased: (usize, usize),
+    /// Everyone the roster named, as the name book records a person.
+    ///
+    /// **The roster used to write two of the four facts a peer has.** It
+    /// inserted the display name and the HTML name straight into the caller's
+    /// maps and skipped the userpic letters, so a member the message stream
+    /// never carried had a name but no initials — and the HTML fell back to
+    /// splitting that display name on its first space, which is the exact rule
+    /// `initials_from_fields` exists to contradict. The same person then
+    /// rendered `A` under a message and `AR` under a reaction, 29 times across
+    /// five people in one export. `NameBook`'s own doc names this as the reason
+    /// the substitution lives in `learn`; the roster was the call site that went
+    /// around it.
+    ///
+    /// `own_names` is left **false** on this book deliberately:
+    /// `add_member_facts` has already applied the substitution and counted it
+    /// into `aliased`, and a second pass would count it twice.
+    pub book: crate::convert::NameBook,
 }
 
 impl Roster {
@@ -181,9 +198,7 @@ pub async fn fetch_participants(
         let before = roster.members.len();
         for user in &page.users {
             if let tl::enums::User::User(u) = user {
-                roster
-                    .members
-                    .push(member_json(u, settings.own_names, &mut roster.aliased));
+                add_member(&mut roster, u, settings.own_names);
             }
         }
         let gained = roster.members.len() - before;
@@ -244,9 +259,7 @@ async fn basic_group_roster(
     };
     for user in &full.users {
         if let tl::enums::User::User(u) = user {
-            roster
-                .members
-                .push(member_json(u, own_names, &mut roster.aliased));
+            add_member(&mut roster, u, own_names);
         }
     }
     roster
@@ -258,27 +271,121 @@ async fn basic_group_roster(
 /// `own_names` is honoured here as well as in `NameBook`, or
 /// `participants.json` would name a contact one way and every message they
 /// sent another — the export disagreeing with itself about who someone is.
-fn member_json(u: &tl::types::User, own_names: bool, tally: &mut (usize, usize)) -> Value {
-    let username = u.username.as_deref().unwrap_or("");
+fn add_member(roster: &mut Roster, u: &tl::types::User, own_names: bool) {
+    add_member_facts(
+        roster,
+        crate::convert::UserFacts {
+            id: u.id,
+            first: u.first_name.as_deref().unwrap_or(""),
+            last: u.last_name.as_deref().unwrap_or(""),
+            username: u.username.as_deref().unwrap_or(""),
+            deleted: u.deleted,
+            contact: u.contact,
+            colour: crate::convert::peer_colour(u),
+        },
+        u.bot,
+        own_names,
+    );
+}
+
+/// The half of [`add_member`] that does not need a `tl::types::User`.
+///
+/// Split for the reason `NameBook::learn` is split from `learn_user`:
+/// `tl::types::User` carries fifty fields, grammers regenerates it from
+/// Telegram's schema, and a fixture listing all of them rots on every bump — so
+/// the branch worth testing has to be reachable without one. This is the entry
+/// point the tests use.
+fn add_member_facts(
+    roster: &mut Roster,
+    f: crate::convert::UserFacts<'_>,
+    bot: bool,
+    own_names: bool,
+) {
     let (first, last) = crate::convert::own_name_parts(
         own_names,
-        u.contact,
-        username,
-        u.first_name.as_deref().unwrap_or(""),
-        u.last_name.as_deref().unwrap_or(""),
-        tally,
+        f.contact,
+        f.username,
+        f.first,
+        f.last,
+        &mut roster.aliased,
     );
-    json!({
-        "id": format!("user{}", u.id),
-        "name": tgx_format::peer::display_name(first, last, username, u.deleted),
-        "username": u.username,
-        "bot": u.bot,
-    })
+    roster.members.push(json!({
+        "id": format!("user{}", f.id),
+        "name": tgx_format::peer::display_name(first, last, f.username, f.deleted),
+        "username": (!f.username.is_empty()).then_some(f.username),
+        "bot": bot,
+    }));
+    // Through `learn`, so all four facts about this person agree — see
+    // `Roster::book`. The parts are already substituted, which is why the book
+    // itself has `own_names` off.
+    roster
+        .book
+        .learn(crate::convert::UserFacts { first, last, ..f });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A member as the roster receives one.
+    fn member<'a>(id: i64, first: &'a str, last: &'a str) -> crate::convert::UserFacts<'a> {
+        crate::convert::UserFacts {
+            id,
+            first,
+            last,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_roster_learns_the_userpic_letters_not_just_the_name() {
+        // The roster wrote the display name into two maps by hand and skipped
+        // the initials, so a member who never posted rendered `NG` — the first
+        // letter of each of the first two words — where Desktop paints `Nf`,
+        // because the surname really is the single word "fotograf". 29 avatars
+        // across five people disagreed with the rest of the same export.
+        let mut roster = Roster::default();
+        add_member_facts(
+            &mut roster,
+            member(1, "Nađa Gavrilović arh blokade", "fotograf"),
+            false,
+            false,
+        );
+
+        let key = "user1";
+        assert_eq!(roster.book.get(key), "Nađa Gavrilović arh blokade fotograf");
+        assert_eq!(
+            roster.book.initials.get(key).map(String::as_str),
+            Some("Nf"),
+            "the roster must learn the letters from the name fields"
+        );
+        assert_eq!(roster.members.len(), 1);
+        assert_eq!(roster.members[0]["id"], "user1");
+    }
+
+    #[test]
+    fn a_name_the_messages_supply_beats_the_rosters() {
+        // The roster is fetched before the read pass, so anything a message
+        // carries is the later and better fact and must survive the merge.
+        let mut roster = Roster::default();
+        add_member_facts(&mut roster, member(1, "Old", "Name"), false, false);
+
+        let mut book = crate::convert::NameBook::default();
+        book.learn(crate::convert::UserFacts {
+            id: 1,
+            first: "New",
+            last: "Name",
+            ..Default::default()
+        });
+        book.absorb(&roster.book);
+        assert_eq!(book.get("user1"), "New Name");
+
+        // And a peer only the roster knew still arrives.
+        let mut empty = crate::convert::NameBook::default();
+        empty.absorb(&roster.book);
+        assert_eq!(empty.get("user1"), "Old Name");
+        assert_eq!(empty.initials.get("user1").map(String::as_str), Some("ON"));
+    }
 
     fn count(n: i32) -> tl::enums::ReactionCount {
         tl::enums::ReactionCount::Count(tl::types::ReactionCount {
