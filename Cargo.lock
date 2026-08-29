@@ -6215,7 +6215,6 @@ dependencies = [
  "chrono",
  "gpui",
  "gpui-component",
- "grammers-client",
  "log",
  "tgx-tg",
  "tgx-ui",

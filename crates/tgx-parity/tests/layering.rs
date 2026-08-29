@@ -68,6 +68,28 @@ fn tgx_html_does_not_depend_on_grammers() {
     );
 }
 
+/// `tgx-app` is the window. It reaches Telegram only through `tgx-tg`, which
+/// owns the client, the engine and every typed error the UI is allowed to see.
+/// A direct `grammers-*` dependency lets a wire type reach the widgets, and the
+/// seam that keeps GPUI on the main thread and tokio on its own stops being the
+/// only way across.
+///
+/// This assertion was missing while `tgx-app/Cargo.toml` carried an unused
+/// `grammers-client`, so the manifest and CLAUDE.md disagreed and the test that
+/// exists to catch exactly that did not look.
+#[test]
+fn tgx_app_does_not_depend_on_grammers() {
+    let names = dependency_names(&manifest("tgx-app"));
+    let offenders: Vec<&String> = names.iter().filter(|n| n.starts_with("grammers")).collect();
+    assert!(
+        offenders.is_empty(),
+        "tgx-app/Cargo.toml depends on {offenders:?} — the window must reach Telegram only \
+         through tgx-tg, which owns the client and the typed errors the UI may see. A direct \
+         grammers-* dependency lets a wire type reach the widgets. See CLAUDE.md's \
+         Architecture section."
+    );
+}
+
 /// `tgx-parity` is the oracle: it replays *recorded* data — a real Desktop
 /// export, or the corpus cut from one — through our own writers and diffs
 /// the result. If it depended on `tgx-tg` it could reach for a live client
