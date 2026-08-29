@@ -188,11 +188,41 @@ pub struct NameBook {
     /// One counter per synthesised prefix, not one shared `file_N`.
     synth: HashMap<String, u64>,
     used: HashSet<String>,
+    /// Where each Telegram file id was already saved, so a repeat reuses it.
+    ///
+    /// **Per folder, like everything else here**, which is what a topic split
+    /// requires: a path is written into `result.json` relative to the topic's
+    /// own directory, so reusing one across topics would point outside the
+    /// folder it appears in.
+    by_id: HashMap<i64, String>,
 }
 
 impl NameBook {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Where this Telegram file id was saved earlier in the folder, if it was.
+    ///
+    /// **Desktop saves a file once and points every later message at it**, and
+    /// we were strictly one-to-one: 46 references in the reference export
+    /// collapse to 20 basenames there, including nine redundant photos worth
+    /// 3.33 MB, and every extra name shifted 74 file paths and 74 thumbnail
+    /// paths after it.
+    ///
+    /// The id is Telegram's, taken before any byte is fetched — the same fact
+    /// Desktop uses, and the only one available at naming time. The reference
+    /// JSON does not record it, which is why the media leg has to infer repeats
+    /// from paths appearing twice and cannot check this rule directly.
+    pub fn saved_at(&self, id: i64) -> Option<&str> {
+        (id != 0).then(|| self.by_id.get(&id).map(String::as_str))?
+    }
+
+    /// Record where a file id was saved. Later messages carrying it reuse this.
+    pub fn remember(&mut self, id: i64, path: &str) {
+        if id != 0 {
+            self.by_id.entry(id).or_insert_with(|| path.to_string());
+        }
     }
 
     /// Reserve `name` in `subdir`, suffixing `" (1)"` on a clash.
