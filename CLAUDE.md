@@ -254,6 +254,14 @@ transcript and a row of buttons; `default_fonts` would merge egui's own Ubuntu
 and Hack in as fallbacks, so a missing glyph would render in a typeface nobody
 chose. `tgx-ui` and `tgx-app` both declare it and must agree.
 
+`egui_extras` is the egui project's own companion crate, held at the same
+version as `eframe` and taken `default-features = false` — its image, SVG,
+datepicker and syntect extras are each opt-in and none is wanted. It is here for
+`TableBuilder`, which lays out the queue: four fixed count columns and one
+stretch column naming the chat, with a floor under the stretch. Laying that out
+by hand meant the same five-term subtraction written twice under a comment
+asking the next reader to re-check the sum.
+
 `tools/gen_jpeg_header.py` generates the 623-byte JPEG header baked into
 `tgx-media/src/jpeg_header.rs`; `tools/extract_preview_samples.py` produced the
 committed `preview_samples.json` fixture. Regenerate rather than hand-edit.

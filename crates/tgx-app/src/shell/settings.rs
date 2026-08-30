@@ -13,8 +13,8 @@
 //! dropped per field.
 
 use super::Shell;
-use eframe::egui::{self, Layout, Sense, Ui};
-use tgx_ui::components::{caps, eyebrow, rule, soft_rule, tick_box};
+use eframe::egui::{self, Align, Layout, Ui};
+use tgx_ui::components::{action, block, caps, eyebrow, row, rule, soft_rule, tick_box};
 use tgx_ui::tokens::{type_scale, Palette};
 
 /// The seven media categories Desktop offers, with the labels shown for each.
@@ -43,16 +43,11 @@ const EXTRAS: [(&str, &str); 6] = [
     ("member_roster", "Member list"),
 ];
 
-const PAD: f32 = 16.0;
-
 impl Shell {
     pub(super) fn settings_panel(&mut self, ui: &mut Ui) {
         let p = self.palette;
         ui.add_space(12.0);
-        ui.horizontal(|ui| {
-            ui.add_space(PAD);
-            ui.label(eyebrow("Settings", &p));
-        });
+        row(ui, |ui| ui.label(eyebrow("Settings", &p)));
         ui.add_space(12.0);
         rule(ui, &p);
 
@@ -78,25 +73,16 @@ impl Shell {
         let p = self.palette;
         section(ui, "Destination", &p);
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.add_space(PAD);
+        row(ui, |ui| {
             ui.label(
                 egui::RichText::new("Folder")
                     .font(tgx_ui::fonts::sans(type_scale::TINY))
                     .color(p.muted),
             );
-            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(PAD);
-                if ui
-                    .add(
-                        egui::Label::new(caps("Browse", type_scale::MICRO, p.accent))
-                            .sense(Sense::click()),
-                    )
-                    .clicked()
-                {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if action(ui, caps("Browse", type_scale::MICRO, p.accent), true).clicked() {
                     self.browse_for_output_dir();
                 }
-                ui.add_space(8.0);
                 let field = ui.add(
                     egui::TextEdit::singleline(&mut self.form.output_dir)
                         .hint_text("Where exports go")
@@ -112,8 +98,7 @@ impl Shell {
         });
         ui.add_space(8.0);
         let full = self.settings.output_dir.clone();
-        ui.horizontal(|ui| {
-            ui.add_space(PAD);
+        row(ui, |ui| {
             ui.label(
                 egui::RichText::new(format!(
                     "Writing to {}",
@@ -256,26 +241,25 @@ impl Shell {
 
     /// One tick-box row. Returns whether it was clicked.
     ///
-    /// Disabled is passed through to [`tick_box`] rather than simply not
-    /// binding a click: a control that is off and a control that is unavailable
-    /// must not look identical.
+    /// **The box and its label are one control.** `Response::union` is how egui
+    /// says that: one response, one click, whichever half the pointer landed on.
+    /// The first pass or-ed two independently sensed widgets together, which
+    /// left the gap between them dead and made the label choose its own disabled
+    /// colour and its own `Sense` — two decisions that could disagree with the
+    /// box beside them. `tick_box` still takes `enabled`, because it paints
+    /// itself and a control that is off must not look like one that is
+    /// unavailable.
     fn check(&self, ui: &mut Ui, label: &str, on: bool, enabled: bool) -> bool {
         let p = self.palette;
         let mut clicked = false;
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.add_space(PAD);
-            clicked |= tick_box(ui, on, enabled, &p).clicked();
-            ui.add_space(10.0);
+        row(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            let box_hit = tick_box(ui, on, enabled, &p);
             let text = egui::RichText::new(label)
                 .font(tgx_ui::fonts::sans(type_scale::TINY))
-                .color(if enabled { p.fg } else { p.muted });
-            let sense = if enabled {
-                Sense::click()
-            } else {
-                Sense::hover()
-            };
-            clicked |= ui.add(egui::Label::new(text).sense(sense)).clicked();
+                .color(p.fg);
+            clicked = box_hit.union(action(ui, text, enabled)).clicked();
         });
         ui.add_space(8.0);
         clicked
@@ -293,15 +277,13 @@ impl Shell {
         let p = self.palette;
         let mut committed = false;
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.add_space(PAD);
+        row(ui, |ui| {
             ui.label(
                 egui::RichText::new(label)
                     .font(tgx_ui::fonts::sans(type_scale::TINY))
                     .color(p.muted),
             );
-            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(PAD);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let field = ui.add_enabled(
                     enabled,
                     egui::TextEdit::singleline(which(&mut self.form)).desired_width(96.0),
@@ -347,18 +329,19 @@ impl Shell {
 /// thing.
 fn section(ui: &mut Ui, title: &str, p: &Palette) {
     ui.add_space(18.0);
-    ui.horizontal(|ui| {
-        ui.add_space(PAD);
-        ui.label(eyebrow(title, p));
-    });
+    row(ui, |ui| ui.label(eyebrow(title, p)));
     ui.add_space(8.0);
     soft_rule(ui, p);
 }
 
 /// The sentence under a control that explains what it costs.
+///
+/// A block rather than a wrapping row with a leading space: a space allocated
+/// inside a wrapping row is a space only the first line gets, so every hint here
+/// used to start indented and then run flush against the panel edge on its
+/// second line.
 fn hint(ui: &mut Ui, text: &str, p: &Palette) {
-    ui.horizontal_wrapped(|ui| {
-        ui.add_space(PAD);
+    block(ui, |ui| {
         ui.label(
             egui::RichText::new(text)
                 .font(tgx_ui::fonts::sans(type_scale::MICRO))

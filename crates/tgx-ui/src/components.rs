@@ -23,13 +23,84 @@
 //! caller to nest. egui is immediate mode, so they take a `&mut Ui` and paint.
 //! The pure functions below — [`thousands`], [`selection_label`], [`ListState`]
 //! — did not change at all, which is why the tests over them did not either.
+//!
+//! **Padding is a margin, and disabled is a state.** The first pass through this
+//! file was a transliteration: every row opened with `ui.add_space(16.0)` to
+//! stand in for the old flex container's padding, and every control chose its
+//! own ink with `if enabled { fg } else { muted }` and its own `Sense` to match.
+//! [`row`] and [`block`] put the gutter back where it belongs — on a frame — and
+//! [`action`] hands the enabled/disabled distinction to `Ui::add_enabled`, which
+//! is the one place in egui that knows about it. A control that decides its own
+//! disabled colour is a control that can disagree with the next one.
 
 use crate::fonts;
 use crate::tokens::{metrics, rhythm, type_scale, Palette};
 use eframe::egui::{
-    self, text::LayoutJob, Color32, CornerRadius, FontId, Response, Sense, Stroke, TextFormat, Ui,
-    Vec2,
+    self, text::LayoutJob, Color32, CornerRadius, CursorIcon, FontId, Margin, Response, Sense,
+    Stroke, TextFormat, Ui, Vec2,
 };
+
+/// The gutter every panel's content sits inside.
+///
+/// **The rules do not pay it.** A hairline runs the full width of the panel it
+/// divides — that is what makes the layout read as ruled rather than as boxed —
+/// so the padding is applied to the content rows by [`row`] and [`block`] and
+/// never to the panel itself. Putting it on the panel frame would inset every
+/// rule by the same 16px and quietly turn the design into a set of cards.
+pub const GUTTER: f32 = 16.0;
+
+/// One padded row, laid out left to right.
+///
+/// Replaces the `ui.horizontal(|ui| { ui.add_space(16.0); … })` that opened
+/// every row of the first pass. The margin is horizontal only: vertical rhythm
+/// belongs to `item_spacing` and to the callers that ask for more.
+pub fn row<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    gutter(ui, |ui| ui.horizontal(|ui| add(ui)).inner)
+}
+
+/// One padded block, laid out top to bottom. For prose, which wraps.
+pub fn block<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    gutter(ui, add)
+}
+
+fn gutter<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    egui::Frame::NONE
+        .inner_margin(Margin::symmetric(GUTTER as i8, 0))
+        .show(ui, add)
+        .inner
+}
+
+/// The design's one control: a run of text that can be clicked.
+///
+/// There are no raised buttons here — the design has no such thing — so this is
+/// `Button` with its frame off, which in egui also drops the button padding and
+/// leaves the text sitting exactly where a label would.
+///
+/// Three things it does that a `Label` with a `Sense` could not:
+///
+/// - **Disabled comes from `add_enabled`.** One rule for the whole window
+///   instead of a colour chosen at each call site, and the click is refused by
+///   the same call that greys it, so the two cannot part company.
+/// - **The pointer says it is a control.** Flat text with no frame gives no
+///   other clue that it is one.
+/// - **A hairline appears under it on hover.** Feedback drawn in the design's
+///   own primitive rather than a fill the palette has no colour for.
+pub fn action(ui: &mut Ui, text: impl Into<egui::WidgetText>, enabled: bool) -> Response {
+    let response = ui.add_enabled(enabled, egui::Button::new(text).frame(false));
+    if enabled && response.hovered() {
+        let rect = response.rect;
+        ui.painter().hline(
+            rect.x_range(),
+            rect.bottom(),
+            Stroke::new(1.0_f32, ui.visuals().widgets.hovered.fg_stroke.color),
+        );
+    }
+    response.on_hover_cursor(if enabled {
+        CursorIcon::PointingHand
+    } else {
+        CursorIcon::Default
+    })
+}
 
 /// A 1px rule — the design's core primitive.
 ///
@@ -150,10 +221,13 @@ pub fn tick_box(ui: &mut Ui, ticked: bool, enabled: bool, palette: &Palette) -> 
         },
     );
     let ink = if enabled { palette.fg } else { palette.muted };
-    let border = if enabled {
-        palette.hairline
-    } else {
-        palette.muted
+    let border = match (enabled, response.hovered()) {
+        // Hover brightens the border to the ink colour. The box is 12px and
+        // carries no label of its own, so without this the only way to find out
+        // whether the pointer is on it is to click.
+        (true, true) => palette.fg,
+        (true, false) => palette.hairline,
+        (false, _) => palette.muted,
     };
     let painter = ui.painter();
     if ticked {
@@ -273,12 +347,13 @@ impl NavCell {
         }
     }
 
-    pub fn show(&self, ui: &mut Ui, palette: &Palette) -> Response {
-        let fg = if self.enabled {
-            palette.fg
-        } else {
-            palette.muted
-        };
+    /// The cell's two runs: the mono number, then the label.
+    ///
+    /// Split out so [`Self::show`] is nothing but the widget call — and so the
+    /// gap after the number lives beside the rule that says a tool does not pay
+    /// it.
+    fn job(&self, palette: &Palette) -> LayoutJob {
+        let ink = if self.active { palette.bg } else { palette.fg };
         let mut job = LayoutJob::default();
         if let Some(n) = self.number {
             job.append(
@@ -300,29 +375,40 @@ impl NavCell {
             if self.number.is_some() { 10.0 } else { 0.0 },
             TextFormat {
                 font_id: fonts::sans(type_scale::SMALL),
-                color: if self.active { palette.bg } else { fg },
+                color: ink,
                 ..Default::default()
             },
         );
+        job
+    }
 
-        // Through the painter, whose `layout_job` takes `&self`. `Fonts::layout_job`
-        // wants `&mut` and is not reachable from inside `Context::fonts`, which
-        // hands out a shared reference.
-        let galley = ui.painter().layout_job(job);
-        let size = galley.size() + egui::vec2(8.0, 32.0);
-        let (rect, response) = ui.allocate_exact_size(
-            size,
-            if self.enabled {
-                Sense::click()
-            } else {
-                Sense::hover()
-            },
-        );
-        if self.active {
-            ui.painter().rect_filled(rect, radius(), palette.fg);
+    /// Paint the cell.
+    ///
+    /// **The bar's height is the button's `min_size`, not a rect measured by
+    /// hand.** The first pass laid out the galley itself, added `(8, 32)` to it
+    /// and painted into the result — which is a button, reimplemented, with the
+    /// hit area and the ink fixed at the moment of measurement. `Button` with
+    /// its frame off draws the same thing and gets the disabled state from
+    /// `add_enabled`, like every other control here.
+    pub fn show(&self, ui: &mut Ui, palette: &Palette) -> Response {
+        let button = egui::Button::new(self.job(palette))
+            .frame(false)
+            .min_size(egui::vec2(0.0, metrics::NAV_HEIGHT));
+        // The fill goes on a frame around the button rather than on the button,
+        // because `Button::fill` is only painted when the button has a frame —
+        // and a framed one would also take the style's button padding, so an
+        // active cell would be wider than the inactive cell beside it.
+        let response = if self.active {
+            egui::Frame::NONE
+                .fill(palette.fg)
+                .show(ui, |ui| ui.add_enabled(self.enabled, button))
+                .inner
+        } else {
+            ui.add_enabled(self.enabled, button)
+        };
+        if self.enabled {
+            return response.on_hover_cursor(CursorIcon::PointingHand);
         }
-        let at = rect.center() - (galley.size() / 2.0);
-        ui.painter().galley(at, galley, fg);
         response
     }
 }
@@ -504,6 +590,56 @@ pub fn min_window() -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn a_padded_row_gives_back_exactly_the_gutter_on_each_side() {
+        // The whole window's alignment rests on this: a heading, a control and a
+        // hint in three different panels line up because all three went through
+        // `row` or `block`, and nothing has to remember a number.
+        // `Cell`, because `__run_test_ui` takes an `Fn` and may run the frame
+        // more than once. Every probe below does the same for the same reason.
+        let (outer, inner, shift) = (Cell::new(0.0), Cell::new(0.0), Cell::new(0.0));
+        egui::__run_test_ui(|ui| {
+            outer.set(ui.available_width());
+            let left = ui.cursor().left();
+            row(ui, |ui| {
+                inner.set(ui.available_width());
+                shift.set(ui.cursor().left() - left);
+            });
+        });
+        assert_eq!(shift.get(), GUTTER);
+        assert_eq!(outer.get() - inner.get(), 2.0 * GUTTER);
+    }
+
+    #[test]
+    fn a_flat_control_takes_no_more_room_than_the_text_it_shows() {
+        // `action` is documented as `Button` with its frame off, which in egui
+        // also drops `button_padding`. If that stops being true every dense row
+        // in the window gains 28 points per control — the selection row alone
+        // has five — and the nav bar stops fitting its own minimum width.
+        let (button, label) = (Cell::new(0.0), Cell::new(0.0));
+        egui::__run_test_ui(|ui| {
+            button.set(action(ui, "Count messages", true).rect.width());
+            label.set(ui.label("Count messages").rect.width());
+        });
+        assert_eq!(button.get(), label.get());
+    }
+
+    #[test]
+    fn a_disabled_control_is_disabled_by_the_ui_and_not_by_its_colour() {
+        // The first pass chose a muted colour *and* a `Sense::hover()` at each
+        // call site, which is two statements of one fact that could disagree —
+        // and did, silently, because a control that looks live and does nothing
+        // reads as a broken window rather than an unavailable one.
+        let (live, dead) = (Cell::new(false), Cell::new(true));
+        egui::__run_test_ui(|ui| {
+            live.set(action(ui, "Go", true).enabled());
+            dead.set(action(ui, "Go", false).enabled());
+        });
+        assert!(live.get());
+        assert!(!dead.get());
+    }
 
     #[test]
     fn thousands_groups_correctly() {

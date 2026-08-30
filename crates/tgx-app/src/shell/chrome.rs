@@ -5,7 +5,7 @@
 
 use super::*;
 use eframe::egui::{Layout, Ui};
-use tgx_ui::components::{eyebrow, vrule, NavCell};
+use tgx_ui::components::{action, caps, eyebrow, rule, vrule, NavCell, GUTTER};
 use tgx_ui::tokens::{metrics, type_scale};
 
 impl Shell {
@@ -32,9 +32,13 @@ impl Shell {
 
         ui.set_height(metrics::NAV_HEIGHT);
         ui.horizontal_centered(|ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
+            // **One spacing, not two `add_space`s per cell.** The bar is a strip
+            // of equally inset cells with a hairline between them, which is a
+            // single `item_spacing` — the first pass wrote the gap out by hand
+            // on both sides of every cell and every rule, sixteen calls to say
+            // one number.
+            ui.spacing_mut().item_spacing.x = GUTTER;
             for (i, cell) in steps.iter().enumerate() {
-                ui.add_space(16.0);
                 if cell.show(ui, &p).clicked() {
                     match i {
                         0 => self.start_sign_in(),
@@ -43,7 +47,6 @@ impl Shell {
                         _ => {}
                     }
                 }
-                ui.add_space(16.0);
                 vrule(ui, &p);
             }
 
@@ -53,23 +56,17 @@ impl Shell {
                 // **The chip names the theme it switches *to***, like the
                 // site's, so it reads as an action rather than as a label for
                 // where you already are.
-                ui.add_space(16.0);
-                let chip = tgx_ui::components::caps(
+                let chip = caps(
                     other_theme(&self.settings.theme),
                     type_scale::MICRO,
                     p.muted,
                 );
-                if ui
-                    .add(egui::Label::new(chip).sense(egui::Sense::click()))
-                    .clicked()
-                {
+                if action(ui, chip, true).clicked() {
                     self.toggle_theme();
                 }
-                ui.add_space(16.0);
 
                 for (i, cell) in tools.iter().enumerate() {
                     vrule(ui, &p);
-                    ui.add_space(16.0);
                     if cell.show(ui, &p).clicked() {
                         match i {
                             0 => self.stop(),
@@ -88,11 +85,10 @@ impl Shell {
                             _ => {}
                         }
                     }
-                    ui.add_space(16.0);
                 }
             });
         });
-        tgx_ui::components::rule(ui, &p);
+        rule(ui, &p);
     }
 
     /// Swap the appearance.
@@ -126,27 +122,29 @@ impl Shell {
             }
         };
 
-        tgx_ui::components::rule(ui, &p);
-        ui.horizontal(|ui| {
-            ui.add_space(16.0);
+        rule(ui, &p);
+        // Right-to-left throughout: the figure is the fixed part and the status
+        // is what has to give, so the one that truncates is the one that takes
+        // what is left. The first pass nested a left-to-right inside a
+        // right-to-left inside a horizontal to say the same thing, which is
+        // flexbox's `justify-between` transliterated rather than egui's answer
+        // to it.
+        tgx_ui::components::row(ui, |ui| {
             ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(16.0);
                 // The right-hand figure is ours and short, so it can be tracked.
                 ui.label(eyebrow(&right, &p));
-                ui.with_layout(Layout::left_to_right(egui::Align::Center), |ui| {
-                    // **Not letterspaced, deliberately.** `eyebrow` goes
-                    // through `components::tracked`, whose own doc says not to
-                    // put a string of unknown length through it, and this line
-                    // carries chat titles and raw RPC errors.
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(tgx_ui::components::uppercase(&self.status))
-                                .font(tgx_ui::fonts::sans(type_scale::MICRO))
-                                .color(p.muted),
-                        )
-                        .truncate(),
-                    );
-                });
+                // **Not letterspaced, deliberately.** `eyebrow` goes through
+                // `components::tracked`, whose own doc says not to put a string
+                // of unknown length through it, and this line carries chat
+                // titles and raw RPC errors.
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(tgx_ui::components::uppercase(&self.status))
+                            .font(tgx_ui::fonts::sans(type_scale::MICRO))
+                            .color(p.muted),
+                    )
+                    .truncate(),
+                );
             });
         });
         ui.add_space(6.0);

@@ -35,14 +35,23 @@ use tgx_tg::client::ChatInfo;
 use tgx_tg::config::Settings;
 use tgx_ui::tokens::Palette;
 
-/// The settings and queue column.
+/// The settings and queue column, as it opens.
 ///
 /// **Sized from the queue, not from the settings.** The queue is a five-column
 /// table and the settings are a stack of rows that will fit anything; get this
-/// wrong and it is the table that breaks, silently, by pushing the column that
-/// names the chat off the panel. 400px against the 900px minimum leaves the
-/// chat list 480, which is the proportion this figure is chosen to hold.
+/// wrong and it is the table that breaks by pushing the column that names the
+/// chat off the panel. 400px against the 900px minimum leaves the chat list 480,
+/// which is the proportion this figure is chosen to hold — and it is now a
+/// default rather than a fixed width, because the panel is draggable and the
+/// table defends its own columns.
 pub const RIGHT_COLUMN_W: f32 = 400.0;
+
+/// How much of that column the run panel takes, as it opens.
+///
+/// Queue, bar and log against five sections of settings. Also a default: the
+/// split is draggable, because which half matters depends on whether an export
+/// is running, and that changes several times in a session.
+const RUN_PANEL_H: f32 = 340.0;
 
 /// One row as the list paints it.
 ///
@@ -108,9 +117,6 @@ pub struct Shell {
     /// as visible, because folding is a way of looking at the list rather than
     /// a second filter.
     visible_count: usize,
-    /// Whether the sort menu is open. A single value, so "is a menu open?" and
-    /// "which one?" cannot disagree — the same shape as `login` below.
-    sort_open: bool,
 
     status: String,
     /// Why the run could not proceed, if something said so.
@@ -219,7 +225,6 @@ impl Shell {
             rows: Vec::new(),
             rows_stale: false,
             visible_count: 0,
-            sort_open: false,
             status: "Not signed in".into(),
             failure: None,
             journal: Journal::default(),
@@ -415,42 +420,57 @@ impl eframe::App for Shell {
         self.rebuild_rows_if_stale();
 
         let p = self.palette;
+        // Every panel in this window is unfilled but for the page colour, and
+        // draws its own hairlines. One frame, declared once.
+        //
         // **No backdrop.** A drifting grid was built here to the design's
         // specification and then removed: it asked for a frame continuously,
         // and it drew hairlines across every panel, because the panels are
         // unfilled by design and the grid therefore ran through the type rather
         // than behind it. Do not add it back without solving both.
+        let bare = egui::Frame::NONE.fill(p.bg);
+
         egui::TopBottomPanel::top("nav")
-            .frame(egui::Frame::NONE.fill(p.bg))
+            .frame(bare)
             .show_separator_line(false)
             .show(ctx, |ui| self.nav_bar(ui));
 
         egui::TopBottomPanel::bottom("status")
-            .frame(egui::Frame::NONE.fill(p.bg))
+            .frame(bare)
             .show_separator_line(false)
             .show(ctx, |ui| self.status_bar(ui));
 
         egui::SidePanel::right("right")
-            .frame(egui::Frame::NONE.fill(p.bg))
-            .exact_width(RIGHT_COLUMN_W)
-            .resizable(false)
+            .frame(bare)
+            .default_width(RIGHT_COLUMN_W)
+            // **Draggable, within a range the queue table can survive.** It was
+            // pinned to exactly 400 because the GPUI column was, and 400 is a
+            // reasonable default rather than the only width that works: the
+            // table's own floor is what decides that, and `egui_extras` enforces
+            // it per column now instead of a comment asking the next reader to
+            // re-check a sum. The floor here is the width below which the Chat
+            // column is all that is left of the table.
+            .width_range(340.0..=560.0)
+            .resizable(true)
             .show_separator_line(false)
             .show(ctx, |ui| {
-                // Settings takes the slack and scrolls; the run panel keeps its
-                // measured height. The GPUI version declared 100% height plus
-                // 181px of children, so flex squeezed both panels and the last
-                // settings row was the first thing cut on a short window.
-                let run_height = (ui.available_height() * 0.45).min(320.0);
+                // Settings takes the slack and scrolls; the run panel is
+                // measured off the bottom and draggable. The GPUI version
+                // declared 100% height plus 181px of children, so flex squeezed
+                // both panels and the last settings row was the first thing cut
+                // on a short window.
                 egui::TopBottomPanel::bottom("run")
-                    .frame(egui::Frame::NONE.fill(p.bg))
-                    .exact_height(run_height)
+                    .frame(bare)
+                    .default_height(RUN_PANEL_H)
+                    .height_range(200.0..=560.0)
+                    .resizable(true)
                     .show_separator_line(false)
                     .show_inside(ui, |ui| self.run_panel(ui));
                 self.settings_panel(ui);
             });
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(p.bg))
+            .frame(bare)
             .show(ctx, |ui| self.chat_panel(ui));
 
         // Last, so it takes its clicks before anything under it does.
