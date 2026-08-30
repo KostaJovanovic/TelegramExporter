@@ -169,6 +169,45 @@ mod tests {
     }
 
     #[test]
+    fn every_glyph_the_window_paints_has_a_face_that_carries_it() {
+        // **`default_fonts` is off, so there is no fallback and a missing glyph
+        // is silent.** It compiles, it passes every other test in this crate,
+        // and it shows up only on screen. `\u{25b8}` and `\u{25be}` were set as
+        // text for the chat list's disclosure markers; Geist carries no
+        // Geometric Shapes, so every category heading in the window read
+        // `? CHANNELS` — through three passes over this design, because nothing
+        // here could see it and nobody had looked at one.
+        //
+        // The marker is a painted triangle now (`components::disclosure`), which
+        // has no glyph to be missing. This is the guard for the rest: every
+        // non-ASCII character the design puts on screen belongs in the list
+        // below, and adding one Geist does not have fails here instead of on
+        // someone's screen.
+        use eframe::egui::epaint::text::Fonts;
+        use eframe::egui::epaint::AlphaFromCoverage;
+
+        let mut fonts = Fonts::new(2048, AlphaFromCoverage::default(), definitions());
+        // Every face, because the design sets labels in the mono and titles in
+        // the sans, and a character present in one is not thereby present in the
+        // other.
+        for face in [sans(14.0), mono(11.0), medium(14.0), semibold(14.0)] {
+            for c in [
+                '\u{2026}', // … every hint and status line that elides
+                '\u{2014}', // — a queued job with no topic count
+                '\u{201c}', // “ ” the filter's empty state quotes what was typed
+                '\u{201d}', '\u{0106}', // Ć  Latin Extended-A, for a Serbian chat title
+                '\u{0410}', // А  Cyrillic, which is why the faces are merged
+            ] {
+                assert!(
+                    fonts.has_glyph(&face, c),
+                    "{c:?} has no glyph in {:?}",
+                    face.family
+                );
+            }
+        }
+    }
+
+    #[test]
     fn the_sans_and_the_mono_are_two_different_families() {
         // They are separate files with separate keys, and the design leans on
         // that: "every number in the mono" means nothing if asking for the mono

@@ -22,7 +22,7 @@
 //! flips appearance by rebuilding the palette and calling this again.
 
 use crate::fonts;
-use crate::tokens::{metrics, window, Palette};
+use crate::tokens::{metrics, space, window, Palette};
 use eframe::egui::{self, Context, CornerRadius, Stroke, TextStyle};
 
 /// Everything about the window that is a decision rather than a default.
@@ -104,7 +104,13 @@ pub fn install(ctx: &Context, palette: &Palette) {
     v.window_shadow = egui::epaint::Shadow::NONE;
     v.popup_shadow = egui::epaint::Shadow::NONE;
 
-    style.spacing.item_spacing = egui::vec2(10.0, 8.0);
+    // **The vertical component is small on purpose: it is paid on top of every
+    // explicit gap.** `tokens::space` is a grid the panels lay themselves out
+    // on, and egui adds `item_spacing.y` between every pair of widgets as well —
+    // so at 8 a `BREAK` between two settings sections came out at 44 and change,
+    // and the panel that was meant to read as five groups read as five islands
+    // with a screenful of nothing between them. At 4 the grid is what shows.
+    style.spacing.item_spacing = egui::vec2(space::TIGHT, 4.0);
     style.spacing.button_padding = egui::vec2(14.0, 7.0);
     style.spacing.interact_size.y = 30.0;
 

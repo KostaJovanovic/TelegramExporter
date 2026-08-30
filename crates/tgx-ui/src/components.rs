@@ -163,10 +163,19 @@ pub fn boxed(
     primary: bool,
     palette: &Palette,
 ) -> Response {
+    // **A fill as well as a border**, and this is what finally made these read
+    // as controls. A hairline is `#333` against a `#0a0a0a` page: correct by the
+    // token table, and at arm's length invisible — the nav bar looked like five
+    // words floating along the top of the window rather than five buttons. One
+    // step off the page is enough to give a button an edge without giving it
+    // depth, which is as far as this design goes.
+    //
+    // A disabled button keeps the fill and loses the border, so it is still
+    // plainly a control and plainly not available.
     let (fill, edge) = match (enabled, primary) {
         (true, true) => (palette.accent, palette.accent),
-        (true, false) => (palette.bg, palette.hairline),
-        (false, _) => (palette.bg, palette.rule),
+        (true, false) => (palette.surface, palette.hairline),
+        (false, _) => (palette.surface, palette.rule),
     };
     let widget = egui::Button::new(text)
         .corner_radius(radius())
@@ -429,6 +438,43 @@ pub fn tick_box(ui: &mut Ui, ticked: bool, enabled: bool, palette: &Palette) -> 
         Stroke::new(1.0_f32, border),
         egui::StrokeKind::Inside,
     );
+    response
+}
+
+/// The disclosure marker on a category heading: ▸ folded, ▾ open.
+///
+/// **Painted, not typed, and that is a fix rather than a preference.** It was
+/// `"\u{25b8}"` and `"\u{25be}"` set as text, and `default_fonts` is off — so
+/// with no fallback face behind Geist, which carries no Geometric Shapes,
+/// egui drew the replacement glyph and every category heading in the chat list
+/// read `? CHANNELS`. A missing glyph in a window with no fallback is silent at
+/// compile time, silent in the tests, and obvious only on screen.
+///
+/// A triangle is three points. There is nothing here that can be missing.
+pub fn disclosure(ui: &mut Ui, folded: bool, palette: &Palette) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(window::LABEL), Sense::hover());
+    let c = rect.center();
+    let r = window::LABEL * 0.3;
+    let points = if folded {
+        // Pointing right: the category is closed.
+        vec![
+            egui::pos2(c.x - r * 0.6, c.y - r),
+            egui::pos2(c.x - r * 0.6, c.y + r),
+            egui::pos2(c.x + r * 0.8, c.y),
+        ]
+    } else {
+        // Pointing down: it is open.
+        vec![
+            egui::pos2(c.x - r, c.y - r * 0.6),
+            egui::pos2(c.x + r, c.y - r * 0.6),
+            egui::pos2(c.x, c.y + r * 0.8),
+        ]
+    };
+    ui.painter().add(egui::Shape::convex_polygon(
+        points,
+        palette.muted,
+        Stroke::NONE,
+    ));
     response
 }
 
