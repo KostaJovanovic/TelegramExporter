@@ -14,8 +14,10 @@
 
 use super::Shell;
 use eframe::egui::{self, Align, Layout, Ui};
-use tgx_ui::components::{action, block, button, eyebrow, field, row, rule, tick_box};
-use tgx_ui::tokens::{window, Palette};
+use tgx_ui::components::{
+    action, block, button, eyebrow, field, meta, row, rule, text, tick_box, title,
+};
+use tgx_ui::tokens::{space, Palette};
 
 /// The seven media categories Desktop offers, with the labels shown for each.
 /// Keyed on `tgx_tg::config::MEDIA_KINDS`, which is what `plan.rs`
@@ -46,9 +48,9 @@ const EXTRAS: [(&str, &str); 6] = [
 impl Shell {
     pub(super) fn settings_panel(&mut self, ui: &mut Ui) {
         let p = self.palette;
-        ui.add_space(12.0);
-        row(ui, |ui| ui.label(eyebrow("Settings", &p)));
-        ui.add_space(12.0);
+        ui.add_space(space::STEP);
+        row(ui, |ui| ui.label(title("Settings", &p)));
+        ui.add_space(space::TIGHT);
         rule(ui, &p);
 
         egui::ScrollArea::vertical()
@@ -60,7 +62,7 @@ impl Shell {
                 self.media_section(ui);
                 self.beyond_desktop_section(ui);
                 self.performance_section(ui);
-                ui.add_space(12.0);
+                ui.add_space(space::BREAK);
             });
     }
 
@@ -72,13 +74,8 @@ impl Shell {
     fn destination_section(&mut self, ui: &mut Ui) {
         let p = self.palette;
         section(ui, "Destination", &p);
-        ui.add_space(8.0);
         row(ui, |ui| {
-            ui.label(
-                egui::RichText::new("Folder")
-                    .font(tgx_ui::fonts::sans(window::SMALL))
-                    .color(p.muted),
-            );
+            ui.label(text("Folder", &p));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 // A button, like the analyser's "Choose": the one way to get a
                 // path that certainly exists should not be small print.
@@ -98,20 +95,19 @@ impl Shell {
                 }
             });
         });
-        ui.add_space(8.0);
+        ui.add_space(space::TIGHT);
         let full = self.settings.output_dir.clone();
         row(ui, |ui| {
-            ui.label(
-                egui::RichText::new(format!(
+            ui.label(meta(
+                format!(
                     "Writing to {}",
                     crate::settings_form::elided_start(&full, 44)
-                ))
-                .font(tgx_ui::fonts::sans(window::MICRO))
-                .color(p.muted),
-            )
+                ),
+                &p,
+            ))
             .on_hover_text(full);
         });
-        ui.add_space(8.0);
+        ui.add_space(space::STEP);
     }
 
     fn format_section(&mut self, ui: &mut Ui) {
@@ -254,20 +250,14 @@ impl Shell {
     fn check(&self, ui: &mut Ui, label: &str, on: bool, enabled: bool) -> bool {
         let p = self.palette;
         let mut clicked = false;
-        ui.add_space(8.0);
         row(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 10.0;
+            ui.spacing_mut().item_spacing.x = space::TIGHT;
             let box_hit = tick_box(ui, on, enabled, &p);
-            // `BODY`, which is what TelegramAnalyser sets its checkbox labels
-            // in. These are the sentences the settings panel is made of, and
-            // twenty of them at the page's fine-print size is what made this
-            // column read as a legal notice.
-            let text = egui::RichText::new(label)
-                .font(tgx_ui::fonts::sans(window::BODY))
-                .color(p.fg);
-            clicked = box_hit.union(action(ui, text, enabled)).clicked();
+            clicked = box_hit
+                .union(action(ui, text(label, &p), enabled))
+                .clicked();
         });
-        ui.add_space(8.0);
+        ui.add_space(space::STEP);
         clicked
     }
 
@@ -282,13 +272,11 @@ impl Shell {
     ) -> bool {
         let p = self.palette;
         let mut committed = false;
-        ui.add_space(8.0);
         row(ui, |ui| {
-            ui.label(
-                egui::RichText::new(label)
-                    .font(tgx_ui::fonts::sans(window::BODY))
-                    .color(p.muted),
-            );
+            // Ink, like a tick-box label. A numeric setting and a switch are the
+            // same kind of decision, and setting one of the two muted made half
+            // the panel's rows look unavailable.
+            ui.label(text(label, &p));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let entry = ui.add_enabled(
                     enabled,
@@ -297,7 +285,7 @@ impl Shell {
                 committed = entry.lost_focus();
             });
         });
-        ui.add_space(8.0);
+        ui.add_space(space::STEP);
         committed
     }
 
@@ -333,11 +321,17 @@ impl Shell {
 
 /// A section heading over a hairline. No group boxes: the design has no such
 /// thing.
-fn section(ui: &mut Ui, title: &str, p: &Palette) {
-    ui.add_space(22.0);
-    row(ui, |ui| ui.label(eyebrow(title, p)));
-    ui.add_space(8.0);
-    rule(ui, p);
+/// A section heading. **Space above it, and no line under it.**
+///
+/// There were five rules down this panel, one per section, and they were the
+/// loudest thing in a column of quiet grey labels — so the panel read as five
+/// boxes rather than as a list of decisions. `BREAK` above the heading does the
+/// same work: a gap four times the size of the one between two rows is not
+/// ambiguous about where a group starts.
+fn section(ui: &mut Ui, heading: &str, p: &Palette) {
+    ui.add_space(space::BREAK);
+    row(ui, |ui| ui.label(eyebrow(heading, p)));
+    ui.add_space(space::TIGHT);
 }
 
 /// The sentence under a control that explains what it costs.
@@ -346,15 +340,13 @@ fn section(ui: &mut Ui, title: &str, p: &Palette) {
 /// inside a wrapping row is a space only the first line gets, so every hint here
 /// used to start indented and then run flush against the panel edge on its
 /// second line.
-fn hint(ui: &mut Ui, text: &str, p: &Palette) {
-    block(ui, |ui| {
-        ui.label(
-            egui::RichText::new(text)
-                .font(tgx_ui::fonts::sans(window::MICRO))
-                .color(p.muted),
-        );
-    });
-    ui.add_space(8.0);
+///
+/// It hangs directly under the control it belongs to — `TIGHT` above, `STEP`
+/// below — so that it reads as part of that row rather than as the opening of
+/// the next one.
+fn hint(ui: &mut Ui, sentence: &str, p: &Palette) {
+    ui.add_space(space::TIGHT);
+    block(ui, |ui| ui.label(meta(sentence, p)));
 }
 
 fn extra(s: &tgx_tg::config::Settings, key: &str) -> bool {

@@ -32,6 +32,40 @@
 //! [`action`] hands the enabled/disabled distinction to `Ui::add_enabled`, which
 //! is the one place in egui that knows about it. A control that decides its own
 //! disabled colour is a control that can disagree with the next one.
+//!
+//! # The system
+//!
+//! Two passes at this window failed the same way: there were rules for colour
+//! and type written in the docs, and thirty call sites each free to ignore them.
+//! What is below is those rules made into functions, so that following them is
+//! the path of least effort and departing from one is visible in a diff.
+//!
+//! **Type is three roles** — see `tokens::window`. Anything read is
+//! [`text`]; anything that names rather than is, is [`caps`], [`eyebrow`],
+//! [`meta`] or [`figure`]. Nothing takes a size, because a call site free to
+//! answer "how big?" answers it differently from the one beside it.
+//!
+//! **Colour is one sentence per token, and this is the sentence:**
+//!
+//! - `fg` — the subject. A chat's title, a setting, a button's label, a panel's
+//!   own [`title`], a log line that is a warning.
+//! - `muted` — everything that is *about* the subject: captions, eyebrows,
+//!   counts, hints, ordinary log lines, the status bar.
+//! - `rule` — every divider. [`rule`].
+//! - `hairline` — control borders only: [`button`], [`tick_box`], a field.
+//!   Never a divider. [`edge_rule`] is the one exception and there are two of
+//!   them, where the window's frame meets its contents.
+//! - `surface` — a row that is selected or under the pointer. Nothing else.
+//! - `accent` — **this run**: Start export, the progress fill, the queue row
+//!   that is exporting, and the count of warnings it produced. A log warning
+//!   takes `fg` instead, because in a transcript set in `muted` the ink *is* the
+//!   loud one, and an accent spent in four places marks nothing.
+//!
+//! **Rules divide kinds, space divides groups.** A hairline goes where two
+//! different sorts of thing meet — the nav bar and the body, a panel's title and
+//! its contents. Between one settings section and the next there is
+//! `space::BREAK` and no line. The window had a dozen rules per screen and
+//! grouped nothing, which is a wireframe rather than a layout.
 
 use crate::fonts;
 use crate::tokens::{metrics, rhythm, window, Palette};
@@ -103,7 +137,7 @@ pub fn button(
     palette: &Palette,
 ) -> Response {
     let text = egui::RichText::new(label)
-        .font(fonts::sans(window::BODY))
+        .font(fonts::sans(window::READING))
         .color(button_ink(enabled, primary, palette));
     boxed(ui, text, enabled, primary, palette)
 }
@@ -185,7 +219,7 @@ pub fn action(ui: &mut Ui, text: impl Into<egui::WidgetText>, enabled: bool) -> 
 /// field in the other.
 pub fn field<'t>(text: &'t mut String, palette: &Palette) -> egui::TextEdit<'t> {
     egui::TextEdit::singleline(text)
-        .font(fonts::mono(window::SMALL))
+        .font(fonts::mono(window::LABEL))
         .text_color(palette.fg)
         .margin(Margin::symmetric(8, 6))
 }
@@ -273,23 +307,75 @@ pub fn tracked(text: &str, size: f32, track_em: f32, colour: Color32) -> LayoutJ
     job
 }
 
-/// A letterspaced uppercase micro-heading — `window::MICRO` at `TRACK_MICRO`.
+/// A letterspaced uppercase label — the design's one kind of heading.
+///
+/// **The size is not a parameter.** It was, and that is how three sizes ended up
+/// in one window: every call site could answer "how big?" for itself, and they
+/// answered differently. A label is `window::LABEL`; if something needs to
+/// outrank a label, it does it with ink, space or caps, not with points.
+///
+/// The colour stays a parameter, because a label is sometimes ink (a panel's own
+/// title), sometimes muted (a section, a column header), and sometimes the
+/// accent (the warning count). Those are three different meanings, not three
+/// sizes. See the module docs for which is which.
+pub fn caps(text: &str, colour: Color32) -> LayoutJob {
+    tracked(&uppercase(text), window::LABEL, rhythm::TRACK_CAPS, colour)
+}
+
+/// A muted letterspaced label — a section heading, a column header, a caption.
 pub fn eyebrow(text: &str, palette: &Palette) -> LayoutJob {
     tracked(
         &uppercase(text),
-        window::MICRO,
+        window::LABEL,
         rhythm::TRACK_MICRO,
         palette.muted,
     )
 }
 
-/// Letterspaced uppercase caption at an arbitrary size — `TRACK_CAPS`.
+/// A panel's own title: `CHATS`, `SETTINGS`, `QUEUE`, `LOG`.
 ///
-/// Takes its colour rather than a palette: these label things that are
-/// sometimes muted, sometimes the accent, and sometimes sitting on a filled
-/// cell where neither is right.
-pub fn caps(text: &str, size: f32, colour: Color32) -> LayoutJob {
-    tracked(&uppercase(text), size, rhythm::TRACK_CAPS, colour)
+/// **Ink, where a section heading is muted.** There are four of these in the
+/// window and they name its four regions, so they outrank everything inside one
+/// — which they do by being the only labels set in the text colour, not by being
+/// larger.
+pub fn title(text: &str, palette: &Palette) -> LayoutJob {
+    tracked(
+        &uppercase(text),
+        window::LABEL,
+        rhythm::TRACK_MICRO,
+        palette.fg,
+    )
+}
+
+/// **Text a person reads**: a chat title, a setting, a log line, a sentence.
+///
+/// These three helpers exist so that the colour rule is applied rather than
+/// merely written down. Thirty call sites each assembling
+/// `RichText::new(..).font(..).color(..)` is thirty chances to pick the wrong
+/// one of two greys, and no way to check.
+pub fn text(s: impl Into<String>, palette: &Palette) -> egui::RichText {
+    egui::RichText::new(s)
+        .font(fonts::sans(window::READING))
+        .color(palette.fg)
+}
+
+/// **Small print a person reads**: the sentence under a control saying what it
+/// costs. Sans, because a wrapped paragraph in the mono is hard work.
+pub fn meta(s: impl Into<String>, palette: &Palette) -> egui::RichText {
+    egui::RichText::new(s)
+        .font(fonts::sans(window::LABEL))
+        .color(palette.muted)
+}
+
+/// **A number.** Always the mono, always muted, always [`window::LABEL`].
+///
+/// Every figure in this window is metadata beside something else — a row's
+/// message count, a queue cell, a percentage. A monospaced face is tabular by
+/// construction, so a column of these stays a column while it ticks upward.
+pub fn figure(s: impl Into<String>, palette: &Palette) -> egui::RichText {
+    egui::RichText::new(s)
+        .font(fonts::mono(window::LABEL))
+        .color(palette.muted)
 }
 
 /// Uppercase the caller's own string.
@@ -347,7 +433,12 @@ pub fn tick_box(ui: &mut Ui, ticked: bool, enabled: bool, palette: &Palette) -> 
 }
 
 /// The tick's edge, in points.
-const TICK_SIZE: f32 = 12.0;
+///
+/// **Matched to the type it sits beside**, which is `window::READING`. At 12
+/// against 14pt text it read as a slightly-too-small square rather than as a
+/// box aligned with the label — the kind of half-point mismatch that makes a
+/// row look assembled rather than laid out.
+const TICK_SIZE: f32 = window::READING;
 
 /// The share of the track an indeterminate bar paints.
 ///
@@ -491,7 +582,7 @@ impl NavCell {
                 &format!("{n:02}"),
                 0.0,
                 TextFormat {
-                    font_id: fonts::mono(window::SMALL),
+                    font_id: fonts::mono(window::LABEL),
                     color: figure,
                     ..Default::default()
                 },
@@ -501,7 +592,7 @@ impl NavCell {
             &self.label,
             if self.number.is_some() { 10.0 } else { 0.0 },
             TextFormat {
-                font_id: fonts::sans(window::BODY),
+                font_id: fonts::sans(window::READING),
                 color: ink,
                 ..Default::default()
             },
@@ -554,7 +645,7 @@ impl EmptyState {
             ui.add_space(ui.available_height() / 3.0);
             ui.label(
                 egui::RichText::new(&self.headline)
-                    .font(fonts::medium(window::BODY))
+                    .font(fonts::medium(window::READING))
                     .color(palette.fg),
             );
             if tall_enough {
@@ -562,7 +653,7 @@ impl EmptyState {
                     ui.add_space(8.0);
                     ui.label(
                         egui::RichText::new(hint)
-                            .font(fonts::sans(window::SMALL))
+                            .font(fonts::sans(window::LABEL))
                             .color(palette.muted),
                     );
                 }
@@ -808,7 +899,7 @@ mod tests {
         // which cost selection, search and wrapping. It is one run again.
         let job = tracked(
             "SIGN IN",
-            window::MICRO,
+            window::LABEL,
             rhythm::TRACK_MICRO,
             Color32::WHITE,
         );
@@ -826,7 +917,7 @@ mod tests {
         let job = eyebrow("Chats", &palette);
         assert_eq!(job.text, "CHATS");
         assert_eq!(job.sections[0].format.color, palette.muted);
-        assert_eq!(job.sections[0].format.font_id, fonts::mono(window::MICRO));
+        assert_eq!(job.sections[0].format.font_id, fonts::mono(window::LABEL));
     }
 
     #[test]
@@ -842,6 +933,54 @@ mod tests {
             NavCell::tool("Open output folder"),
         ];
         assert_eq!(bar.iter().filter(|c| c.primary).count(), 1);
+    }
+
+    #[test]
+    fn every_label_is_the_one_label_size() {
+        // The failure this whole scale exists to prevent, checked at the only
+        // place it could recur: a helper that takes its size from somewhere
+        // other than the token. Two passes ended with 14, 13 and 11 in play
+        // because `caps` took a size and every call site answered for itself.
+        let p = Palette::dark();
+        for job in [caps("Sort", p.fg), eyebrow("Queue", &p), title("Chats", &p)] {
+            assert_eq!(job.sections[0].format.font_id.size, window::LABEL);
+        }
+        // [`text`], [`meta`] and [`figure`] are deliberately not checked here.
+        // `RichText` keeps its `FontId` behind a method rather than a field, and
+        // measuring what they draw needs a context with this crate's fonts
+        // installed, which `__run_test_ui` does not provide — a probe through it
+        // returns the same height for all three and passes whatever they say.
+        //
+        // They return `RichText` rather than a `LayoutJob` on purpose: a job
+        // carries its own wrapping, and these three set the log lines and the
+        // settings hints, which have to wrap to the panel.
+        //
+        // What guards them is the signature. None of the three takes a size, so
+        // there is no call site left that can answer the question differently
+        // from the one beside it — and that the roles are far enough apart to
+        // tell apart is `tokens`'s own test.
+    }
+
+    #[test]
+    fn a_panel_title_outranks_a_section_heading_by_ink_and_not_by_size() {
+        // Four panel titles name the window's regions and have to win against
+        // the headings inside them. They do it with the text colour, because
+        // there is no size above `LABEL` for a label to reach for.
+        let p = Palette::dark();
+        let (t, e) = (title("Chats", &p), eyebrow("Destination", &p));
+        assert_eq!(t.sections[0].format.color, p.fg);
+        assert_eq!(e.sections[0].format.color, p.muted);
+        assert_eq!(
+            t.sections[0].format.font_id.size,
+            e.sections[0].format.font_id.size
+        );
+    }
+
+    #[test]
+    fn the_tick_box_is_the_size_of_the_text_beside_it() {
+        // A 12pt square against 14pt type reads as a slightly-wrong square
+        // rather than as a box aligned to its label.
+        assert_eq!(TICK_SIZE, window::READING);
     }
 
     #[test]

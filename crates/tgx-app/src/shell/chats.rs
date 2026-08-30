@@ -11,10 +11,10 @@ use crate::list::SortMode;
 use chrono::{DateTime, Local};
 use eframe::egui::{Align, Layout, Sense, Ui};
 use tgx_ui::components::{
-    action, button, caps, count_text, eyebrow, field, forum_dot, row, rule, selection_label,
-    tick_box, GUTTER,
+    action, button, caps, count_text, eyebrow, field, figure, forum_dot, row, rule,
+    selection_label, text, tick_box, title, GUTTER,
 };
-use tgx_ui::tokens::window;
+use tgx_ui::tokens::{space, window};
 
 /// Every row is this tall, heading and chat alike.
 ///
@@ -41,13 +41,19 @@ impl Shell {
             .frame(bare)
             .show_separator_line(false)
             .show_inside(ui, |ui| {
-                ui.add_space(18.0);
-                row(ui, |ui| ui.label(eyebrow("Chats", &p)));
-                ui.add_space(14.0);
+                // **One rule, under the title.** The head used to carry three —
+                // after the eyebrow, between search and sort, and under sort —
+                // which is a line every twenty points down a panel that has one
+                // idea in it. The controls are grouped by `BREAK` instead.
+                ui.add_space(space::STEP);
+                row(ui, |ui| ui.label(title("Chats", &p)));
+                ui.add_space(space::TIGHT);
                 rule(ui, &p);
+                ui.add_space(space::STEP);
                 self.search_row(ui);
+                ui.add_space(space::STEP);
                 self.sort_row(ui);
-                rule(ui, &p);
+                ui.add_space(space::STEP);
             });
 
         egui::TopBottomPanel::bottom("chats-foot")
@@ -56,16 +62,20 @@ impl Shell {
             .show_inside(ui, |ui| {
                 let live = self.selection_actions_enabled();
                 let (total, any_uncounted) = self.selection_total();
+                // The foot keeps its rule: below it is a summary of the list and
+                // what to do with it, which is a different kind of thing from
+                // the list itself.
                 rule(ui, &p);
+                ui.add_space(space::STEP);
                 self.selection_row(ui, live);
+                ui.add_space(space::TIGHT);
                 row(ui, |ui| {
-                    ui.label(caps(
+                    ui.label(eyebrow(
                         &selection_label(self.selected.len(), total, any_uncounted),
-                        window::MICRO,
-                        p.muted,
+                        &p,
                     ))
                 });
-                ui.add_space(14.0);
+                ui.add_space(space::STEP);
             });
 
         egui::CentralPanel::default()
@@ -75,7 +85,6 @@ impl Shell {
 
     fn search_row(&mut self, ui: &mut Ui) {
         let p = self.palette;
-        ui.add_space(14.0);
         row(ui, |ui| {
             let before = self.search.clone();
             // `desired_width` alone, with no `add_sized`: inside the gutter the
@@ -90,11 +99,10 @@ impl Shell {
             // copy of the same string is how the empty state ends up quoting
             // something other than what is in the box.
             if self.search != before {
-                let text = self.search.clone();
-                self.set_filter(text);
+                let typed = self.search.clone();
+                self.set_filter(typed);
             }
         });
-        ui.add_space(14.0);
     }
 
     /// SORT and GROUP BY TYPE.
@@ -116,28 +124,21 @@ impl Shell {
         let mut chosen = before;
 
         row(ui, |ui| {
-            ui.label(caps("Sort", window::MICRO, p.muted));
+            ui.label(eyebrow("Sort", &p));
             egui::ComboBox::from_id_salt("sort")
-                .selected_text(
-                    egui::RichText::new(before.label())
-                        .font(tgx_ui::fonts::sans(window::SMALL))
-                        .color(p.fg),
-                )
+                .selected_text(text(before.label(), &p))
                 .width(180.0)
                 .show_ui(ui, |ui| {
                     for mode in SortMode::ALL {
-                        ui.selectable_value(
-                            &mut chosen,
-                            mode,
-                            egui::RichText::new(mode.label())
-                                .font(tgx_ui::fonts::sans(window::SMALL))
-                                .color(if mode == before { p.accent } else { p.fg }),
-                        );
+                        // The chosen mode is not marked in the accent: the
+                        // accent means *this run*, and a sort order is not one.
+                        // `selectable_value` already fills the selected item.
+                        ui.selectable_value(&mut chosen, mode, text(mode.label(), &p));
                     }
                 });
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(caps("Group by type", window::MICRO, p.muted));
+                ui.label(eyebrow("Group by type", &p));
                 if tick_box(ui, self.view.grouped, true, &p).clicked() {
                     self.view.grouped = !self.view.grouped;
                     self.rebuild_rows();
@@ -145,7 +146,6 @@ impl Shell {
                 }
             });
         });
-        ui.add_space(14.0);
 
         if chosen != before {
             self.view.sort = chosen;
@@ -218,16 +218,12 @@ impl Shell {
             // assumed to exist as a glyph in some system font.
             ui.label(
                 egui::RichText::new(if folded { "\u{25b8}" } else { "\u{25be}" })
-                    .font(tgx_ui::fonts::sans(window::SMALL))
+                    .font(tgx_ui::fonts::mono(window::LABEL))
                     .color(p.muted),
             );
-            ui.label(caps(category.label(), window::MICRO, p.fg));
+            ui.label(caps(category.label(), p.fg));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(
-                    egui::RichText::new(total.to_string())
-                        .font(tgx_ui::fonts::mono(window::SMALL))
-                        .color(p.muted),
-                );
+                ui.label(figure(total.to_string(), &p));
             });
         });
 
@@ -275,35 +271,22 @@ impl Shell {
                 ui.add_space(8.0);
             }
 
-            // The count is the row's one number, and the design sets every
-            // number in the mono. Laid out from the right so a long title
-            // cannot push it off the panel.
+            // The count is the row's one number. Laid out from the right so a
+            // long title cannot push it off the panel.
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(
-                    egui::RichText::new(count_text(chat.message_count))
-                        .font(tgx_ui::fonts::mono(window::SMALL))
-                        .color(p.muted),
-                );
-                ui.add_space(12.0);
+                ui.label(figure(count_text(chat.message_count), &p));
+                ui.add_space(space::STEP);
+                // Title over caption, and the two are one block: no space
+                // between them beyond the leading, because a gap there would
+                // read as two rows rather than one chat with a subtitle.
                 ui.with_layout(Layout::top_down(Align::LEFT), |ui| {
-                    ui.add_space(6.0);
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(&chat.title)
-                                .font(tgx_ui::fonts::sans(window::BODY))
-                                .color(p.fg),
-                        )
-                        .truncate(),
-                    );
-                    // The caption is the kind and the last activity, tracked
-                    // uppercase micro-type in the mono. **The date is half its
-                    // point**: the default sort is Recent activity, and without
-                    // it the list is ordered on a unix second that appears
-                    // nowhere on screen.
-                    ui.add(
-                        egui::Label::new(caps(&list::caption(chat, now), window::MICRO, p.muted))
-                            .truncate(),
-                    );
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.add(egui::Label::new(text(&chat.title, &p)).truncate());
+                    // The caption is the kind and the last activity. **The date
+                    // is half its point**: the default sort is Recent activity,
+                    // and without it the list is ordered on a unix second that
+                    // appears nowhere on screen.
+                    ui.add(egui::Label::new(caps(&list::caption(chat, now), p.muted)).truncate());
                 });
             });
         });
@@ -322,9 +305,8 @@ impl Shell {
     /// does nothing teaches that the interface is unreliable.
     fn selection_row(&mut self, ui: &mut Ui, live: bool) {
         let p = self.palette;
-        ui.add_space(10.0);
         row(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 16.0;
+            ui.spacing_mut().item_spacing.x = space::STEP;
             for (i, label) in ["All", "None", "Invert", "Only forums"].iter().enumerate() {
                 // **Flat, unlike the nav bar's.** Four boxes here would put more
                 // border under the list than there is around the buttons that
@@ -334,8 +316,7 @@ impl Shell {
                 // refuses the click in the same call — the first pass chose a
                 // colour here and a `Sense` beside it, and the two could
                 // disagree.
-                let text = caps(label, window::MICRO, p.fg);
-                if action(ui, text, live).clicked() {
+                if action(ui, caps(label, p.fg), live).clicked() {
                     // Asked once: `visible()` sorts the whole account, and
                     // every one of these four needs the same answer.
                     let visible: Vec<(i64, bool)> =
@@ -396,7 +377,6 @@ impl Shell {
                 }
             });
         });
-        ui.add_space(10.0);
     }
 }
 

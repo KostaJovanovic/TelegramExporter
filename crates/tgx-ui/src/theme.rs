@@ -42,11 +42,11 @@ pub fn install(ctx: &Context, palette: &Palette) {
     // widget falls back to when a call site does not name a font, and they have
     // to be the same three sizes the call sites use.
     style.text_styles = [
-        (TextStyle::Body, fonts::sans(window::BODY)),
-        (TextStyle::Button, fonts::sans(window::BODY)),
-        (TextStyle::Small, fonts::sans(window::MICRO)),
-        (TextStyle::Monospace, fonts::mono(window::SMALL)),
-        (TextStyle::Heading, fonts::medium(window::BODY)),
+        (TextStyle::Body, fonts::sans(window::READING)),
+        (TextStyle::Button, fonts::sans(window::READING)),
+        (TextStyle::Small, fonts::sans(window::LABEL)),
+        (TextStyle::Monospace, fonts::mono(window::LABEL)),
+        (TextStyle::Heading, fonts::medium(window::READING)),
     ]
     .into();
 

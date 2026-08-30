@@ -61,7 +61,7 @@ impl Shell {
                     // site's, so it reads as an action rather than as a label
                     // for where you already are. Left flat: it is the one thing
                     // up here that nobody arrives looking for.
-                    let chip = caps(other_theme(&self.settings.theme), window::MICRO, p.muted);
+                    let chip = caps(other_theme(&self.settings.theme), p.muted);
                     if action(ui, chip, true).clicked() {
                         self.toggle_theme();
                     }
@@ -147,7 +147,7 @@ impl Shell {
                 ui.add(
                     egui::Label::new(
                         egui::RichText::new(tgx_ui::components::uppercase(&self.status))
-                            .font(tgx_ui::fonts::mono(window::MICRO))
+                            .font(tgx_ui::fonts::mono(window::LABEL))
                             .color(p.muted),
                     )
                     .truncate(),
