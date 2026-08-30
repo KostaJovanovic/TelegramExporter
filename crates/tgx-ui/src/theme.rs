@@ -114,7 +114,34 @@ pub fn install(ctx: &Context, palette: &Palette) {
     style.spacing.button_padding = egui::vec2(14.0, 7.0);
     style.spacing.interact_size.y = 30.0;
 
-    ctx.set_style(style);
+    // **Into both slots, and then the switch is pinned shut.**
+    //
+    // egui does not hold one style. It holds `light_style` and `dark_style` and
+    // picks between them by `theme_preference`, which defaults to `System` —
+    // and `Context::set_style`, the obvious call, writes only the slot in use.
+    // So the design went into one slot, eframe reported the operating system's
+    // appearance a few frames later, egui switched to the other, and the window
+    // came up in **stock egui light**: near-white panels, rounded widgets, a
+    // typeface nobody chose. Not a palette of ours at all, and nothing in this
+    // crate had been asked to do it.
+    //
+    // Writing both slots makes the switch a no-op whichever way it goes; setting
+    // the preference as well means `ctx.theme()` agrees with the palette, so
+    // anything that branches on it — `dark_mode` is read by widgets that pick
+    // their own contrast — gets the same answer the colours were chosen for.
+    //
+    // **This app's appearance is `settings.theme` and nothing else.** It is a
+    // stored setting with a control in the nav bar; following the desktop as
+    // well would be a second writer for one fact.
+    let theme = if palette.is_light() {
+        egui::Theme::Light
+    } else {
+        egui::Theme::Dark
+    };
+    let style: std::sync::Arc<egui::Style> = style.into();
+    ctx.set_style_of(egui::Theme::Dark, style.clone());
+    ctx.set_style_of(egui::Theme::Light, style);
+    ctx.set_theme(theme);
 }
 
 /// `metrics::RADIUS` in the type egui wants.
@@ -202,6 +229,37 @@ mod tests {
                 v.widgets.inactive.weak_bg_fill
             );
             assert_eq!(v.widgets.hovered.expansion, v.widgets.inactive.expansion);
+        }
+    }
+
+    #[test]
+    fn the_desktops_appearance_cannot_replace_this_one() {
+        // **The bug this whole function exists to survive.** egui holds a light
+        // style and a dark style and chooses by `theme_preference`, which
+        // defaults to `System`; `set_style` writes only the one in use. The
+        // design went into one slot, eframe reported the operating system's
+        // appearance a few frames later, and the window came up in stock egui
+        // light — white panels, rounded widgets — with nothing in this crate
+        // having asked for it.
+        //
+        // Both directions, because the trap is symmetric: a light palette on a
+        // dark desktop fails exactly the same way.
+        for palette in [Palette::dark(), Palette::light()] {
+            let ctx = Context::default();
+            install(&ctx, &palette);
+            for switch in [
+                egui::ThemePreference::Light,
+                egui::ThemePreference::Dark,
+                egui::ThemePreference::System,
+            ] {
+                ctx.set_theme(switch);
+                assert_eq!(
+                    ctx.style().visuals.panel_fill,
+                    palette.bg,
+                    "{switch:?} replaced the design"
+                );
+                assert_eq!(ctx.style().visuals.override_text_color, Some(palette.fg));
+            }
         }
     }
 
