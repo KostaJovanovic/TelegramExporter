@@ -382,9 +382,11 @@ mod tests {
     fn clearing_the_error_clears_the_copy_confirmation_with_it() {
         // "Copied" sitting under a message that has since been replaced is a
         // claim that has quietly become false.
-        let mut d = LoginDialog::default();
-        d.error = Some("PHONE_CODE_INVALID".into());
-        d.copied = true;
+        let mut d = LoginDialog {
+            error: Some("PHONE_CODE_INVALID".into()),
+            copied: true,
+            ..Default::default()
+        };
         d.clear_error();
         assert!(d.error.is_none());
         assert!(!d.copied);

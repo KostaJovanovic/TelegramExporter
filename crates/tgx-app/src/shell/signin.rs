@@ -6,9 +6,12 @@
 
 use super::*;
 use crate::login::Field;
-use eframe::egui::{Sense, Ui};
-use tgx_ui::components::{eyebrow, rule, uppercase};
+use eframe::egui::{Align, Layout, Ui};
+use tgx_ui::components::{action, block, eyebrow, row, rule, uppercase};
 use tgx_ui::tokens::type_scale;
+
+/// How wide the dialog is. Wide enough for an api_hash on one line.
+const DIALOG_W: f32 = 420.0;
 
 impl Shell {
     pub(super) fn login_panel(&mut self, ctx: &Context) {
@@ -24,75 +27,81 @@ impl Shell {
         // that from an `id`-carrying, `occlude`-ing scrim, because a plain
         // `div` with no id takes part in no hit testing at all and so dimmed
         // the window while stopping nothing.
-        let modal = egui::Modal::new(egui::Id::new("login")).show(ctx, |ui| {
-            ui.set_width(420.0);
-            let dialog = self.login.as_ref().expect("checked above");
-            let stage = dialog.stage;
-            let busy = dialog.busy;
-            let action = stage.action();
+        // The frame carries no margin of its own: the rules under the title and
+        // over the action row run the full width of the dialog, as every rule in
+        // this window does, and the gutter is put back on the content by `row`
+        // and `block`.
+        let modal = egui::Modal::new(egui::Id::new("login"))
+            .frame(
+                egui::Frame::NONE
+                    .fill(p.bg)
+                    .stroke(egui::Stroke::new(1.0_f32, p.hairline)),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(DIALOG_W);
+                let dialog = self.login.as_ref().expect("checked above");
+                let stage = dialog.stage;
+                let busy = dialog.busy;
+                let verb = stage.action();
 
-            ui.add_space(16.0);
-            ui.horizontal(|ui| {
-                ui.add_space(20.0);
-                ui.label(eyebrow(stage.title(), &p));
-            });
-            ui.add_space(16.0);
-            rule(ui, &p);
+                ui.add_space(16.0);
+                row(ui, |ui| ui.label(eyebrow(stage.title(), &p)));
+                ui.add_space(16.0);
+                rule(ui, &p);
 
-            // Everything that can grow — the hint, the numbered steps, an error
-            // of unknown length — goes inside the scrolling body. The action row
-            // sits outside it, so Cancel and the action button are reachable at
-            // any window height.
-            let max_body = (ctx.content_rect().height() * 0.6).max(120.0);
-            egui::ScrollArea::vertical()
-                .id_salt("login-body")
-                .max_height(max_body)
-                .auto_shrink([false, true])
-                .show(ui, |ui| self.login_body(ui));
+                // Everything that can grow — the hint, the numbered steps, an
+                // error of unknown length — goes inside the scrolling body. The
+                // action row sits outside it, so Cancel and the action button
+                // are reachable at any window height.
+                let max_body = (ctx.content_rect().height() * 0.6).max(120.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("login-body")
+                    .max_height(max_body)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| self.login_body(ui));
 
-            rule(ui, &p);
-            ui.add_space(16.0);
-            let mut cancel = false;
-            let mut submit = false;
-            ui.horizontal(|ui| {
-                ui.add_space(20.0);
-                cancel = ui
-                    .add(
-                        egui::Label::new(
-                            egui::RichText::new("Cancel")
-                                .font(tgx_ui::fonts::sans(type_scale::SMALL))
-                                .color(p.muted),
-                        )
-                        .sense(Sense::click()),
+                rule(ui, &p);
+                ui.add_space(16.0);
+                let mut cancel = false;
+                let mut submit = false;
+                row(ui, |ui| {
+                    cancel = action(
+                        ui,
+                        egui::RichText::new("Cancel")
+                            .font(tgx_ui::fonts::sans(type_scale::SMALL))
+                            .color(p.muted),
+                        true,
                     )
                     .clicked();
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_space(20.0);
-                    submit = ui
-                        .add(
-                            egui::Label::new(
-                                egui::RichText::new(if busy { "Working…" } else { action })
-                                    .font(tgx_ui::fonts::sans(type_scale::SMALL))
-                                    .color(if busy { p.muted } else { p.fg }),
-                            )
-                            .sense(Sense::click()),
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        // **Busy is disabled, not merely greyed.** The label
+                        // already said "Working…" while still taking clicks, so
+                        // a second press queued a second request behind the one
+                        // in flight; `submit_login` refuses it, but the control
+                        // should not have offered.
+                        submit = action(
+                            ui,
+                            egui::RichText::new(if busy { "Working…" } else { verb })
+                                .font(tgx_ui::fonts::sans(type_scale::SMALL))
+                                .color(p.fg),
+                            !busy,
                         )
                         .clicked();
+                    });
                 });
-            });
-            ui.add_space(16.0);
+                ui.add_space(16.0);
 
-            if cancel {
-                // Abandoning the dialog abandons the half-finished credential
-                // with it, rather than leaving a live login token sitting
-                // around for the rest of the run. The connection is shared and
-                // stays up; the token is what must not.
-                self.bridge.spawn(crate::actions::forget_pending_login());
-                self.login = None;
-            } else if submit {
-                self.submit_login();
-            }
-        });
+                if cancel {
+                    // Abandoning the dialog abandons the half-finished
+                    // credential with it, rather than leaving a live login token
+                    // sitting around for the rest of the run. The connection is
+                    // shared and stays up; the token is what must not.
+                    self.bridge.spawn(crate::actions::forget_pending_login());
+                    self.login = None;
+                } else if submit {
+                    self.submit_login();
+                }
+            });
 
         // Escape and a click outside both close it, by the same route Cancel
         // does — an abandoned dialog must not leave the token behind whichever
@@ -111,8 +120,7 @@ impl Shell {
         let stage = dialog.stage;
 
         ui.add_space(14.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.add_space(20.0);
+        block(ui, |ui| {
             ui.label(
                 egui::RichText::new(stage.hint())
                     .font(tgx_ui::fonts::sans(type_scale::TINY))
@@ -123,43 +131,43 @@ impl Shell {
         // Numbered, because these are steps taken on another site in order, and
         // a paragraph of prose describing a five-step form is how someone ends
         // up on the wrong page deciding what "platform" to pick.
+        //
+        // **A grid, so the prose hangs off the number rather than under it.**
+        // These were wrapping rows with the number as the first widget, which
+        // means a step that wraps puts its second line under the digit; a
+        // two-column grid is the shape the layout was drawn as.
         let steps = stage.steps();
         if !steps.is_empty() {
             ui.add_space(10.0);
-            for (i, step) in steps.iter().enumerate() {
-                ui.horizontal_wrapped(|ui| {
-                    ui.add_space(20.0);
-                    ui.label(
-                        egui::RichText::new(format!("{}", i + 1))
-                            .font(tgx_ui::fonts::mono(type_scale::TINY))
-                            .color(p.rule),
-                    );
-                    ui.add_space(8.0);
-                    ui.label(
-                        egui::RichText::new(*step)
-                            .font(tgx_ui::fonts::sans(type_scale::TINY))
-                            .color(p.muted),
-                    );
-                });
-                ui.add_space(6.0);
-            }
+            block(ui, |ui| {
+                egui::Grid::new("login-steps")
+                    .num_columns(2)
+                    .spacing([8.0, 6.0])
+                    .show(ui, |ui| {
+                        for (i, step) in steps.iter().enumerate() {
+                            ui.label(
+                                egui::RichText::new(format!("{}", i + 1))
+                                    .font(tgx_ui::fonts::mono(type_scale::TINY))
+                                    .color(p.rule),
+                            );
+                            ui.label(
+                                egui::RichText::new(*step)
+                                    .font(tgx_ui::fonts::sans(type_scale::TINY))
+                                    .color(p.muted),
+                            );
+                            ui.end_row();
+                        }
+                    });
+            });
         }
 
         if let Some(link) = stage.link() {
             ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                ui.add_space(20.0);
-                if ui
-                    .add(
-                        egui::Label::new(
-                            egui::RichText::new(link.label)
-                                .font(tgx_ui::fonts::sans(type_scale::TINY))
-                                .color(p.accent),
-                        )
-                        .sense(Sense::click()),
-                    )
-                    .clicked()
-                {
+            row(ui, |ui| {
+                let text = egui::RichText::new(link.label)
+                    .font(tgx_ui::fonts::sans(type_scale::TINY))
+                    .color(p.accent);
+                if action(ui, text, true).clicked() {
                     ui.ctx().open_url(egui::OpenUrl::new_tab(link.url));
                 }
             });
@@ -168,30 +176,24 @@ impl Shell {
         for field in stage.fields() {
             let field = *field;
             ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                ui.add_space(20.0);
+            block(ui, |ui| {
                 ui.label(
                     egui::RichText::new(uppercase(field.label()))
                         .font(tgx_ui::fonts::sans(type_scale::MICRO))
                         .color(p.muted),
                 );
-            });
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.add_space(20.0);
-                let width = ui.available_width() - 20.0;
+                ui.add_space(4.0);
                 let Some(dialog) = self.login.as_mut() else {
                     return;
                 };
                 // `Field::masked` is the only source of truth for which fields
                 // are secret. A separate bool here let the two disagree, which
                 // is exactly how a credential ends up rendered in plain text.
-                ui.add_sized(
-                    [width, 26.0],
+                ui.add(
                     egui::TextEdit::singleline(dialog.value_mut(field))
                         .password(field.masked())
                         .hint_text(field.placeholder())
-                        .desired_width(width),
+                        .desired_width(ui.available_width()),
                 );
             });
         }
@@ -206,28 +208,17 @@ impl Shell {
             // auth.sendCode` from a screenshot is how the useful half gets lost.
             let copied = dialog.copied;
             ui.add_space(10.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.add_space(20.0);
-                if ui
-                    .add(
-                        egui::Label::new(
-                            egui::RichText::new(&err)
-                                .font(tgx_ui::fonts::sans(type_scale::TINY))
-                                .color(p.accent),
-                        )
-                        .sense(Sense::click()),
-                    )
-                    .clicked()
-                {
+            block(ui, |ui| {
+                let text = egui::RichText::new(&err)
+                    .font(tgx_ui::fonts::sans(type_scale::TINY))
+                    .color(p.accent);
+                if action(ui, text, true).clicked() {
                     ui.ctx().copy_text(err.clone());
                     if let Some(d) = self.login.as_mut() {
                         d.copied = true;
                     }
                 }
-            });
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.add_space(20.0);
+                ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new(if copied {
                         "Copied to clipboard"

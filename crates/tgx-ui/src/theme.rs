@@ -83,6 +83,15 @@ pub fn install(ctx: &Context, palette: &Palette) {
     v.widgets.active.bg_stroke = Stroke::new(1.0_f32, palette.accent);
     v.widgets.active.bg_fill = palette.surface;
     v.widgets.active.weak_bg_fill = palette.surface;
+    // **The design has no raised fill, so hover has to be the surface tint.**
+    // Every control in this window is flat text or a hairline box; without one
+    // state that differs, a framed widget — the sort menu is the only one —
+    // gives no sign at all that the pointer is on it. `surface` is one step off
+    // the page in both appearances, which is as far as this design goes.
+    v.widgets.hovered.bg_fill = palette.surface;
+    v.widgets.hovered.weak_bg_fill = palette.surface;
+    v.widgets.open.bg_fill = palette.surface;
+    v.widgets.open.weak_bg_fill = palette.surface;
 
     v.window_corner_radius = radius();
     v.menu_corner_radius = radius();
@@ -167,6 +176,22 @@ mod tests {
         let v = styled(&Palette::dark()).visuals;
         assert_eq!(v.widgets.hovered.expansion, 0.0);
         assert_eq!(v.widgets.active.expansion, 0.0);
+    }
+
+    #[test]
+    fn hover_is_visible_without_the_widget_moving() {
+        // The two halves of the same rule. A flat design gives no depth cue, so
+        // if the hovered fill equals the resting one there is no feedback at all
+        // — and if the fix is expansion instead, the hairline beside it appears
+        // to shift, which reads as a rendering fault.
+        for palette in [Palette::light(), Palette::dark()] {
+            let v = styled(&palette).visuals;
+            assert_ne!(
+                v.widgets.hovered.weak_bg_fill,
+                v.widgets.inactive.weak_bg_fill
+            );
+            assert_eq!(v.widgets.hovered.expansion, v.widgets.inactive.expansion);
+        }
     }
 
     #[test]

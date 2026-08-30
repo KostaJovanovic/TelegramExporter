@@ -9,9 +9,10 @@
 use super::*;
 use crate::list::SortMode;
 use chrono::{DateTime, Local};
-use eframe::egui::{Layout, Sense, Ui};
+use eframe::egui::{Align, Layout, Sense, Ui};
 use tgx_ui::components::{
-    caps, count_text, eyebrow, forum_dot, rule, selection_label, soft_rule, tick_box,
+    action, caps, count_text, eyebrow, forum_dot, row, rule, selection_label, soft_rule, tick_box,
+    GUTTER,
 };
 use tgx_ui::tokens::type_scale;
 
@@ -24,56 +25,66 @@ use tgx_ui::tokens::type_scale;
 const ROW_HEIGHT: f32 = 46.0;
 
 impl Shell {
+    /// **Head, foot, then the list — as panels, not as measured heights.**
+    ///
+    /// The first pass reserved `62.0` off the bottom by hand before laying the
+    /// list out, because that is what the flex column it came from did
+    /// implicitly. egui already has the mechanism: a `TopBottomPanel` measures
+    /// itself against its own contents and the central area gets exactly what is
+    /// left. So the magic number goes, and the footer is correct at any height
+    /// and any type size rather than at the one it was measured on.
     pub(super) fn chat_panel(&mut self, ui: &mut Ui) {
         let p = self.palette;
-        let live = self.selection_actions_enabled();
-        let (total, any_uncounted) = self.selection_total();
+        let bare = egui::Frame::NONE.fill(p.bg);
 
-        ui.add_space(12.0);
-        ui.horizontal(|ui| {
-            ui.add_space(16.0);
-            ui.label(eyebrow("Chats", &p));
-        });
-        ui.add_space(12.0);
-        rule(ui, &p);
+        egui::TopBottomPanel::top("chats-head")
+            .frame(bare)
+            .show_separator_line(false)
+            .show_inside(ui, |ui| {
+                ui.add_space(12.0);
+                row(ui, |ui| ui.label(eyebrow("Chats", &p)));
+                ui.add_space(12.0);
+                rule(ui, &p);
+                self.search_row(ui);
+                soft_rule(ui, &p);
+                self.sort_row(ui);
+                rule(ui, &p);
+            });
 
-        self.search_row(ui);
-        soft_rule(ui, &p);
-        self.sort_row(ui);
-        rule(ui, &p);
+        egui::TopBottomPanel::bottom("chats-foot")
+            .frame(bare)
+            .show_separator_line(false)
+            .show_inside(ui, |ui| {
+                let live = self.selection_actions_enabled();
+                let (total, any_uncounted) = self.selection_total();
+                rule(ui, &p);
+                self.selection_row(ui, live);
+                row(ui, |ui| {
+                    ui.label(caps(
+                        &selection_label(self.selected.len(), total, any_uncounted),
+                        type_scale::MICRO,
+                        p.muted,
+                    ))
+                });
+                ui.add_space(8.0);
+            });
 
-        // The footer is measured off the bottom first, so the list gets exactly
-        // the slack that is left. Laying the list out first and the footer after
-        // it is how a long list pushes its own controls off the panel.
-        let footer = 62.0;
-        let body = (ui.available_height() - footer).max(ROW_HEIGHT);
-        ui.allocate_ui(egui::vec2(ui.available_width(), body), |ui| {
-            self.list_body(ui);
-        });
-
-        rule(ui, &p);
-        self.selection_row(ui, live);
-        ui.horizontal(|ui| {
-            ui.add_space(16.0);
-            ui.label(caps(
-                &selection_label(self.selected.len(), total, any_uncounted),
-                type_scale::MICRO,
-                p.muted,
-            ));
-        });
+        egui::CentralPanel::default()
+            .frame(bare)
+            .show_inside(ui, |ui| self.list_body(ui));
     }
 
     fn search_row(&mut self, ui: &mut Ui) {
         ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            ui.add_space(16.0);
-            let width = ui.available_width() - 16.0;
+        row(ui, |ui| {
             let before = self.search.clone();
-            ui.add_sized(
-                [width, 26.0],
+            // `desired_width` alone, with no `add_sized`: inside the gutter the
+            // available width already is the width this field should take, so
+            // there is nothing left to subtract by hand.
+            ui.add(
                 egui::TextEdit::singleline(&mut self.search)
                     .hint_text("Filter chats…")
-                    .desired_width(width),
+                    .desired_width(ui.available_width()),
             );
             // Read from the field, never typed into a mirror of it: a second
             // copy of the same string is how the empty state ends up quoting
@@ -89,75 +100,45 @@ impl Shell {
     /// SORT and GROUP BY TYPE.
     ///
     /// The sort is a menu rather than seven chips: seven labels do not fit
-    /// across a panel this width, and cycling through seven with one click
-    /// means six clicks to undo a mistake.
+    /// across a panel this width, and cycling through seven with one click means
+    /// six clicks to undo a mistake.
+    ///
+    /// **It is a `ComboBox`, and that removed a field from the shell.** GPUI
+    /// needed a whole catcher apparatus to dismiss a menu — an absolutely
+    /// positioned 16000px hitbox with `occlude`, deferred below the menu — so
+    /// the swap carried over a hand-driven `Popup` and a `sort_open: bool` to go
+    /// with it. Openness is the widget's business, not the window's: egui keeps
+    /// it against the widget's own id, and "is a menu open?" is no longer a
+    /// question this struct can answer wrongly.
     fn sort_row(&mut self, ui: &mut Ui) {
         let p = self.palette;
-        let current = self.view.sort;
+        let before = self.view.sort;
+        let mut chosen = before;
 
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.add_space(16.0);
+        row(ui, |ui| {
             ui.label(caps("Sort", type_scale::MICRO, p.muted));
-            ui.add_space(12.0);
-
-            // **egui closes this one.** The whole catcher apparatus the GPUI
-            // version needed — an absolutely positioned 16000px hitbox with
-            // `occlude`, deferred at a lower priority than the menu — existed
-            // because choosing a mode was the only thing that closed the menu,
-            // and gpui hands a click to every hitbox under the pointer unless
-            // one in front blocks the rest. A `Popup` dismisses itself on a
-            // click outside and takes that click with it.
-            let button = ui.add(
-                egui::Label::new(
-                    egui::RichText::new(format!("{} \u{25be}", current.label()))
+            egui::ComboBox::from_id_salt("sort")
+                .selected_text(
+                    egui::RichText::new(before.label())
                         .font(tgx_ui::fonts::sans(type_scale::TINY))
                         .color(p.fg),
                 )
-                .sense(Sense::click()),
-            );
-            if button.clicked() {
-                self.sort_open = !self.sort_open;
-            }
-            let popup = egui::Popup::from_response(&button)
-                .open(self.sort_open)
-                .layout(Layout::top_down_justified(egui::Align::LEFT));
-            let closed = popup
-                .show(|ui| {
-                    ui.set_min_width(200.0);
+                .width(180.0)
+                .show_ui(ui, |ui| {
                     for mode in SortMode::ALL {
-                        let chosen = mode == current;
-                        let label = egui::RichText::new(mode.label())
-                            .font(tgx_ui::fonts::sans(type_scale::TINY))
-                            .color(if chosen { p.accent } else { p.fg });
-                        if ui
-                            .add(egui::Label::new(label).sense(Sense::click()))
-                            .clicked()
-                        {
-                            self.view.sort = mode;
-                            self.sort_open = false;
-                            self.rebuild_rows();
-                            // Sorting by size with no counts fetched yet is not
-                            // an error, but it is a list that will not move —
-                            // say so rather than leaving it looking broken.
-                            if matches!(mode, SortMode::Largest | SortMode::Smallest)
-                                && self.chats.iter().all(|c| c.message_count.is_none())
-                            {
-                                self.status = "No message counts yet — press Count messages".into();
-                            }
-                            self.commit_settings();
-                        }
+                        ui.selectable_value(
+                            &mut chosen,
+                            mode,
+                            egui::RichText::new(mode.label())
+                                .font(tgx_ui::fonts::sans(type_scale::TINY))
+                                .color(if mode == before { p.accent } else { p.fg }),
+                        );
                     }
-                })
-                .is_none();
-            if closed {
-                self.sort_open = false;
-            }
+                });
 
-            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(16.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(caps("Group by type", type_scale::MICRO, p.muted));
-                ui.add_space(8.0);
                 if tick_box(ui, self.view.grouped, true, &p).clicked() {
                     self.view.grouped = !self.view.grouped;
                     self.rebuild_rows();
@@ -166,6 +147,20 @@ impl Shell {
             });
         });
         ui.add_space(8.0);
+
+        if chosen != before {
+            self.view.sort = chosen;
+            self.rebuild_rows();
+            // Sorting by size with no counts fetched yet is not an error, but it
+            // is a list that will not move — say so rather than leaving it
+            // looking broken.
+            if matches!(chosen, SortMode::Largest | SortMode::Smallest)
+                && self.chats.iter().all(|c| c.message_count.is_none())
+            {
+                self.status = "No message counts yet — press Count messages".into();
+            }
+            self.commit_settings();
+        }
     }
 
     fn list_body(&mut self, ui: &mut Ui) {
@@ -216,13 +211,10 @@ impl Shell {
     /// silently change what All selects. See `crate::list`.
     fn heading_row(&mut self, ui: &mut Ui, category: Category, total: usize, folded: bool) {
         let p = self.palette;
-        let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
+        let (rect, response) = cell(ui, Sense::click());
         ui.painter()
             .rect_filled(rect, egui::CornerRadius::ZERO, p.surface);
-        let mut row =
-            ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(16.0, 0.0))));
-        row.horizontal_centered(|ui| {
+        inside(ui, rect, GUTTER, |ui| {
             // The disclosure marker is drawn from the text face rather than
             // assumed to exist as a glyph in some system font.
             ui.label(
@@ -230,9 +222,8 @@ impl Shell {
                     .font(tgx_ui::fonts::sans(type_scale::TINY))
                     .color(p.muted),
             );
-            ui.add_space(8.0);
             ui.label(caps(category.label(), type_scale::MICRO, p.fg));
-            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(
                     egui::RichText::new(total.to_string())
                         .font(tgx_ui::fonts::mono(type_scale::TINY))
@@ -261,15 +252,17 @@ impl Shell {
     fn chat_row(&mut self, ui: &mut Ui, chat: &tgx_tg::client::ChatInfo, now: DateTime<Local>) {
         let p = self.palette;
         let ticked = self.selected.contains(&chat.id);
-        let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_HEIGHT), Sense::click());
-        let indent = if self.view.grouped { 30.0 } else { 16.0 };
-        let inner = egui::Rect::from_min_max(
-            egui::pos2(rect.left() + indent, rect.top()),
-            egui::pos2(rect.right() - 16.0, rect.bottom()),
-        );
-        let mut row = ui.new_child(egui::UiBuilder::new().max_rect(inner));
-        row.horizontal_centered(|ui| {
+        let (rect, response) = cell(ui, Sense::click());
+        // **A ticked row is a filled row, and a hovered one too.** The whole row
+        // is the hit target, so a 12px box in the corner was the only thing
+        // saying which rows were chosen — over four hundred of them, on the one
+        // decision that governs what the export does.
+        if ticked || response.hovered() {
+            ui.painter()
+                .rect_filled(rect, egui::CornerRadius::ZERO, p.surface);
+        }
+        let indent = if self.view.grouped { 30.0 } else { GUTTER };
+        inside(ui, rect, indent, |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             tick_box(ui, ticked, true, &p);
             ui.add_space(12.0);
@@ -286,14 +279,14 @@ impl Shell {
             // The count is the row's one number, and the design sets every
             // number in the mono. Laid out from the right so a long title
             // cannot push it off the panel.
-            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(
                     egui::RichText::new(count_text(chat.message_count))
                         .font(tgx_ui::fonts::mono(type_scale::TINY))
                         .color(p.muted),
                 );
                 ui.add_space(12.0);
-                ui.with_layout(Layout::top_down(egui::Align::LEFT), |ui| {
+                ui.with_layout(Layout::top_down(Align::LEFT), |ui| {
                     ui.add_space(6.0);
                     ui.add(
                         egui::Label::new(
@@ -335,13 +328,15 @@ impl Shell {
     fn selection_row(&mut self, ui: &mut Ui, live: bool) {
         let p = self.palette;
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.add_space(16.0);
+        row(ui, |ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
             for (i, label) in ["All", "None", "Invert", "Only forums"].iter().enumerate() {
-                let text = caps(label, type_scale::MICRO, if live { p.fg } else { p.muted });
-                let sense = if live { Sense::click() } else { Sense::hover() };
-                if ui.add(egui::Label::new(text).sense(sense)).clicked() {
+                // The ink is unconditional. `action` hands the disabled state to
+                // `add_enabled`, which greys the label and refuses the click in
+                // the same call — the first pass chose a colour here and a
+                // `Sense` beside it, and the two could disagree.
+                let text = caps(label, type_scale::MICRO, p.fg);
+                if action(ui, text, live).clicked() {
                     // Asked once: `visible()` sorts the whole account, and
                     // every one of these four needs the same answer.
                     let visible: Vec<(i64, bool)> =
@@ -393,23 +388,43 @@ impl Shell {
             } else {
                 "Count messages"
             };
-            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(16.0);
-                let text = caps(
-                    label,
-                    type_scale::MICRO,
-                    if countable { p.accent } else { p.muted },
-                );
-                let sense = if countable {
-                    Sense::click()
-                } else {
-                    Sense::hover()
-                };
-                if ui.add(egui::Label::new(text).sense(sense)).clicked() {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let text = caps(label, type_scale::MICRO, p.accent);
+                if action(ui, text, countable).clicked() {
                     self.start_count();
                 }
             });
         });
         ui.add_space(8.0);
     }
+}
+
+/// One list row: full width, exactly [`ROW_HEIGHT`], allocated and sensed.
+///
+/// The height is fixed because `ScrollArea::show_rows` is told the same figure
+/// and skips straight to the visible range on it — a row that measured itself
+/// would put the list's scroll position and its contents out of step.
+fn cell(ui: &mut Ui, sense: Sense) -> (egui::Rect, egui::Response) {
+    ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_HEIGHT), sense)
+}
+
+/// Lay a row's contents out inside the rect it was given, **vertically centred**.
+///
+/// `left` is the row's own indent; the right gutter is the panel's. The first
+/// pass reached for `Ui::horizontal_centered` here, which allocates a strip one
+/// `interact_size.y` tall — 30 points against this row's 46 — and centres within
+/// *that*, leaving every row sitting eight points high in its own box. A layout
+/// given the row rect centres in the row.
+fn inside<R>(ui: &mut Ui, rect: egui::Rect, left: f32, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let inner = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + left, rect.top()),
+        egui::pos2(rect.right() - GUTTER, rect.bottom()),
+    );
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(Layout::left_to_right(Align::Center)),
+        add,
+    )
+    .inner
 }

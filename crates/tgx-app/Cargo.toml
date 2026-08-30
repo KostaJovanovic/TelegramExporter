@@ -19,6 +19,15 @@ tgx-tg = { path = "../tgx-tg" }
 # installs the design into.
 eframe = { version = "0.33", default-features = false, features = ["glow"] }
 
+# `TableBuilder`, for the queue. The one table in this window has four fixed
+# count columns and one stretch column that names the chat, and laying that out
+# by hand meant the same five-term subtraction written twice with a comment
+# telling the next reader to re-check the sum. It is the egui project's own
+# companion crate, released in lockstep with the version above, and
+# `default-features = false` leaves nothing but the layout code — the image,
+# SVG, datepicker and syntect extras are all opt-in and none is wanted here.
+egui_extras = { version = "0.33", default-features = false }
+
 # The native folder picker, for "Open output folder" and for choosing where an
 # export goes. Hand-rolling one means reimplementing the sidebar, the recent
 # list and the path box, and getting a worse version of a dialog people already
