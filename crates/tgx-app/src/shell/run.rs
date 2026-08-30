@@ -4,9 +4,9 @@ use super::*;
 use eframe::egui::{Align, Layout, Sense, Ui};
 use egui_extras::{Column, TableBuilder};
 use tgx_ui::components::{
-    action, block, caps, eyebrow, progress_bar, row, rule, soft_rule, thousands, EmptyState,
+    action, block, caps, eyebrow, progress_bar, row, rule, thousands, EmptyState,
 };
-use tgx_ui::tokens::type_scale;
+use tgx_ui::tokens::window;
 
 /// Widths for the queue's count columns.
 ///
@@ -56,7 +56,7 @@ impl Shell {
             .resizable(true)
             .show_separator_line(false)
             .show_inside(ui, |ui| {
-                soft_rule(ui, &p);
+                rule(ui, &p);
                 self.log_panel(ui);
             });
 
@@ -125,7 +125,7 @@ impl Shell {
                     // as a label.
                     for label in ["Chat", "Status", "Messages", "Topics", "Media"] {
                         header.col(|ui| {
-                            ui.label(caps(label, type_scale::MICRO, p.muted));
+                            ui.label(caps(label, window::MICRO, p.muted));
                         });
                     }
                 })
@@ -137,7 +137,7 @@ impl Shell {
                             ui.add(
                                 egui::Label::new(
                                     egui::RichText::new(&job.title)
-                                        .font(tgx_ui::fonts::sans(type_scale::TINY))
+                                        .font(tgx_ui::fonts::sans(window::SMALL))
                                         .color(p.fg),
                                 )
                                 .truncate(),
@@ -147,7 +147,7 @@ impl Shell {
                             ui.add(
                                 egui::Label::new(
                                     egui::RichText::new(job.state.label())
-                                        .font(tgx_ui::fonts::sans(type_scale::TINY))
+                                        .font(tgx_ui::fonts::sans(window::SMALL))
                                         .color(if running { p.accent } else { p.muted }),
                                 )
                                 .truncate(),
@@ -166,7 +166,7 @@ impl Shell {
                             r.col(|ui| {
                                 ui.label(
                                     egui::RichText::new(text)
-                                        .font(tgx_ui::fonts::mono(type_scale::TINY))
+                                        .font(tgx_ui::fonts::mono(window::SMALL))
                                         .color(p.muted),
                                 );
                             });
@@ -216,7 +216,7 @@ impl Shell {
         block(ui, |ui| {
             progress_bar(ui, fraction, &p);
             ui.add_space(6.0);
-            ui.label(caps(&caption, type_scale::MICRO, p.muted));
+            ui.label(caps(&caption, window::MICRO, p.muted));
         });
         ui.add_space(10.0);
     }
@@ -241,7 +241,7 @@ impl Shell {
                     let copied = self.log_copied;
                     let text = caps(
                         if copied { "Copied" } else { "Copy" },
-                        type_scale::MICRO,
+                        window::MICRO,
                         // Ink while it is an offer, muted once it has been
                         // taken — the same weight as the metadata beside it.
                         if copied { p.muted } else { p.fg },
@@ -264,7 +264,7 @@ impl Shell {
                     let n = self.journal.warnings();
                     ui.label(caps(
                         &format!("{n} warning{}", if n == 1 { "" } else { "s" }),
-                        type_scale::MICRO,
+                        window::MICRO,
                         p.accent,
                     ));
                 }
@@ -291,7 +291,7 @@ impl Shell {
                     for line in self.journal.lines() {
                         ui.label(
                             egui::RichText::new(&line.text)
-                                .font(tgx_ui::fonts::sans(type_scale::TINY))
+                                .font(tgx_ui::fonts::sans(window::SMALL))
                                 // A warning is painted in the accent because it
                                 // was marked as one by whoever wrote it, never
                                 // sniffed out of its text.

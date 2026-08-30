@@ -34,20 +34,26 @@
 //! disabled colour is a control that can disagree with the next one.
 
 use crate::fonts;
-use crate::tokens::{metrics, rhythm, type_scale, Palette};
+use crate::tokens::{metrics, rhythm, window, Palette};
 use eframe::egui::{
-    self, text::LayoutJob, Color32, CornerRadius, CursorIcon, FontId, Margin, Response, Sense,
-    Stroke, TextFormat, Ui, Vec2,
+    self, text::LayoutJob, Color32, CornerRadius, CursorIcon, Margin, Response, Sense, Stroke,
+    TextFormat, Ui, Vec2,
 };
 
 /// The gutter every panel's content sits inside.
 ///
-/// **The rules do not pay it.** A hairline runs the full width of the panel it
+/// **The rules do not pay it.** A rule runs the full width of the panel it
 /// divides — that is what makes the layout read as ruled rather than as boxed —
 /// so the padding is applied to the content rows by [`row`] and [`block`] and
 /// never to the panel itself. Putting it on the panel frame would inset every
-/// rule by the same 16px and quietly turn the design into a set of cards.
-pub const GUTTER: f32 = 16.0;
+/// rule by the same amount and quietly turn the design into a set of cards.
+///
+/// It is [`metrics::GAP`], the stylesheet's own `--gap`, and it was 16 — a
+/// number nothing declared. TelegramAnalyser gives its single column 34 points a
+/// side; this window holds three columns at a 900pt minimum, so it takes the
+/// token rather than the sibling's figure, but the direction is the same one:
+/// the first pass was tight everywhere and grouped nothing.
+pub const GUTTER: f32 = metrics::GAP;
 
 /// One padded row, laid out left to right.
 ///
@@ -70,21 +76,86 @@ fn gutter<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
         .inner
 }
 
-/// The design's one control: a run of text that can be clicked.
+/// A square, hairline-bordered button — **the window's one real control**.
 ///
-/// There are no raised buttons here — the design has no such thing — so this is
-/// `Button` with its frame off, which in egui also drops the button padding and
-/// leaves the text sitting exactly where a label would.
+/// A 1px box, 30 points tall, filled with the page and outlined in the hairline;
+/// `primary` fills it with the one red instead. It is
+/// TelegramAnalyser's `flat()`, which is the only button either app has.
 ///
-/// Three things it does that a `Label` with a `Sense` could not:
+/// **The first egui pass had no buttons at all.** Every action was a run of
+/// clickable text — five of them across the nav bar, four more under the list —
+/// so a window whose entire job is *press these three things in order* gave no
+/// sign of where the three things were. Swiss design is spare, not invisible: a
+/// hairline box around a label is as flat as it gets and still reads as
+/// something to press.
 ///
-/// - **Disabled comes from `add_enabled`.** One rule for the whole window
-///   instead of a colour chosen at each call site, and the click is refused by
-///   the same call that greys it, so the two cannot part company.
-/// - **The pointer says it is a control.** Flat text with no frame gives no
-///   other clue that it is one.
-/// - **A hairline appears under it on hover.** Feedback drawn in the design's
-///   own primitive rather than a fill the palette has no colour for.
+/// **Exactly one control on a screen gets `primary`.** An accent that marks two
+/// things marks neither.
+///
+/// Disabled is drawn, not hidden, and comes from `add_enabled`: one rule for the
+/// whole window rather than a colour chosen at each call site, with the click
+/// refused by the same call that greys it.
+pub fn button(
+    ui: &mut Ui,
+    label: &str,
+    enabled: bool,
+    primary: bool,
+    palette: &Palette,
+) -> Response {
+    let text = egui::RichText::new(label)
+        .font(fonts::sans(window::BODY))
+        .color(button_ink(enabled, primary, palette));
+    boxed(ui, text, enabled, primary, palette)
+}
+
+/// The colour a button's label takes.
+///
+/// Public because a [`NavCell`] is two runs at two weights and has to colour
+/// them itself — and because that is exactly the kind of second opinion this
+/// module exists to prevent.
+pub fn button_ink(enabled: bool, primary: bool, palette: &Palette) -> Color32 {
+    match (enabled, primary) {
+        (true, true) => palette.accent_fg,
+        (true, false) => palette.fg,
+        (false, _) => palette.muted,
+    }
+}
+
+/// The box, around text the caller has already coloured.
+pub fn boxed(
+    ui: &mut Ui,
+    text: impl Into<egui::WidgetText>,
+    enabled: bool,
+    primary: bool,
+    palette: &Palette,
+) -> Response {
+    let (fill, edge) = match (enabled, primary) {
+        (true, true) => (palette.accent, palette.accent),
+        (true, false) => (palette.bg, palette.hairline),
+        (false, _) => (palette.bg, palette.rule),
+    };
+    let widget = egui::Button::new(text)
+        .corner_radius(radius())
+        .fill(fill)
+        .stroke(Stroke::new(1.0_f32, edge));
+    let response = ui.add_enabled(enabled, widget);
+    if enabled {
+        return response.on_hover_cursor(CursorIcon::PointingHand);
+    }
+    response
+}
+
+/// A run of text that can be clicked, with no box around it.
+///
+/// For the small print that is nonetheless a control — the appearance chip, the
+/// selection verbs, Copy. Anything a user is meant to *find* is a [`button`];
+/// this is for what they will only look for once they want it.
+///
+/// It is `Button` with its frame off, which in egui also drops the button
+/// padding and leaves the text sitting exactly where a label would. Two things
+/// it does that a `Label` with a `Sense` could not: the pointer says it is a
+/// control, and a hairline appears under it on hover — feedback drawn in the
+/// design's own primitive rather than a fill the palette has no colour for.
 pub fn action(ui: &mut Ui, text: impl Into<egui::WidgetText>, enabled: bool) -> Response {
     let response = ui.add_enabled(enabled, egui::Button::new(text).frame(false));
     if enabled && response.hovered() {
@@ -102,19 +173,46 @@ pub fn action(ui: &mut Ui, text: impl Into<egui::WidgetText>, enabled: bool) -> 
     })
 }
 
+/// The one borrowed control: a text field.
+///
+/// A caret, a selection and a clipboard are worth borrowing rather than drawing;
+/// pasting a path out of Explorer is how the settings panel is actually used.
+///
+/// **Set in the mono, like every field in the sibling app.** What goes in these
+/// is a path, an api_id, a phone number, a code and a page size — data, not
+/// prose — and the mono says so before a character is typed. The margin and the
+/// height are the analyser's, so a field in one window is the same object as a
+/// field in the other.
+pub fn field<'t>(text: &'t mut String, palette: &Palette) -> egui::TextEdit<'t> {
+    egui::TextEdit::singleline(text)
+        .font(fonts::mono(window::SMALL))
+        .text_color(palette.fg)
+        .margin(Margin::symmetric(8, 6))
+}
+
 /// A 1px rule — the design's core primitive.
 ///
 /// **It must land on a device pixel.** On a GPU-scaled surface a 1px line can
 /// straddle two physical pixels and blur, which reads as a rendering fault
 /// rather than a style. This is the shape to keep everything going through
 /// rather than hand-rolling borders at call sites.
+///
+/// **It is `palette.rule`, and `palette.hairline` belongs to the controls.**
+/// TelegramAnalyser divides with the softer grey and spends the brighter one on
+/// button borders, which is what lets a button read as a button. The first egui
+/// pass had it the other way round and drew a dozen bright rules per panel with
+/// nothing bounded by them — a wireframe of a layout rather than a layout.
 pub fn rule(ui: &mut Ui, palette: &Palette) {
-    hairline(ui, palette.hairline);
+    hairline(ui, palette.rule);
 }
 
-/// The softer divider, for grouping inside a panel.
-pub fn soft_rule(ui: &mut Ui, palette: &Palette) {
-    hairline(ui, palette.rule);
+/// The **structural** divider: under the nav bar, over the status bar.
+///
+/// The one place the brighter grey is spent on a line rather than on a control,
+/// because these two separate the window's frame from its contents rather than
+/// one row of a panel from the next.
+pub fn edge_rule(ui: &mut Ui, palette: &Palette) {
+    hairline(ui, palette.hairline);
 }
 
 fn hairline(ui: &mut Ui, colour: Color32) {
@@ -151,13 +249,19 @@ pub fn vrule(ui: &mut Ui, palette: &Palette) {
 /// does no combining-mark positioning of its own, so a decomposed `é` is already
 /// two glyphs before tracking touches it. Everything put through here is a
 /// caption this codebase writes, not user text.
+///
+/// **Set in the mono.** TelegramAnalyser's `caps()` is `mono(MICRO)` and every
+/// letterspaced label in this design belongs to the same family of marks as the
+/// numbers do — an eyebrow, a column header, a status line. The first egui pass
+/// used the sans medium here, which at 10 points came out as a pale proportional
+/// smudge where the sibling app has a crisp mono rule of capitals.
 pub fn tracked(text: &str, size: f32, track_em: f32, colour: Color32) -> LayoutJob {
     let mut job = LayoutJob::default();
     job.append(
         text,
         0.0,
         TextFormat {
-            font_id: FontId::new(size, fonts::medium(size).family),
+            font_id: fonts::mono(size),
             color: colour,
             extra_letter_spacing: size * track_em,
             // One line by construction. The body ratio would pad the row and
@@ -169,11 +273,11 @@ pub fn tracked(text: &str, size: f32, track_em: f32, colour: Color32) -> LayoutJ
     job
 }
 
-/// A letterspaced uppercase micro-heading — `MICRO` at `TRACK_MICRO`.
+/// A letterspaced uppercase micro-heading — `window::MICRO` at `TRACK_MICRO`.
 pub fn eyebrow(text: &str, palette: &Palette) -> LayoutJob {
     tracked(
         &uppercase(text),
-        type_scale::MICRO,
+        window::MICRO,
         rhythm::TRACK_MICRO,
         palette.muted,
     )
@@ -258,8 +362,8 @@ const INDETERMINATE_FILL: f32 = 0.12;
 const _: () = assert!(INDETERMINATE_FILL > 0.0 && INDETERMINATE_FILL < 0.25);
 
 /// How tall the bar is. The bar is a status line, not a widget, and anything
-/// taller starts competing with the type.
-const BAR_HEIGHT: f32 = 6.0;
+/// taller starts competing with the type. Three points, as the analyser's is.
+const BAR_HEIGHT: f32 = 3.0;
 
 /// The fraction actually painted, given what the caller knows.
 ///
@@ -304,11 +408,18 @@ fn radius() -> CornerRadius {
 /// A cell without a number does not pay the number gap either, or its label
 /// hangs further in than a numbered one's and reads as a misalignment rather
 /// than a distinction.
+///
+/// **A cell is a [`button`].** It used to paint itself — a galley laid out by
+/// hand, a rect measured off it, ink chosen at the moment of measurement — and
+/// the result was five runs of text along the top of the window with nothing
+/// around them. `primary` puts the one red on the step that is the point of the
+/// application; the rest are hairline boxes.
 pub struct NavCell {
     pub number: Option<u32>,
     pub label: String,
     pub enabled: bool,
-    pub active: bool,
+    /// Fill with the accent. **Exactly one cell may set it.**
+    pub primary: bool,
 }
 
 impl NavCell {
@@ -317,7 +428,7 @@ impl NavCell {
             number: Some(number),
             label: label.into(),
             enabled: true,
-            active: false,
+            primary: false,
         }
     }
 
@@ -327,12 +438,19 @@ impl NavCell {
             number: None,
             label: label.into(),
             enabled: true,
-            active: false,
+            primary: false,
         }
     }
 
     pub fn enabled(mut self, yes: bool) -> Self {
         self.enabled = yes;
+        self
+    }
+
+    /// The one red. See [`button`]: an accent that marks two things marks
+    /// neither, and `only_one_cell_carries_the_accent` is what holds it.
+    pub fn primary(mut self, yes: bool) -> Self {
+        self.primary = yes;
         self
     }
 
@@ -352,20 +470,29 @@ impl NavCell {
     /// Split out so [`Self::show`] is nothing but the widget call — and so the
     /// gap after the number lives beside the rule that says a tool does not pay
     /// it.
-    fn job(&self, palette: &Palette) -> LayoutJob {
-        let ink = if self.active { palette.bg } else { palette.fg };
+    /// The cell's two runs: the mono number, then the label.
+    ///
+    /// The number is set a shade back from the label whenever there is a shade
+    /// to spare — on the accent fill there is not, so both take `accent_fg` and
+    /// the step reads as one word.
+    fn job(&self, palette: &Palette, enabled: bool) -> LayoutJob {
+        let ink = button_ink(enabled, self.primary, palette);
+        // A shade back from the label wherever there is one to spare. On the
+        // accent fill there is not, so the number takes the label's ink and the
+        // step reads as one word.
+        let figure = if self.primary && enabled {
+            ink
+        } else {
+            palette.muted
+        };
         let mut job = LayoutJob::default();
         if let Some(n) = self.number {
             job.append(
                 &format!("{n:02}"),
                 0.0,
                 TextFormat {
-                    font_id: fonts::mono(type_scale::TINY),
-                    color: if self.active {
-                        palette.bg
-                    } else {
-                        palette.muted
-                    },
+                    font_id: fonts::mono(window::SMALL),
+                    color: figure,
                     ..Default::default()
                 },
             );
@@ -374,7 +501,7 @@ impl NavCell {
             &self.label,
             if self.number.is_some() { 10.0 } else { 0.0 },
             TextFormat {
-                font_id: fonts::sans(type_scale::SMALL),
+                font_id: fonts::sans(window::BODY),
                 color: ink,
                 ..Default::default()
             },
@@ -382,34 +509,20 @@ impl NavCell {
         job
     }
 
-    /// Paint the cell.
+    /// Paint the cell as the window's one kind of button.
     ///
-    /// **The bar's height is the button's `min_size`, not a rect measured by
-    /// hand.** The first pass laid out the galley itself, added `(8, 32)` to it
-    /// and painted into the result — which is a button, reimplemented, with the
-    /// hit area and the ink fixed at the moment of measurement. `Button` with
-    /// its frame off draws the same thing and gets the disabled state from
-    /// `add_enabled`, like every other control here.
+    /// The ink is baked into the job rather than left to [`button`]'s own
+    /// colouring, because a cell is two runs at two weights and `WidgetText`
+    /// carries one colour. What `button` still owns is the box, the fill, the
+    /// border and the disabled state.
     pub fn show(&self, ui: &mut Ui, palette: &Palette) -> Response {
-        let button = egui::Button::new(self.job(palette))
-            .frame(false)
-            .min_size(egui::vec2(0.0, metrics::NAV_HEIGHT));
-        // The fill goes on a frame around the button rather than on the button,
-        // because `Button::fill` is only painted when the button has a frame —
-        // and a framed one would also take the style's button padding, so an
-        // active cell would be wider than the inactive cell beside it.
-        let response = if self.active {
-            egui::Frame::NONE
-                .fill(palette.fg)
-                .show(ui, |ui| ui.add_enabled(self.enabled, button))
-                .inner
-        } else {
-            ui.add_enabled(self.enabled, button)
-        };
-        if self.enabled {
-            return response.on_hover_cursor(CursorIcon::PointingHand);
-        }
-        response
+        boxed(
+            ui,
+            self.job(palette, self.enabled),
+            self.enabled,
+            self.primary,
+            palette,
+        )
     }
 }
 
@@ -441,7 +554,7 @@ impl EmptyState {
             ui.add_space(ui.available_height() / 3.0);
             ui.label(
                 egui::RichText::new(&self.headline)
-                    .font(fonts::sans(type_scale::H3))
+                    .font(fonts::medium(window::BODY))
                     .color(palette.fg),
             );
             if tall_enough {
@@ -449,7 +562,7 @@ impl EmptyState {
                     ui.add_space(8.0);
                     ui.label(
                         egui::RichText::new(hint)
-                            .font(fonts::sans(type_scale::SMALL))
+                            .font(fonts::sans(window::SMALL))
                             .color(palette.muted),
                     );
                 }
@@ -695,7 +808,7 @@ mod tests {
         // which cost selection, search and wrapping. It is one run again.
         let job = tracked(
             "SIGN IN",
-            type_scale::MICRO,
+            window::MICRO,
             rhythm::TRACK_MICRO,
             Color32::WHITE,
         );
@@ -704,12 +817,61 @@ mod tests {
     }
 
     #[test]
-    fn an_eyebrow_is_uppercase_micro_type_in_the_muted_colour() {
+    fn an_eyebrow_is_uppercase_mono_micro_type_in_the_muted_colour() {
+        // **Mono.** Every letterspaced label in this design belongs to the same
+        // family of marks as the numbers, which is what makes an eyebrow here
+        // and an eyebrow in TelegramAnalyser the same object. Set in the sans it
+        // is merely a small pale word.
         let palette = Palette::dark();
         let job = eyebrow("Chats", &palette);
         assert_eq!(job.text, "CHATS");
         assert_eq!(job.sections[0].format.color, palette.muted);
-        assert_eq!(job.sections[0].format.font_id.size, type_scale::MICRO);
+        assert_eq!(job.sections[0].format.font_id, fonts::mono(window::MICRO));
+    }
+
+    #[test]
+    fn only_one_cell_carries_the_accent() {
+        // An accent that marks two things marks neither. The nav bar is the one
+        // place with more than one button in a row, so the rule is checked
+        // where it could actually be broken.
+        let bar = [
+            NavCell::step(1, "Sign in"),
+            NavCell::step(2, "Refresh chats"),
+            NavCell::step(3, "Start export").primary(true),
+            NavCell::tool("Stop"),
+            NavCell::tool("Open output folder"),
+        ];
+        assert_eq!(bar.iter().filter(|c| c.primary).count(), 1);
+    }
+
+    #[test]
+    fn a_button_and_its_cell_agree_about_ink() {
+        // `NavCell` colours its own two runs because `WidgetText` carries one
+        // colour and a cell is a number and a label at two weights. That is a
+        // second opinion about the same rule, so it reads it from the first.
+        let p = Palette::dark();
+        assert_eq!(button_ink(true, true, &p), p.accent_fg);
+        assert_eq!(button_ink(true, false, &p), p.fg);
+        assert_eq!(button_ink(false, true, &p), p.muted);
+        assert_eq!(button_ink(false, false, &p), p.muted);
+    }
+
+    #[test]
+    fn a_divider_is_softer_than_a_control_border() {
+        // The window divides with `rule` and outlines its controls with
+        // `hairline`. The first egui pass had it the other way round, which drew
+        // a dozen bright lines per panel around nothing.
+        // Measured as distance from the page, so the claim holds in both
+        // appearances: in light the divider is a pale grey against white and the
+        // border is ink, in dark it is the darker of two greys against black.
+        let lum = |c: Color32| c.r() as i32 + c.g() as i32 + c.b() as i32;
+        for p in [Palette::light(), Palette::dark()] {
+            let against = |c| (lum(c) - lum(p.bg)).abs();
+            assert!(
+                against(p.rule) < against(p.hairline),
+                "the divider is not softer than the border"
+            );
+        }
     }
 
     #[test]

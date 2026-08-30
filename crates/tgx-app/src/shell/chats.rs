@@ -11,10 +11,10 @@ use crate::list::SortMode;
 use chrono::{DateTime, Local};
 use eframe::egui::{Align, Layout, Sense, Ui};
 use tgx_ui::components::{
-    action, caps, count_text, eyebrow, forum_dot, row, rule, selection_label, soft_rule, tick_box,
-    GUTTER,
+    action, button, caps, count_text, eyebrow, field, forum_dot, row, rule, selection_label,
+    tick_box, GUTTER,
 };
-use tgx_ui::tokens::type_scale;
+use tgx_ui::tokens::window;
 
 /// Every row is this tall, heading and chat alike.
 ///
@@ -41,12 +41,11 @@ impl Shell {
             .frame(bare)
             .show_separator_line(false)
             .show_inside(ui, |ui| {
-                ui.add_space(12.0);
+                ui.add_space(18.0);
                 row(ui, |ui| ui.label(eyebrow("Chats", &p)));
-                ui.add_space(12.0);
+                ui.add_space(14.0);
                 rule(ui, &p);
                 self.search_row(ui);
-                soft_rule(ui, &p);
                 self.sort_row(ui);
                 rule(ui, &p);
             });
@@ -62,11 +61,11 @@ impl Shell {
                 row(ui, |ui| {
                     ui.label(caps(
                         &selection_label(self.selected.len(), total, any_uncounted),
-                        type_scale::MICRO,
+                        window::MICRO,
                         p.muted,
                     ))
                 });
-                ui.add_space(8.0);
+                ui.add_space(14.0);
             });
 
         egui::CentralPanel::default()
@@ -75,14 +74,15 @@ impl Shell {
     }
 
     fn search_row(&mut self, ui: &mut Ui) {
-        ui.add_space(10.0);
+        let p = self.palette;
+        ui.add_space(14.0);
         row(ui, |ui| {
             let before = self.search.clone();
             // `desired_width` alone, with no `add_sized`: inside the gutter the
             // available width already is the width this field should take, so
             // there is nothing left to subtract by hand.
             ui.add(
-                egui::TextEdit::singleline(&mut self.search)
+                field(&mut self.search, &p)
                     .hint_text("Filter chats…")
                     .desired_width(ui.available_width()),
             );
@@ -94,7 +94,7 @@ impl Shell {
                 self.set_filter(text);
             }
         });
-        ui.add_space(10.0);
+        ui.add_space(14.0);
     }
 
     /// SORT and GROUP BY TYPE.
@@ -115,13 +115,12 @@ impl Shell {
         let before = self.view.sort;
         let mut chosen = before;
 
-        ui.add_space(8.0);
         row(ui, |ui| {
-            ui.label(caps("Sort", type_scale::MICRO, p.muted));
+            ui.label(caps("Sort", window::MICRO, p.muted));
             egui::ComboBox::from_id_salt("sort")
                 .selected_text(
                     egui::RichText::new(before.label())
-                        .font(tgx_ui::fonts::sans(type_scale::TINY))
+                        .font(tgx_ui::fonts::sans(window::SMALL))
                         .color(p.fg),
                 )
                 .width(180.0)
@@ -131,14 +130,14 @@ impl Shell {
                             &mut chosen,
                             mode,
                             egui::RichText::new(mode.label())
-                                .font(tgx_ui::fonts::sans(type_scale::TINY))
+                                .font(tgx_ui::fonts::sans(window::SMALL))
                                 .color(if mode == before { p.accent } else { p.fg }),
                         );
                     }
                 });
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(caps("Group by type", type_scale::MICRO, p.muted));
+                ui.label(caps("Group by type", window::MICRO, p.muted));
                 if tick_box(ui, self.view.grouped, true, &p).clicked() {
                     self.view.grouped = !self.view.grouped;
                     self.rebuild_rows();
@@ -146,7 +145,7 @@ impl Shell {
                 }
             });
         });
-        ui.add_space(8.0);
+        ui.add_space(14.0);
 
         if chosen != before {
             self.view.sort = chosen;
@@ -219,14 +218,14 @@ impl Shell {
             // assumed to exist as a glyph in some system font.
             ui.label(
                 egui::RichText::new(if folded { "\u{25b8}" } else { "\u{25be}" })
-                    .font(tgx_ui::fonts::sans(type_scale::TINY))
+                    .font(tgx_ui::fonts::sans(window::SMALL))
                     .color(p.muted),
             );
-            ui.label(caps(category.label(), type_scale::MICRO, p.fg));
+            ui.label(caps(category.label(), window::MICRO, p.fg));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(
                     egui::RichText::new(total.to_string())
-                        .font(tgx_ui::fonts::mono(type_scale::TINY))
+                        .font(tgx_ui::fonts::mono(window::SMALL))
                         .color(p.muted),
                 );
             });
@@ -282,7 +281,7 @@ impl Shell {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(
                     egui::RichText::new(count_text(chat.message_count))
-                        .font(tgx_ui::fonts::mono(type_scale::TINY))
+                        .font(tgx_ui::fonts::mono(window::SMALL))
                         .color(p.muted),
                 );
                 ui.add_space(12.0);
@@ -291,7 +290,7 @@ impl Shell {
                     ui.add(
                         egui::Label::new(
                             egui::RichText::new(&chat.title)
-                                .font(tgx_ui::fonts::sans(type_scale::SMALL))
+                                .font(tgx_ui::fonts::sans(window::BODY))
                                 .color(p.fg),
                         )
                         .truncate(),
@@ -302,12 +301,8 @@ impl Shell {
                     // it the list is ordered on a unix second that appears
                     // nowhere on screen.
                     ui.add(
-                        egui::Label::new(caps(
-                            &list::caption(chat, now),
-                            type_scale::MICRO,
-                            p.muted,
-                        ))
-                        .truncate(),
+                        egui::Label::new(caps(&list::caption(chat, now), window::MICRO, p.muted))
+                            .truncate(),
                     );
                 });
             });
@@ -327,15 +322,19 @@ impl Shell {
     /// does nothing teaches that the interface is unreliable.
     fn selection_row(&mut self, ui: &mut Ui, live: bool) {
         let p = self.palette;
-        ui.add_space(8.0);
+        ui.add_space(10.0);
         row(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 14.0;
+            ui.spacing_mut().item_spacing.x = 16.0;
             for (i, label) in ["All", "None", "Invert", "Only forums"].iter().enumerate() {
-                // The ink is unconditional. `action` hands the disabled state to
-                // `add_enabled`, which greys the label and refuses the click in
-                // the same call — the first pass chose a colour here and a
-                // `Sense` beside it, and the two could disagree.
-                let text = caps(label, type_scale::MICRO, p.fg);
+                // **Flat, unlike the nav bar's.** Four boxes here would put more
+                // border under the list than there is around the buttons that
+                // matter, and these four only refine a selection the row above
+                // already shows. The ink is unconditional: `action` hands the
+                // disabled state to `add_enabled`, which greys the label and
+                // refuses the click in the same call — the first pass chose a
+                // colour here and a `Sense` beside it, and the two could
+                // disagree.
+                let text = caps(label, window::MICRO, p.fg);
                 if action(ui, text, live).clicked() {
                     // Asked once: `visible()` sorts the whole account, and
                     // every one of these four needs the same answer.
@@ -388,14 +387,16 @@ impl Shell {
             } else {
                 "Count messages"
             };
+            // A button, not small print: it costs a request per chat and can
+            // take minutes, so it is a decision rather than a refinement.
+            // Secondary, because the one red belongs to Start export.
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let text = caps(label, type_scale::MICRO, p.accent);
-                if action(ui, text, countable).clicked() {
+                if button(ui, label, countable, false, &p).clicked() {
                     self.start_count();
                 }
             });
         });
-        ui.add_space(8.0);
+        ui.add_space(10.0);
     }
 }
 
