@@ -12,26 +12,32 @@ use tgx_ui::tokens::{space, window};
 /// Widths for the queue's count columns.
 ///
 /// **The Chat column is the stretch section and the only one that says which row
-/// is which**, so it must not be the first thing a narrow panel throws away. The
-/// counts are fixed and Chat takes the rest, with a floor under it — a **72px
-/// minimum**. Without one it squeezes to 11px while Messages and Topics keep
-/// their full width throughout, which was measured rather than guessed at.
+/// is which**, so it must not be the first thing a narrow window throws away.
+/// The counts are fixed and Chat takes the rest, with a floor under it.
 ///
-/// **The floor is now enforced rather than described.** The first pass computed
-/// the Chat width itself, as `available - 68 - 58 - 38 - 62 - 16 - 4*8`, written
-/// out twice — once for the header and once per row — under a comment asking the
-/// next reader to re-check the sum by hand after any edit. `Column::remainder()`
-/// with an `at_least` is the same statement made to the layout instead of to the
-/// reader, and it cannot fall out of step with the header above it.
-const STATUS_W: f32 = 68.0;
-const COUNT_W: f32 = 58.0;
-const TOPICS_W: f32 = 38.0;
-const MEDIA_W: f32 = 62.0;
-/// The floor under the Chat column. Below every natural width at the default
-/// geometry, so it costs nothing until the panel is genuinely too narrow — at
-/// which point the table scrolls sideways rather than losing the only cell that
-/// names the chat.
-const CHAT_MIN_W: f32 = 72.0;
+/// **The floor is enforced rather than described.** An earlier pass computed the
+/// Chat width itself, as `available - 68 - 58 - 38 - 62 - 16 - 4*8`, written out
+/// twice — once for the header and once per row — under a comment asking the
+/// next reader to re-check the sum by hand after any edit.
+/// `Column::remainder().at_least(..)` is the same statement made to the layout
+/// instead of to the reader, and it cannot fall out of step with the header
+/// above it.
+///
+/// The counts are wider than they were, because there is now room: this table
+/// had a whole window's width taken off it by a side panel, and `MESSAGES` at 58
+/// points cannot hold `6,643` under its own header.
+const STATUS_W: f32 = 96.0;
+const COUNT_W: f32 = 88.0;
+const TOPICS_W: f32 = 64.0;
+const MEDIA_W: f32 = 88.0;
+/// The floor under the Chat column.
+///
+/// **240, not 72.** Seventy-two was the width at which a name is still
+/// technically present in a 400pt side column; at a window's width the column is
+/// six hundred points and the floor only matters on a very narrow window, where
+/// what it should protect is a title long enough to recognise rather than the
+/// first two characters of one.
+const CHAT_MIN_W: f32 = 240.0;
 const COLUMN_GAP: f32 = space::TIGHT;
 
 /// One queue row, and the header above it.
@@ -58,10 +64,15 @@ impl Shell {
         let p = self.palette;
         let bare = egui::Frame::NONE.fill(p.bg);
 
+        // **The log gets a third of the window rather than 160 points.** It is
+        // the only account of what a run actually did — every rate-limit wait,
+        // every file that did not arrive, the read total against what Telegram
+        // promised — and in a side column it showed six lines of a two-thousand
+        // line ring.
         egui::TopBottomPanel::bottom("log")
             .frame(bare)
-            .default_height(160.0)
-            .height_range(80.0..=420.0)
+            .default_height(ui.available_height() * 0.38)
+            .height_range(120.0..=640.0)
             .resizable(true)
             .show_separator_line(false)
             .show_inside(ui, |ui| {

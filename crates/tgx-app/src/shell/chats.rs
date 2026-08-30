@@ -12,7 +12,7 @@ use chrono::{DateTime, Local};
 use eframe::egui::{Align, Layout, Sense, Ui};
 use tgx_ui::components::{
     action, button, caps, count_text, disclosure, eyebrow, field, figure, forum_dot, row, rule,
-    selection_label, text, tick_box, title, GUTTER,
+    selection_label, text, tick_box, GUTTER,
 };
 use tgx_ui::tokens::space;
 
@@ -23,6 +23,13 @@ use tgx_ui::tokens::space;
 /// cannot be shorter than a chat row; it is set in tracked micro-type instead,
 /// which distinguishes it by weight rather than by size.
 const ROW_HEIGHT: f32 = 46.0;
+
+/// How wide the filter box is.
+///
+/// **Fixed, not the panel's width.** Stretched across a window it advertises
+/// room for a sentence, and what goes in it is a word — the field was 1,170
+/// points long to hold `kolab`.
+const FILTER_W: f32 = 380.0;
 
 impl Shell {
     /// **Head, foot, then the list — as panels, not as measured heights.**
@@ -41,19 +48,14 @@ impl Shell {
             .frame(bare)
             .show_separator_line(false)
             .show_inside(ui, |ui| {
-                // **One rule, under the title.** The head used to carry three —
-                // after the eyebrow, between search and sort, and under sort —
-                // which is a line every twenty points down a panel that has one
-                // idea in it. The controls are grouped by `BREAK` instead.
+                // **No `CHATS` heading here.** The view bar above already says
+                // which of the three this is, and repeating it put the same word
+                // twice within fifty points, with a rule under each. A view does
+                // not need to introduce itself.
                 ui.add_space(space::STEP);
-                row(ui, |ui| ui.label(title("Chats", &p)));
-                ui.add_space(space::TIGHT);
+                self.filter_row(ui);
+                ui.add_space(space::STEP);
                 rule(ui, &p);
-                ui.add_space(space::STEP);
-                self.search_row(ui);
-                ui.add_space(space::STEP);
-                self.sort_row(ui);
-                ui.add_space(space::STEP);
             });
 
         egui::TopBottomPanel::bottom("chats-foot")
@@ -83,47 +85,46 @@ impl Shell {
             .show_inside(ui, |ui| self.list_body(ui));
     }
 
-    fn search_row(&mut self, ui: &mut Ui) {
-        let p = self.palette;
-        row(ui, |ui| {
-            let before = self.search.clone();
-            // `desired_width` alone, with no `add_sized`: inside the gutter the
-            // available width already is the width this field should take, so
-            // there is nothing left to subtract by hand.
-            ui.add(
-                field(&mut self.search, &p)
-                    .hint_text("Filter chats…")
-                    .desired_width(ui.available_width()),
-            );
-            // Read from the field, never typed into a mirror of it: a second
-            // copy of the same string is how the empty state ends up quoting
-            // something other than what is in the box.
-            if self.search != before {
-                let typed = self.search.clone();
-                self.set_filter(typed);
-            }
-        });
-    }
-
-    /// SORT and GROUP BY TYPE.
+    /// Filter, sort and grouping — **one row, gathered at the left**.
     ///
-    /// The sort is a menu rather than seven chips: seven labels do not fit
-    /// across a panel this width, and cycling through seven with one click means
-    /// six clicks to undo a mistake.
+    /// These were two rows, and the second pushed GROUP BY TYPE to the far edge
+    /// with `right_to_left`. That is the correct shape for a status bar, where
+    /// one end is fixed and the other gives; it is the wrong one for three
+    /// controls that belong together, and at a window's width it left them
+    /// nine hundred points apart with nothing in between.
     ///
+    /// The field takes a fixed width rather than the panel's: a filter box
+    /// stretched across a wide window advertises room for a sentence, and what
+    /// goes in it is a word.
+    ///
+    /// The sort is a menu rather than seven chips: seven labels do not fit, and
+    /// cycling through seven with one click means six clicks to undo a mistake.
     /// **It is a `ComboBox`, and that removed a field from the shell.** GPUI
     /// needed a whole catcher apparatus to dismiss a menu — an absolutely
     /// positioned 16000px hitbox with `occlude`, deferred below the menu — so
     /// the swap carried over a hand-driven `Popup` and a `sort_open: bool` to go
-    /// with it. Openness is the widget's business, not the window's: egui keeps
-    /// it against the widget's own id, and "is a menu open?" is no longer a
-    /// question this struct can answer wrongly.
-    fn sort_row(&mut self, ui: &mut Ui) {
+    /// with it. Openness is the widget's business, not the window's.
+    fn filter_row(&mut self, ui: &mut Ui) {
         let p = self.palette;
         let before = self.view.sort;
         let mut chosen = before;
 
         row(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = space::STEP;
+            let typed_before = self.search.clone();
+            ui.add(
+                field(&mut self.search, &p)
+                    .hint_text("Filter chats…")
+                    .desired_width(FILTER_W),
+            );
+            // Read from the field, never typed into a mirror of it: a second
+            // copy of the same string is how the empty state ends up quoting
+            // something other than what is in the box.
+            if self.search != typed_before {
+                let typed = self.search.clone();
+                self.set_filter(typed);
+            }
+
             ui.label(eyebrow("Sort", &p));
             egui::ComboBox::from_id_salt("sort")
                 .selected_text(text(before.label(), &p))
@@ -137,14 +138,12 @@ impl Shell {
                     }
                 });
 
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(eyebrow("Group by type", &p));
-                if tick_box(ui, self.view.grouped, true, &p).clicked() {
-                    self.view.grouped = !self.view.grouped;
-                    self.rebuild_rows();
-                    self.commit_settings();
-                }
-            });
+            if tick_box(ui, self.view.grouped, true, &p).clicked() {
+                self.view.grouped = !self.view.grouped;
+                self.rebuild_rows();
+                self.commit_settings();
+            }
+            ui.label(eyebrow("Group by type", &p));
         });
 
         if chosen != before {

@@ -14,9 +14,7 @@
 
 use super::Shell;
 use eframe::egui::{self, Align, Layout, Ui};
-use tgx_ui::components::{
-    action, block, button, eyebrow, field, meta, row, rule, text, tick_box, title,
-};
+use tgx_ui::components::{action, block, button, eyebrow, field, meta, row, text, tick_box};
 use tgx_ui::tokens::{space, Palette};
 
 /// The seven media categories Desktop offers, with the labels shown for each.
@@ -47,21 +45,34 @@ const EXTRAS: [(&str, &str); 6] = [
 
 impl Shell {
     pub(super) fn settings_panel(&mut self, ui: &mut Ui) {
-        let p = self.palette;
-        ui.add_space(space::STEP);
-        row(ui, |ui| ui.label(title("Settings", &p)));
-        ui.add_space(space::TIGHT);
-        rule(ui, &p);
-
+        // No `SETTINGS` heading: the view bar above already says so, and a view
+        // does not need to introduce itself.
+        //
+        // **Two columns, because there is a window's width to use.** These were
+        // one 400pt strip sharing a side panel with the queue and the log, so
+        // twenty-five controls became a scrolling tube that showed four of them
+        // and cut the fifth in half. Down two columns the whole of Format,
+        // Media, Beyond Desktop and Performance is on screen at once, which is
+        // what makes them reviewable rather than merely reachable.
+        //
+        // Left is what the export *is* — where it goes, what shape it takes,
+        // and what it asks Telegram for beyond what Desktop would. Right is the
+        // media, which is eleven controls on its own, plus the one performance
+        // dial. Balanced by height rather than by section count, because a
+        // column that runs off the bottom while the other stops halfway is the
+        // scrolling tube again in a wider frame.
         egui::ScrollArea::vertical()
             .id_salt("settings-body")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                self.destination_section(ui);
-                self.format_section(ui);
-                self.media_section(ui);
-                self.beyond_desktop_section(ui);
-                self.performance_section(ui);
+                ui.columns(2, |cols| {
+                    self.destination_section(&mut cols[0]);
+                    self.format_section(&mut cols[0]);
+                    self.beyond_desktop_section(&mut cols[0]);
+
+                    self.media_section(&mut cols[1]);
+                    self.performance_section(&mut cols[1]);
+                });
                 ui.add_space(space::BREAK);
             });
     }

@@ -6,7 +6,7 @@
 use super::*;
 use eframe::egui::{Layout, Ui};
 use tgx_ui::components::{action, caps, edge_rule, eyebrow, row, NavCell};
-use tgx_ui::tokens::{metrics, space, window};
+use tgx_ui::tokens::{space, window};
 
 impl Shell {
     pub(super) fn nav_bar(&mut self, ui: &mut Ui) {
@@ -34,14 +34,22 @@ impl Shell {
             NavCell::tool("Open output folder"),
         ];
 
-        ui.set_height(metrics::NAV_HEIGHT);
+        // **The row is given the bar's height, not `interact_size`'s.** The
+        // panel is `NAV_HEIGHT` tall, but `Ui::horizontal` allocates a strip one
+        // `interact_size.y` high and centres within *that* — so the buttons sat
+        // in the top 30 points with their edges against the window, the rule
+        // below them landed at 33, and the remaining 27 points of the bar were
+        // empty. Laying out inside a rect of the full height puts them in the
+        // middle of it and the rule at the bottom, where a rule under a bar goes.
+        //
         // **A row of buttons, not a strip of text with rules through it.** The
         // cells were flat labels separated by vertical hairlines — five runs of
         // type along the top of a bar whose whole message is *press these three,
         // in order*. They are boxes now, and the separators went with them: a
         // hairline between two hairline boxes is a third line saying nothing.
-        row(ui, |ui| {
-            ui.horizontal_centered(|ui| {
+        let body = egui::vec2(ui.available_width(), ui.available_height() - 1.0);
+        ui.allocate_ui_with_layout(body, Layout::left_to_right(egui::Align::Center), |ui| {
+            row(ui, |ui| {
                 for (i, cell) in steps.iter().enumerate() {
                     if cell.show(ui, &p).clicked() {
                         match i {
@@ -92,6 +100,57 @@ impl Shell {
             });
         });
         edge_rule(ui, &p);
+    }
+
+    /// Chats · Settings · Run, and which one the body is showing.
+    ///
+    /// **The selected one is ink over a hairline; the others are muted with
+    /// nothing under them.** No boxes, no pills, no filled tab: an underline is
+    /// the design's own primitive doing the one job a tab strip has. Each cell
+    /// carries its own count on the right — the number of chats, the number
+    /// queued — because the reason to look at a view you are not in is usually
+    /// to find out whether it has anything in it.
+    pub(super) fn view_bar(&mut self, ui: &mut Ui) {
+        let p = self.palette;
+        let current = self.body;
+        let mut chosen = None;
+
+        ui.add_space(space::TIGHT);
+        row(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = space::BREAK;
+            for view in View::ALL {
+                let selected = view == current;
+                let ink = if selected { p.fg } else { p.muted };
+                let count = match view {
+                    View::Chats if !self.chats.is_empty() => Some(self.chats.len()),
+                    View::Run if !self.queue.is_empty() => Some(self.queue.len()),
+                    _ => None,
+                };
+                let mut label = view.label().to_string();
+                if let Some(n) = count {
+                    label.push_str(&format!("  {n}"));
+                }
+                let hit = action(ui, caps(&label, ink), true);
+                if selected {
+                    // Two points below the text, so the rule sits under the
+                    // word rather than against its descenders.
+                    ui.painter().hline(
+                        hit.rect.x_range(),
+                        hit.rect.bottom() + 2.0,
+                        egui::Stroke::new(1.0_f32, p.fg),
+                    );
+                }
+                if hit.clicked() {
+                    chosen = Some(view);
+                }
+            }
+        });
+        ui.add_space(space::TIGHT);
+        edge_rule(ui, &p);
+
+        if let Some(view) = chosen {
+            self.show(view);
+        }
     }
 
     /// Swap the appearance.

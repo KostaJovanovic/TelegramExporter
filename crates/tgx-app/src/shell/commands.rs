@@ -157,6 +157,14 @@ impl Shell {
         // An export is the longer job and it claims the progress bar here.
         // While `exporting` is set, no other handler may write to it.
         self.begin_run();
+        // **And it claims the window.** Pressing Start used to leave the user on
+        // the chat list, where the only sign anything had happened was a
+        // sentence in the status bar; everything that actually reports the run
+        // was in a 400pt column on the right. A run that has just been asked for
+        // is what the window should be showing. `suggest`, not `show`, so
+        // looking at Settings mid-export is not undone on the next event.
+        self.body_pinned = false;
+        self.suggest(View::Run);
         self.queue
             .start(queue.iter().map(|c| (c.id, c.title.clone())));
         self.status = format!("Exporting {} chats…", queue.len());

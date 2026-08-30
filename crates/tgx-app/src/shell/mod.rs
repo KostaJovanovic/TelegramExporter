@@ -35,23 +35,44 @@ use tgx_tg::client::ChatInfo;
 use tgx_tg::config::Settings;
 use tgx_ui::tokens::Palette;
 
-/// The settings and queue column, as it opens.
+/// What the body of the window is showing.
 ///
-/// **Sized from the queue, not from the settings.** The queue is a five-column
-/// table and the settings are a stack of rows that will fit anything; get this
-/// wrong and it is the table that breaks by pushing the column that names the
-/// chat off the panel. 400px against the 900px minimum leaves the chat list 480,
-/// which is the proportion this figure is chosen to hold — and it is now a
-/// default rather than a fixed width, because the panel is draggable and the
-/// table defends its own columns.
-pub const RIGHT_COLUMN_W: f32 = 400.0;
+/// **The window has one job at a time, and this says which.**
+///
+/// Four regions used to be on screen permanently: the chat list, the settings,
+/// the queue and the log. That is two different tasks shown at once and both
+/// starved. Before a run the chat list *is* the work — six hundred rows, a
+/// filter, a sort, a selection worth several thousand messages. During one the
+/// queue and the log are the work and the list is irrelevant. Settings are
+/// consulted rarely and changed rarely, and they are twenty-five controls.
+///
+/// Sharing one 400pt column between the three left the queue's Chat column —
+/// the only cell that says which row is which — with about 110 points, the
+/// settings in a scrolling tube that showed four rows of twenty-five, and the
+/// log in 160. Every one of those is fixed by the same move: show one, full
+/// width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum View {
+    /// Pick what to export. The default, and where a session starts.
+    #[default]
+    Chats,
+    /// Where it goes and what it contains.
+    Settings,
+    /// What a run is doing: the queue, the bar and the log.
+    Run,
+}
 
-/// How much of that column the run panel takes, as it opens.
-///
-/// Queue, bar and log against five sections of settings. Also a default: the
-/// split is draggable, because which half matters depends on whether an export
-/// is running, and that changes several times in a session.
-const RUN_PANEL_H: f32 = 340.0;
+impl View {
+    pub const ALL: [View; 3] = [View::Chats, View::Settings, View::Run];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            View::Chats => "Chats",
+            View::Settings => "Settings",
+            View::Run => "Run",
+        }
+    }
+}
 
 /// One row as the list paints it.
 ///
@@ -118,6 +139,22 @@ pub struct Shell {
     /// a second filter.
     visible_count: usize,
 
+    /// Which of the three the body is showing. See [`View`].
+    ///
+    /// **Named `body` and not `view`**, because `view: list::View` beside it is
+    /// how the chat list is filtered and sorted, and two fields called `view`
+    /// meaning different things in one struct is a bug waiting for a hurried
+    /// afternoon.
+    body: View,
+    /// The user changed the view by hand, so a run must not change it back.
+    ///
+    /// Starting an export switches to Run once — that is where the answer to
+    /// "what is it doing?" now lives, and leaving someone on the chat list
+    /// watching nothing happen is the failure this avoids. But if they then go
+    /// and look at Settings mid-run, the next `Progress` event must not yank
+    /// them away again.
+    body_pinned: bool,
+
     status: String,
     /// Why the run could not proceed, if something said so.
     ///
@@ -152,6 +189,9 @@ pub struct Shell {
     /// that changes when someone clicks the chip. Starts `true` so the first
     /// frame installs it.
     theme_stale: bool,
+    /// Frames drawn. Only [`shot`] reads it, to know when the layout has
+    /// settled enough to be worth photographing.
+    frame_no: u32,
 }
 
 impl Shell {
@@ -225,6 +265,8 @@ impl Shell {
             rows: Vec::new(),
             rows_stale: false,
             visible_count: 0,
+            body: View::default(),
+            body_pinned: false,
             status: "Not signed in".into(),
             failure: None,
             journal: Journal::default(),
@@ -234,6 +276,7 @@ impl Shell {
             log_copied: false,
             started: false,
             theme_stale: true,
+            frame_no: 0,
         }
     }
 
@@ -368,6 +411,25 @@ impl Shell {
         list::visible(&self.chats, &self.view)
     }
 
+    /// Show a view because the user asked for it. **Pins it.**
+    pub(super) fn show(&mut self, body: View) {
+        self.body = body;
+        self.body_pinned = true;
+    }
+
+    /// Show a view because something happened. Yields to a hand-made choice.
+    ///
+    /// The one caller is the start of an export: that is the moment the answer
+    /// to "what is it doing?" moves to the Run view, and leaving someone on the
+    /// chat list watching nothing happen is the whole reason this exists. It
+    /// steps aside afterwards, so opening Settings mid-run is not undone by the
+    /// next progress event.
+    pub(super) fn suggest(&mut self, body: View) {
+        if !self.body_pinned {
+            self.body = body;
+        }
+    }
+
     fn list_state(&self) -> tgx_ui::components::ListState {
         tgx_ui::components::ListState::decide(
             self.signed_in,
@@ -398,6 +460,77 @@ impl Shell {
     }
 }
 
+/// Save a frame to disk and quit, for looking at the window without a person.
+///
+/// **Reading the screen from outside does not work on this window.** eframe
+/// draws with OpenGL, and an unoccluded GL surface goes to the display without
+/// passing through the desktop compositor — so `CopyFromScreen` returns black,
+/// `PrintWindow` returns white, and the one capture that ever succeeded did so
+/// because a browser happened to be sitting on top of it. Three passes over this
+/// design were made without anyone seeing it, and a glyph that rendered as `?`
+/// in every category heading survived all three.
+///
+/// `TGX_SHOT=<path>` asks egui for the frame it just drew and writes it there as
+/// raw RGBA, prefixed with `TGXS`, the width and the height as little-endian
+/// `u32`s. Raw because a PNG encoder is a dependency this app has no other use
+/// for; `tools/shot.ps1` turns it into an image.
+///
+/// `TGX_SHOT_VIEW=chats|settings|run` picks which view to draw first.
+///
+/// Nothing here runs unless the variable is set, and it is read once.
+mod shot {
+    use super::*;
+
+    /// Frames to let the layout settle before asking. The first frame installs
+    /// fonts and the style; asking on it captures the frame before the design.
+    const SETTLE: u32 = 3;
+
+    pub(super) fn path() -> Option<String> {
+        std::env::var("TGX_SHOT").ok().filter(|s| !s.is_empty())
+    }
+
+    pub(super) fn view() -> Option<View> {
+        match std::env::var("TGX_SHOT_VIEW").ok()?.as_str() {
+            "chats" => Some(View::Chats),
+            "settings" => Some(View::Settings),
+            "run" => Some(View::Run),
+            _ => None,
+        }
+    }
+
+    /// Ask on the settling frame, write on the frame the answer arrives.
+    pub(super) fn tick(ctx: &Context, frame_no: u32, to: &str) {
+        if frame_no == SETTLE {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+        }
+        let shot = ctx.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        });
+        let Some(image) = shot else {
+            // Keep frames coming: egui repaints on demand, and a window nobody
+            // is touching would otherwise sit still and never reach `SETTLE`.
+            ctx.request_repaint();
+            return;
+        };
+        let [w, h] = [image.width() as u32, image.height() as u32];
+        let mut out = Vec::with_capacity(16 + (w * h * 4) as usize);
+        out.extend_from_slice(b"TGXS");
+        out.extend_from_slice(&w.to_le_bytes());
+        out.extend_from_slice(&h.to_le_bytes());
+        for px in image.pixels.iter() {
+            out.extend_from_slice(&px.to_srgba_unmultiplied());
+        }
+        match std::fs::write(to, &out) {
+            Ok(()) => log::info!("wrote {w}x{h} frame to {to}"),
+            Err(e) => log::error!("could not write {to}: {e}"),
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+}
+
 impl eframe::App for Shell {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         // **Before anything is drained.** Senders handed out before this cannot
@@ -406,7 +539,11 @@ impl eframe::App for Shell {
         if !self.started {
             self.started = true;
             self.start_up();
+            if let Some(view) = shot::view() {
+                self.show(view);
+            }
         }
+        self.frame_no = self.frame_no.saturating_add(1);
         if self.theme_stale {
             self.theme_stale = false;
             tgx_ui::theme::install(ctx, &self.palette);
@@ -430,51 +567,44 @@ impl eframe::App for Shell {
         // than behind it. Do not add it back without solving both.
         let bare = egui::Frame::NONE.fill(p.bg);
 
+        // **An exact height, because `Ui::set_height` does not give one.** The
+        // bar asked for `NAV_HEIGHT` from the inside and the panel still sized
+        // itself to its contents, so five 30pt buttons sat in a 34pt strip with
+        // their tops against the edge of the window.
         egui::TopBottomPanel::top("nav")
             .frame(bare)
+            .exact_height(tgx_ui::tokens::metrics::NAV_HEIGHT)
             .show_separator_line(false)
             .show(ctx, |ui| self.nav_bar(ui));
+
+        egui::TopBottomPanel::top("views")
+            .frame(bare)
+            .show_separator_line(false)
+            .show(ctx, |ui| self.view_bar(ui));
 
         egui::TopBottomPanel::bottom("status")
             .frame(bare)
             .show_separator_line(false)
             .show(ctx, |ui| self.status_bar(ui));
 
-        egui::SidePanel::right("right")
-            .frame(bare)
-            .default_width(RIGHT_COLUMN_W)
-            // **Draggable, within a range the queue table can survive.** It was
-            // pinned to exactly 400 because the GPUI column was, and 400 is a
-            // reasonable default rather than the only width that works: the
-            // table's own floor is what decides that, and `egui_extras` enforces
-            // it per column now instead of a comment asking the next reader to
-            // re-check a sum. The floor here is the width below which the Chat
-            // column is all that is left of the table.
-            .width_range(340.0..=560.0)
-            .resizable(true)
-            .show_separator_line(false)
-            .show(ctx, |ui| {
-                // Settings takes the slack and scrolls; the run panel is
-                // measured off the bottom and draggable. The GPUI version
-                // declared 100% height plus 181px of children, so flex squeezed
-                // both panels and the last settings row was the first thing cut
-                // on a short window.
-                egui::TopBottomPanel::bottom("run")
-                    .frame(bare)
-                    .default_height(RUN_PANEL_H)
-                    .height_range(200.0..=560.0)
-                    .resizable(true)
-                    .show_separator_line(false)
-                    .show_inside(ui, |ui| self.run_panel(ui));
-                self.settings_panel(ui);
-            });
-
+        // **One body, full width.** There is no side column any more; see
+        // [`View`] for what four permanent panels cost.
         egui::CentralPanel::default()
             .frame(bare)
-            .show(ctx, |ui| self.chat_panel(ui));
+            .show(ctx, |ui| match self.body {
+                View::Chats => self.chat_panel(ui),
+                View::Settings => self.settings_panel(ui),
+                View::Run => self.run_panel(ui),
+            });
 
         // Last, so it takes its clicks before anything under it does.
         self.login_panel(ctx);
+
+        // After everything has been drawn, so the frame egui hands back is the
+        // finished one. Does nothing at all unless `TGX_SHOT` is set.
+        if let Some(to) = shot::path() {
+            shot::tick(ctx, self.frame_no, &to);
+        }
     }
 
     /// **Quitting mid-export cancels, and then waits.** See the `Drop` impl,
