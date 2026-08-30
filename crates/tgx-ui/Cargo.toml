@@ -4,7 +4,20 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "The Swiss/International design system, in GPUI."
+description = "The Swiss/International design system, in egui."
 
 [dependencies]
-gpui = "=0.2.2"
+# **`glow`, not `wgpu`, and `default-features = false` to get it.** This window
+# is a table, a transcript and a row of buttons; it does not need a modern
+# graphics API, and wgpu drags in a shader compiler for one. glow is OpenGL,
+# which every machine that can run Explorer already has. The same choice
+# TelegramAnalyser made, for the same reason.
+#
+# `default_fonts` is off because the window ships Geist and nothing else — the
+# HTML export is set in it, and a window in a different typeface from the files
+# it writes is two products.
+#
+# Not pinned exactly, unlike the `gpui` it replaces: eframe is past 0.1, ships
+# a changelog and moves on a schedule, so a caret here is an ordinary
+# dependency rather than the standing hazard those pins existed to contain.
+eframe = { version = "0.33", default-features = false, features = ["glow"] }

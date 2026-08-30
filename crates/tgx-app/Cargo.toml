@@ -14,27 +14,32 @@ path = "src/main.rs"
 tgx-ui = { path = "../tgx-ui" }
 tgx-tg = { path = "../tgx-tg" }
 
-gpui = "=0.2.2"
+# The window toolkit. See `tgx-ui/Cargo.toml` for why glow and why no default
+# fonts; the two must agree, because this crate hands `tgx-ui` the context it
+# installs the design into.
+eframe = { version = "0.33", default-features = false, features = ["glow"] }
+
+# The native folder picker, for "Open output folder" and for choosing where an
+# export goes. Hand-rolling one means reimplementing the sidebar, the recent
+# list and the path box, and getting a worse version of a dialog people already
+# know.
+rfd = "0.16"
+
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 log = { workspace = true }
-# Pinned exactly, like `gpui` above and for the same reason: it is pre-1.0, its
-# README suggests `version = "*"`, and a caret let a routine `cargo update` move
-# it with no code change of ours. `theme.rs` reaches into forty of its
-# `ThemeColor` fields by name, so a bump is a deliberate commit with the parity
-# legs green either side of it — not something to discover from a build.
-gpui-component = "=0.5.1"
 
 # Gated on the *host*, not the target: cargo resolves `build-dependencies` under
 # a `cfg` section against the machine running the build script, which is the
 # machine that would have to have a resource compiler. A `cargo check` on Linux
 # therefore never sees this crate at all, and `build.rs` guards the same way.
 #
-# Pinned exactly, like `gpui` and `gpui-component` above and for the same
-# reason: it is pre-1.0, so a routine `cargo update` can change its interface
-# with no code change of ours. This one is worse than most to debug, because
-# what it breaks is a build script — the failure surfaces as a build error in a
-# crate whose source did not change.
+# Pinned exactly because it is pre-1.0, so a routine `cargo update` can change
+# its interface with no code change of ours. This one is worse than most to
+# debug, because what it breaks is a build script — the failure surfaces as a
+# build error in a crate whose source did not change. It is now the only
+# exact pin left here; `gpui` and `gpui-component` carried the same warning
+# and went with the UI swap.
 [target.'cfg(windows)'.build-dependencies]
 winresource = "=0.1.31"
