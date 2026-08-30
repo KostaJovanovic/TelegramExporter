@@ -22,7 +22,7 @@
 //! flips appearance by rebuilding the palette and calling this again.
 
 use crate::fonts;
-use crate::tokens::{metrics, type_scale, Palette};
+use crate::tokens::{metrics, window, Palette};
 use eframe::egui::{self, Context, CornerRadius, Stroke, TextStyle};
 
 /// Everything about the window that is a decision rather than a default.
@@ -36,12 +36,17 @@ pub fn install(ctx: &Context, palette: &Palette) {
     // The design's scale, mapped onto the five roles egui lays text out with.
     // `Heading` is the medium weight rather than a larger size: this design
     // separates headings by face and tracking, not by scale.
+    //
+    // **`tokens::window`, not `tokens::type_scale`.** The second is the
+    // stylesheet's, which describes a web page; these five roles are what a
+    // widget falls back to when a call site does not name a font, and they have
+    // to be the same three sizes the call sites use.
     style.text_styles = [
-        (TextStyle::Body, fonts::sans(type_scale::BODY)),
-        (TextStyle::Button, fonts::sans(type_scale::BODY)),
-        (TextStyle::Small, fonts::sans(type_scale::TINY)),
-        (TextStyle::Monospace, fonts::mono(type_scale::SMALL)),
-        (TextStyle::Heading, fonts::medium(type_scale::H3)),
+        (TextStyle::Body, fonts::sans(window::BODY)),
+        (TextStyle::Button, fonts::sans(window::BODY)),
+        (TextStyle::Small, fonts::sans(window::MICRO)),
+        (TextStyle::Monospace, fonts::mono(window::SMALL)),
+        (TextStyle::Heading, fonts::medium(window::BODY)),
     ]
     .into();
 

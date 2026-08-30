@@ -14,8 +14,8 @@
 
 use super::Shell;
 use eframe::egui::{self, Align, Layout, Ui};
-use tgx_ui::components::{action, block, caps, eyebrow, row, rule, soft_rule, tick_box};
-use tgx_ui::tokens::{type_scale, Palette};
+use tgx_ui::components::{action, block, button, eyebrow, field, row, rule, tick_box};
+use tgx_ui::tokens::{window, Palette};
 
 /// The seven media categories Desktop offers, with the labels shown for each.
 /// Keyed on `tgx_tg::config::MEDIA_KINDS`, which is what `plan.rs`
@@ -76,22 +76,24 @@ impl Shell {
         row(ui, |ui| {
             ui.label(
                 egui::RichText::new("Folder")
-                    .font(tgx_ui::fonts::sans(type_scale::TINY))
+                    .font(tgx_ui::fonts::sans(window::SMALL))
                     .color(p.muted),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if action(ui, caps("Browse", type_scale::MICRO, p.accent), true).clicked() {
+                // A button, like the analyser's "Choose": the one way to get a
+                // path that certainly exists should not be small print.
+                if button(ui, "Browse", true, false, &p).clicked() {
                     self.browse_for_output_dir();
                 }
-                let field = ui.add(
-                    egui::TextEdit::singleline(&mut self.form.output_dir)
+                let entry = ui.add(
+                    field(&mut self.form.output_dir, &p)
                         .hint_text("Where exports go")
                         .desired_width(ui.available_width()),
                 );
                 // Committing on losing focus rather than on every keystroke: a
                 // half-typed path is not a decision, and writing settings.json
                 // per character would save every prefix on the way.
-                if field.lost_focus() {
+                if entry.lost_focus() {
                     self.commit_settings();
                 }
             });
@@ -104,7 +106,7 @@ impl Shell {
                     "Writing to {}",
                     crate::settings_form::elided_start(&full, 44)
                 ))
-                .font(tgx_ui::fonts::sans(type_scale::MICRO))
+                .font(tgx_ui::fonts::sans(window::MICRO))
                 .color(p.muted),
             )
             .on_hover_text(full);
@@ -256,8 +258,12 @@ impl Shell {
         row(ui, |ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
             let box_hit = tick_box(ui, on, enabled, &p);
+            // `BODY`, which is what TelegramAnalyser sets its checkbox labels
+            // in. These are the sentences the settings panel is made of, and
+            // twenty of them at the page's fine-print size is what made this
+            // column read as a legal notice.
             let text = egui::RichText::new(label)
-                .font(tgx_ui::fonts::sans(type_scale::TINY))
+                .font(tgx_ui::fonts::sans(window::BODY))
                 .color(p.fg);
             clicked = box_hit.union(action(ui, text, enabled)).clicked();
         });
@@ -280,15 +286,15 @@ impl Shell {
         row(ui, |ui| {
             ui.label(
                 egui::RichText::new(label)
-                    .font(tgx_ui::fonts::sans(type_scale::TINY))
+                    .font(tgx_ui::fonts::sans(window::BODY))
                     .color(p.muted),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let field = ui.add_enabled(
+                let entry = ui.add_enabled(
                     enabled,
-                    egui::TextEdit::singleline(which(&mut self.form)).desired_width(96.0),
+                    field(which(&mut self.form), &p).desired_width(80.0),
                 );
-                committed = field.lost_focus();
+                committed = entry.lost_focus();
             });
         });
         ui.add_space(8.0);
@@ -328,10 +334,10 @@ impl Shell {
 /// A section heading over a hairline. No group boxes: the design has no such
 /// thing.
 fn section(ui: &mut Ui, title: &str, p: &Palette) {
-    ui.add_space(18.0);
+    ui.add_space(22.0);
     row(ui, |ui| ui.label(eyebrow(title, p)));
     ui.add_space(8.0);
-    soft_rule(ui, p);
+    rule(ui, p);
 }
 
 /// The sentence under a control that explains what it costs.
@@ -344,7 +350,7 @@ fn hint(ui: &mut Ui, text: &str, p: &Palette) {
     block(ui, |ui| {
         ui.label(
             egui::RichText::new(text)
-                .font(tgx_ui::fonts::sans(type_scale::MICRO))
+                .font(tgx_ui::fonts::sans(window::MICRO))
                 .color(p.muted),
         );
     });

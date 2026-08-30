@@ -125,6 +125,29 @@ pub mod type_scale {
     pub const MICRO: f32 = 10.0;
 }
 
+/// The **window's** scale, which is not the page's.
+///
+/// [`type_scale`] above is the stylesheet's, and the stylesheet is describing a
+/// web page whose body text is 16px on a viewport a metre wide. A desktop window
+/// is read closer and holds four panels at once, so it wants its own three
+/// sizes. These are TelegramAnalyser's — the sibling app that shares this
+/// palette — copied rather than re-derived, for the same reason the colours
+/// were: two apps that look like one product.
+///
+/// **Everything in the window uses these.** The first egui pass reached into
+/// `type_scale` for `TINY` and `MICRO`, which are the *page's* fine print — 11
+/// and 10 points — and set nearly the whole interface in them. The result was a
+/// window two steps smaller than the analyser throughout, which is most of what
+/// made it read as thin.
+pub mod window {
+    /// Labels, controls, anything meant to be read as text.
+    pub const BODY: f32 = 14.0;
+    /// Denser rows: a list caption, a table cell.
+    pub const SMALL: f32 = 13.0;
+    /// Letterspaced uppercase, always in the mono. See `components::caps`.
+    pub const MICRO: f32 = 11.0;
+}
+
 /// Rhythm and tracking.
 pub mod rhythm {
     /// `--lh-tight`
@@ -233,6 +256,19 @@ mod tests {
         let (w, h) = metrics::MIN_WINDOW;
         assert_eq!((w, h), (900.0, 620.0));
         assert!(h < 768.0, "must fit a 1366x768 laptop under its taskbar");
+    }
+
+    #[test]
+    fn the_window_scale_is_the_analysers_and_not_the_pages_fine_print() {
+        // The first egui pass set the whole window in `TINY` and `MICRO`, which
+        // are the stylesheet's fine print. Nothing here may drift back down to
+        // them: the two apps are meant to look like one product, and this is the
+        // scale the other one is set in.
+        assert_eq!(
+            (window::BODY, window::SMALL, window::MICRO),
+            (14.0, 13.0, 11.0)
+        );
+        assert!(window::MICRO > type_scale::MICRO);
     }
 
     #[test]

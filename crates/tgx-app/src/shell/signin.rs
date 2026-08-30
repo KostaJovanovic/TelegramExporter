@@ -7,8 +7,8 @@
 use super::*;
 use crate::login::Field;
 use eframe::egui::{Align, Layout, Ui};
-use tgx_ui::components::{action, block, eyebrow, row, rule, uppercase};
-use tgx_ui::tokens::type_scale;
+use tgx_ui::components::{action, block, button, eyebrow, field, row, rule};
+use tgx_ui::tokens::window;
 
 /// How wide the dialog is. Wide enough for an api_hash on one line.
 const DIALOG_W: f32 = 420.0;
@@ -64,29 +64,20 @@ impl Shell {
                 ui.add_space(16.0);
                 let mut cancel = false;
                 let mut submit = false;
+                // A secondary box and a primary one, as the analyser's footer
+                // has. This is the one screen in the window where the accent is
+                // not on Start export, because while the dialog is up it is the
+                // only thing that can be pressed at all.
                 row(ui, |ui| {
-                    cancel = action(
-                        ui,
-                        egui::RichText::new("Cancel")
-                            .font(tgx_ui::fonts::sans(type_scale::SMALL))
-                            .color(p.muted),
-                        true,
-                    )
-                    .clicked();
+                    cancel = button(ui, "Cancel", true, false, &p).clicked();
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         // **Busy is disabled, not merely greyed.** The label
                         // already said "Working…" while still taking clicks, so
                         // a second press queued a second request behind the one
                         // in flight; `submit_login` refuses it, but the control
                         // should not have offered.
-                        submit = action(
-                            ui,
-                            egui::RichText::new(if busy { "Working…" } else { verb })
-                                .font(tgx_ui::fonts::sans(type_scale::SMALL))
-                                .color(p.fg),
-                            !busy,
-                        )
-                        .clicked();
+                        let label = if busy { "Working…" } else { verb };
+                        submit = button(ui, label, !busy, true, &p).clicked();
                     });
                 });
                 ui.add_space(16.0);
@@ -123,7 +114,7 @@ impl Shell {
         block(ui, |ui| {
             ui.label(
                 egui::RichText::new(stage.hint())
-                    .font(tgx_ui::fonts::sans(type_scale::TINY))
+                    .font(tgx_ui::fonts::sans(window::SMALL))
                     .color(p.muted),
             );
         });
@@ -147,12 +138,12 @@ impl Shell {
                         for (i, step) in steps.iter().enumerate() {
                             ui.label(
                                 egui::RichText::new(format!("{}", i + 1))
-                                    .font(tgx_ui::fonts::mono(type_scale::TINY))
+                                    .font(tgx_ui::fonts::mono(window::SMALL))
                                     .color(p.rule),
                             );
                             ui.label(
                                 egui::RichText::new(*step)
-                                    .font(tgx_ui::fonts::sans(type_scale::TINY))
+                                    .font(tgx_ui::fonts::sans(window::SMALL))
                                     .color(p.muted),
                             );
                             ui.end_row();
@@ -165,7 +156,7 @@ impl Shell {
             ui.add_space(12.0);
             row(ui, |ui| {
                 let text = egui::RichText::new(link.label)
-                    .font(tgx_ui::fonts::sans(type_scale::TINY))
+                    .font(tgx_ui::fonts::sans(window::SMALL))
                     .color(p.accent);
                 if action(ui, text, true).clicked() {
                     ui.ctx().open_url(egui::OpenUrl::new_tab(link.url));
@@ -173,15 +164,13 @@ impl Shell {
             });
         }
 
-        for field in stage.fields() {
-            let field = *field;
-            ui.add_space(12.0);
+        // `kind`, not `field`: `components::field` is the text control, and this
+        // loop is over the stage's `login::Field`s.
+        for kind in stage.fields() {
+            let kind = *kind;
+            ui.add_space(14.0);
             block(ui, |ui| {
-                ui.label(
-                    egui::RichText::new(uppercase(field.label()))
-                        .font(tgx_ui::fonts::sans(type_scale::MICRO))
-                        .color(p.muted),
-                );
+                ui.label(tgx_ui::components::eyebrow(kind.label(), &p));
                 ui.add_space(4.0);
                 let Some(dialog) = self.login.as_mut() else {
                     return;
@@ -189,11 +178,12 @@ impl Shell {
                 // `Field::masked` is the only source of truth for which fields
                 // are secret. A separate bool here let the two disagree, which
                 // is exactly how a credential ends up rendered in plain text.
+                let width = ui.available_width();
                 ui.add(
-                    egui::TextEdit::singleline(dialog.value_mut(field))
-                        .password(field.masked())
-                        .hint_text(field.placeholder())
-                        .desired_width(ui.available_width()),
+                    field(dialog.value_mut(kind), &p)
+                        .password(kind.masked())
+                        .hint_text(kind.placeholder())
+                        .desired_width(width),
                 );
             });
         }
@@ -210,7 +200,7 @@ impl Shell {
             ui.add_space(10.0);
             block(ui, |ui| {
                 let text = egui::RichText::new(&err)
-                    .font(tgx_ui::fonts::sans(type_scale::TINY))
+                    .font(tgx_ui::fonts::sans(window::SMALL))
                     .color(p.accent);
                 if action(ui, text, true).clicked() {
                     ui.ctx().copy_text(err.clone());
@@ -225,7 +215,7 @@ impl Shell {
                     } else {
                         "Click the message to copy it"
                     })
-                    .font(tgx_ui::fonts::sans(type_scale::MICRO))
+                    .font(tgx_ui::fonts::sans(window::MICRO))
                     .color(p.muted),
                 );
             });
