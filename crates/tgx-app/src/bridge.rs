@@ -19,22 +19,88 @@
 //! note on [`Bridge::shutdown`], which is where that distinction cost real
 //! work.
 //!
-//! **The channel is awaitable, and that is the whole reason it is tokio's and
-//! not `std::sync::mpsc`'s.** A `std` receiver can only be polled, so the
-//! window had to be already painting to notice an event — which it only was
-//! when the user happened to move the mouse. `tokio::sync::mpsc` is
-//! runtime-agnostic (it needs a waker, not a reactor), so its receiver can be
-//! awaited on GPUI's *foreground* executor while the senders live on tokio
-//! worker threads. That is what lets a finished job mark the window dirty
-//! instead of waiting to be found.
+//! **A worker event repaints the window, and [`Events`] is what guarantees it.**
+//! An immediate-mode window draws when it is asked to and not otherwise, so a
+//! result sitting in a channel is invisible until something else causes a
+//! frame — which the user experiences as moving the mouse to make the app work.
+//!
+//! Under GPUI the answer was that the channel had to be *awaitable*: a `std`
+//! receiver can only be polled, so the fix was `tokio::sync::mpsc`, whose
+//! receiver could be awaited on GPUI's foreground executor while the senders
+//! lived on tokio worker threads. egui inverts the mechanism and keeps the
+//! rule. Polling from the frame is now the normal way to read a channel, and
+//! what makes it correct is the *sender* waking the context. So [`Events`] is a
+//! wrapper that repaints after every send, rather than a bare
+//! `UnboundedSender` that fifty-seven call sites have to remember to follow
+//! with a `request_repaint`. Forgetting it at one of them produces a window
+//! that is a frame behind for the rest of the run.
+//!
+//! The channel stays tokio's: the senders are on tokio worker threads, it is
+//! runtime-agnostic on the receiving side, and `try_recv` is all the frame
+//! needs.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 /// The sending half, as the worker side holds it.
-pub type Events = UnboundedSender<Event>;
+///
+/// **Every send wakes the window.** See the module comment: this is the one
+/// place that can guarantee it, because it is the only thing every send goes
+/// through.
+///
+/// The context is an `Option` so the headless shell the interaction tests drive
+/// can hold a sender with nothing to repaint. A `None` there is not a degraded
+/// window — there is no window.
+#[derive(Clone)]
+pub struct Events {
+    tx: UnboundedSender<Event>,
+    ctx: Option<eframe::egui::Context>,
+}
+
+impl Events {
+    /// Send, and mark the window dirty.
+    ///
+    /// Deliberately the same signature as `UnboundedSender::send`, so the call
+    /// sites that were written against that one did not have to change and
+    /// cannot tell the difference.
+    pub fn send(&self, event: Event) -> Result<(), SendError<Event>> {
+        self.tx.send(event)?;
+        if let Some(ctx) = &self.ctx {
+            ctx.request_repaint();
+        }
+        Ok(())
+    }
+
+    /// A sender with no window behind it.
+    ///
+    /// For the action tests, which drive a worker straight at a channel and
+    /// read what it sent. Building an `egui::Context` for them would be a
+    /// second thing that could fail in a test about something else.
+    #[cfg(test)]
+    pub fn detached(tx: UnboundedSender<Event>) -> Self {
+        Self { tx, ctx: None }
+    }
+
+    /// Whether this sender has a window to wake.
+    ///
+    /// The property the module's one rule reduces to, made checkable without a
+    /// frame.
+    #[cfg(test)]
+    pub fn wakes(&self) -> bool {
+        self.ctx.is_some()
+    }
+}
+
+impl std::fmt::Debug for Events {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Events")
+            .field("waking", &self.ctx.is_some())
+            .finish()
+    }
+}
 
 /// Anything the worker wants the interface to know.
 ///
@@ -163,7 +229,12 @@ pub enum Activity {
 
 pub struct Bridge {
     runtime: Option<Runtime>,
-    tx: Events,
+    tx: UnboundedSender<Event>,
+    /// The window to wake when a worker sends. Set by [`Bridge::wake_with`]
+    /// once the context exists, which is after `Bridge::new` — a bridge is
+    /// built before the first frame, and the tests build one with no window at
+    /// all.
+    ctx: Option<eframe::egui::Context>,
     /// Taken **once**, by whoever is going to await it. An `Option` rather than
     /// a second channel, so "who owns the receiving end?" has one answer.
     rx: Option<UnboundedReceiver<Event>>,
@@ -186,15 +257,31 @@ impl Bridge {
         Ok(Self {
             runtime: Some(runtime),
             tx,
+            ctx: None,
             rx: Some(rx),
             stopped: Arc::new(Mutex::new(false)),
             in_flight: Arc::new(AtomicUsize::new(0)),
         })
     }
 
+    /// Tell the bridge which window to wake.
+    ///
+    /// Called once, on the first frame. Senders handed out before this still
+    /// deliver — they simply do not repaint, which for the startup pair
+    /// submitted from `Shell::new` is harmless: the frame that installs the
+    /// context is the very next one.
+    pub fn wake_with(&mut self, ctx: &eframe::egui::Context) {
+        if self.ctx.is_none() {
+            self.ctx = Some(ctx.clone());
+        }
+    }
+
     /// A sender the worker side can keep.
     pub fn sender(&self) -> Events {
-        self.tx.clone()
+        Events {
+            tx: self.tx.clone(),
+            ctx: self.ctx.clone(),
+        }
     }
 
     /// Submit work. Returns immediately; the UI never awaits.
@@ -232,22 +319,16 @@ impl Bridge {
         self.in_flight.load(Ordering::SeqCst)
     }
 
-    /// The receiving end, for the task that will await it.
-    ///
-    /// Returns `None` on a second call: two awaiters would each see half the
-    /// events, and a chat list that arrives on the half nobody is painting from
-    /// is indistinguishable from one that never arrived at all.
-    pub fn take_events(&mut self) -> Option<UnboundedReceiver<Event>> {
-        self.rx.take()
-    }
-
     /// Everything that has arrived since the last call. Non-blocking.
     ///
-    /// Only for a bridge whose receiver has **not** been taken — the headless
-    /// shell the interaction tests drive, and nothing else. Gated on `test` so
-    /// that stays true: the window awaits the channel, and a polling drain
-    /// reachable from the window is how the repaint defect would come back.
-    #[cfg(test)]
+    /// **This is the frame's read, and it is no longer the forbidden path.**
+    /// It used to be `#[cfg(test)]` with a note saying the window awaits the
+    /// channel and a polling drain reachable from the window is how the repaint
+    /// defect comes back. That was true of a retained-mode window, where a poll
+    /// inside `render` only ran when something else had already caused a frame.
+    /// An immediate-mode window has no other way to read a channel, and what
+    /// keeps the rule now is [`Events`] waking the context on every send — so
+    /// the frame this drains in is one the worker asked for.
     pub fn drain(&mut self) -> Vec<Event> {
         use tokio::sync::mpsc::error::TryRecvError;
         let mut out = Vec::new();
@@ -350,15 +431,51 @@ mod tests {
     }
 
     #[test]
-    fn the_receiving_end_can_only_be_taken_once() {
-        // Two awaiters would each see half the events, and a chat list that
-        // arrives on the half nobody is painting from is indistinguishable
-        // from one that never arrived.
+    fn a_sender_handed_out_after_the_window_exists_wakes_it() {
+        // **The rule the whole module is built around.** A `Bridge` is
+        // constructed before there is a context to wake, so `sender()` has to
+        // pick the context up once `wake_with` has been called — a sender that
+        // silently kept a `None` would deliver its events and leave the window
+        // showing yesterday's screen until the user moved the mouse.
         let mut bridge = Bridge::new().unwrap();
-        assert!(bridge.take_events().is_some());
-        assert!(bridge.take_events().is_none());
-        // And a bridge whose receiver has gone has nothing left to drain.
-        assert!(bridge.drain().is_empty());
+        assert!(!bridge.sender().wakes(), "there is no window yet");
+
+        let ctx = eframe::egui::Context::default();
+        bridge.wake_with(&ctx);
+        assert!(bridge.sender().wakes(), "a sender must wake the window");
+    }
+
+    #[test]
+    fn the_window_is_only_learned_once() {
+        // `wake_with` runs on every frame. Reassigning per frame would clone an
+        // `egui::Context` sixty times a second for a value that never changes.
+        let mut bridge = Bridge::new().unwrap();
+        let first = eframe::egui::Context::default();
+        let second = eframe::egui::Context::default();
+        bridge.wake_with(&first);
+        bridge.wake_with(&second);
+        assert!(bridge.ctx.as_ref().is_some_and(|c| *c == first));
+    }
+
+    #[test]
+    fn everything_sent_is_drained_in_order() {
+        // The frame reads the whole batch at once: a chat list of four hundred
+        // rows and the status line that follows it must not arrive on two
+        // different frames.
+        let mut bridge = Bridge::new().unwrap();
+        let tx = bridge.sender();
+        tx.send(Event::Status("one".into())).unwrap();
+        tx.send(Event::Status("two".into())).unwrap();
+        let drained: Vec<String> = bridge
+            .drain()
+            .into_iter()
+            .map(|e| match e {
+                Event::Status(s) => s,
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(drained, ["one", "two"]);
+        assert!(bridge.drain().is_empty(), "a second drain sees nothing");
     }
 
     #[test]

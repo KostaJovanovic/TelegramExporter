@@ -177,6 +177,12 @@ const TICK_SIZE: f32 = 12.0;
 /// visible on a narrow panel.
 const INDETERMINATE_FILL: f32 = 0.12;
 
+// A const assertion rather than a test, which is this codebase's idiom for a
+// relation between constants: a `#[test]` over two `const`s is one clippy
+// rightly calls out as having a constant value, and this way a bad edit fails
+// the build rather than a test run.
+const _: () = assert!(INDETERMINATE_FILL > 0.0 && INDETERMINATE_FILL < 0.25);
+
 /// How tall the bar is. The bar is a status line, not a widget, and anything
 /// taller starts competing with the type.
 const BAR_HEIGHT: f32 = 6.0;
@@ -280,7 +286,11 @@ impl NavCell {
                 0.0,
                 TextFormat {
                     font_id: fonts::mono(type_scale::TINY),
-                    color: if self.active { palette.bg } else { palette.muted },
+                    color: if self.active {
+                        palette.bg
+                    } else {
+                        palette.muted
+                    },
                     ..Default::default()
                 },
             );
@@ -547,7 +557,12 @@ mod tests {
     fn a_tracked_label_carries_its_text_unsplit() {
         // The GPUI version had to shatter the string into one box per glyph,
         // which cost selection, search and wrapping. It is one run again.
-        let job = tracked("SIGN IN", type_scale::MICRO, rhythm::TRACK_MICRO, Color32::WHITE);
+        let job = tracked(
+            "SIGN IN",
+            type_scale::MICRO,
+            rhythm::TRACK_MICRO,
+            Color32::WHITE,
+        );
         assert_eq!(job.text, "SIGN IN");
         assert_eq!(job.sections.len(), 1);
     }
@@ -567,7 +582,9 @@ mod tests {
         // and painting the second as the first makes a working export look
         // stuck.
         assert_eq!(bar_fill(None), INDETERMINATE_FILL);
-        assert!(INDETERMINATE_FILL > 0.0 && INDETERMINATE_FILL < 0.25);
+        // That it is short enough to read as a marker is pinned by the const
+        // assertion beside the constant, not here.
+        assert_ne!(bar_fill(None), bar_fill(Some(0.0)));
     }
 
     #[test]

@@ -1,269 +1,249 @@
-//! The sign-in card.
+//! The sign-in dialog, painted, and the submit that advances it.
 //!
-//! **One dialog, ever** — see [`crate::login`] for why. What is fixed here is
-//! the shape it is painted in: the card was a fixed 420px wide with no height
-//! cap, so on a short window it overflowed both edges with its action button
-//! off screen and no way to reach it. A modal you cannot dismiss and cannot
-//! scroll is the same failure as the two stacked modals it replaced.
+//! **One dialog, ever.** The state is a single `Option<LoginDialog>` on the
+//! shell — see `crate::login` for why two of these once made the app look
+//! frozen the moment it logged you in.
 
-use super::Shell;
+use super::*;
 use crate::login::Field;
-use gpui::prelude::*;
-use gpui::{div, px, relative, Context, Div, SharedString};
-use gpui_component::input::Input;
-use gpui_component::scroll::Scrollbar;
+use eframe::egui::{Sense, Ui};
 use tgx_ui::components::{eyebrow, rule, uppercase};
 use tgx_ui::tokens::type_scale;
 
 impl Shell {
-    pub(super) fn login_panel(&self, cx: &mut Context<Self>) -> Option<gpui::Stateful<Div>> {
-        let dialog = self.login.as_ref()?;
-        let p = &self.palette;
+    pub(super) fn login_panel(&mut self, ctx: &Context) {
+        if self.login.is_none() {
+            return;
+        }
+        let p = self.palette;
 
-        // Everything that can grow — the hint, the numbered steps, an error of
-        // unknown length — goes inside the scrolling body. The header and the
-        // action row sit outside it, so Cancel and the action button are
-        // reachable at any window height.
-        let mut body = div()
-            .id("login-body")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&dialog.scroll)
-            .child(
-                div()
-                    .px(px(20.0))
-                    .pt(px(14.0))
-                    .text_size(type_scale::TINY)
-                    .text_color(p.muted)
-                    .child(SharedString::from(dialog.stage.hint())),
-            );
+        // **A modal viewport-wide area, not a second window.** A real second
+        // window is what could end up ordered behind the first while still
+        // holding every click in the application. `egui::Modal` dims what is
+        // behind it *and* blocks input to it — the GPUI version had to build
+        // that from an `id`-carrying, `occlude`-ing scrim, because a plain
+        // `div` with no id takes part in no hit testing at all and so dimmed
+        // the window while stopping nothing.
+        let modal = egui::Modal::new(egui::Id::new("login")).show(ctx, |ui| {
+            ui.set_width(420.0);
+            let dialog = self.login.as_ref().expect("checked above");
+            let stage = dialog.stage;
+            let busy = dialog.busy;
+            let action = stage.action();
 
-        // Numbered, because these are steps taken on another site in order,
-        // and a paragraph of prose describing a five-step form is how someone
-        // ends up on the wrong page deciding what "platform" to pick.
-        let steps = dialog.stage.steps();
-        if !steps.is_empty() {
-            let mut list = div()
-                .px(px(20.0))
-                .pt(px(10.0))
-                .flex()
-                .flex_col()
-                .gap(px(6.0));
-            for (i, step) in steps.iter().enumerate() {
-                list = list.child(
-                    div()
-                        .flex()
-                        .w_full()
-                        .gap(px(8.0))
-                        .text_size(type_scale::TINY)
-                        .text_color(p.muted)
-                        .child(
-                            div()
-                                .w(px(14.0))
-                                .flex_none()
-                                .text_color(p.rule)
-                                .child(SharedString::from(format!("{}", i + 1))),
+            ui.add_space(16.0);
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                ui.label(eyebrow(stage.title(), &p));
+            });
+            ui.add_space(16.0);
+            rule(ui, &p);
+
+            // Everything that can grow — the hint, the numbered steps, an error
+            // of unknown length — goes inside the scrolling body. The action row
+            // sits outside it, so Cancel and the action button are reachable at
+            // any window height.
+            let max_body = (ctx.content_rect().height() * 0.6).max(120.0);
+            egui::ScrollArea::vertical()
+                .id_salt("login-body")
+                .max_height(max_body)
+                .auto_shrink([false, true])
+                .show(ui, |ui| self.login_body(ui));
+
+            rule(ui, &p);
+            ui.add_space(16.0);
+            let mut cancel = false;
+            let mut submit = false;
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                cancel = ui
+                    .add(
+                        egui::Label::new(
+                            egui::RichText::new("Cancel")
+                                .font(tgx_ui::fonts::sans(type_scale::SMALL))
+                                .color(p.muted),
                         )
-                        // `flex_1` to take the rest of the row and `min_w_0` to
-                        // be *allowed* to. A flex child's automatic minimum
-                        // size is its content, so without this a long line
-                        // pushes the row wider than the card instead of
-                        // wrapping inside it — the text runs off the panel.
-                        .child(div().flex_1().min_w_0().child(SharedString::from(*step))),
-                );
-            }
-            body = body.child(list);
-        }
-
-        if let Some(link) = dialog.stage.link() {
-            body = body.child(
-                div().px(px(20.0)).pt(px(12.0)).child(
-                    div()
-                        .id("login-link")
-                        .text_size(type_scale::TINY)
-                        .text_color(p.accent)
-                        .cursor_pointer()
-                        .child(SharedString::from(link.label))
-                        .on_click(cx.listener(move |_, _, _, cx| cx.open_url(link.url))),
-                ),
-            );
-        }
-
-        for field in dialog.stage.fields() {
-            body = body.child(
-                div()
-                    .px(px(20.0))
-                    .pt(px(12.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(
-                        div()
-                            .text_size(type_scale::MICRO)
-                            .text_color(p.muted)
-                            .child(uppercase(field.label())),
+                        .sense(Sense::click()),
                     )
-                    .child(Input::new(dialog.state_for(*field))),
+                    .clicked();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(20.0);
+                    submit = ui
+                        .add(
+                            egui::Label::new(
+                                egui::RichText::new(if busy { "Working…" } else { action })
+                                    .font(tgx_ui::fonts::sans(type_scale::SMALL))
+                                    .color(if busy { p.muted } else { p.fg }),
+                            )
+                            .sense(Sense::click()),
+                        )
+                        .clicked();
+                });
+            });
+            ui.add_space(16.0);
+
+            if cancel {
+                // Abandoning the dialog abandons the half-finished credential
+                // with it, rather than leaving a live login token sitting
+                // around for the rest of the run. The connection is shared and
+                // stays up; the token is what must not.
+                self.bridge.spawn(crate::actions::forget_pending_login());
+                self.login = None;
+            } else if submit {
+                self.submit_login();
+            }
+        });
+
+        // Escape and a click outside both close it, by the same route Cancel
+        // does — an abandoned dialog must not leave the token behind whichever
+        // way it was abandoned.
+        if modal.should_close() && self.login.is_some() {
+            self.bridge.spawn(crate::actions::forget_pending_login());
+            self.login = None;
+        }
+    }
+
+    fn login_body(&mut self, ui: &mut Ui) {
+        let p = self.palette;
+        let Some(dialog) = self.login.as_ref() else {
+            return;
+        };
+        let stage = dialog.stage;
+
+        ui.add_space(14.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.add_space(20.0);
+            ui.label(
+                egui::RichText::new(stage.hint())
+                    .font(tgx_ui::fonts::sans(type_scale::TINY))
+                    .color(p.muted),
             );
+        });
+
+        // Numbered, because these are steps taken on another site in order, and
+        // a paragraph of prose describing a five-step form is how someone ends
+        // up on the wrong page deciding what "platform" to pick.
+        let steps = stage.steps();
+        if !steps.is_empty() {
+            ui.add_space(10.0);
+            for (i, step) in steps.iter().enumerate() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.add_space(20.0);
+                    ui.label(
+                        egui::RichText::new(format!("{}", i + 1))
+                            .font(tgx_ui::fonts::mono(type_scale::TINY))
+                            .color(p.rule),
+                    );
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(*step)
+                            .font(tgx_ui::fonts::sans(type_scale::TINY))
+                            .color(p.muted),
+                    );
+                });
+                ui.add_space(6.0);
+            }
         }
 
-        if let Some(err) = &dialog.error {
+        if let Some(link) = stage.link() {
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                if ui
+                    .add(
+                        egui::Label::new(
+                            egui::RichText::new(link.label)
+                                .font(tgx_ui::fonts::sans(type_scale::TINY))
+                                .color(p.accent),
+                        )
+                        .sense(Sense::click()),
+                    )
+                    .clicked()
+                {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(link.url));
+                }
+            });
+        }
+
+        for field in stage.fields() {
+            let field = *field;
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                ui.label(
+                    egui::RichText::new(uppercase(field.label()))
+                        .font(tgx_ui::fonts::sans(type_scale::MICRO))
+                        .color(p.muted),
+                );
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                let width = ui.available_width() - 20.0;
+                let Some(dialog) = self.login.as_mut() else {
+                    return;
+                };
+                // `Field::masked` is the only source of truth for which fields
+                // are secret. A separate bool here let the two disagree, which
+                // is exactly how a credential ends up rendered in plain text.
+                ui.add_sized(
+                    [width, 26.0],
+                    egui::TextEdit::singleline(dialog.value_mut(field))
+                        .password(field.masked())
+                        .hint_text(field.placeholder())
+                        .desired_width(width),
+                );
+            });
+        }
+
+        let Some(dialog) = self.login.as_ref() else {
+            return;
+        };
+        if let Some(err) = dialog.error.clone() {
             // **Click to copy.** A Telegram RPC error is the one string in this
             // app a user genuinely needs to hand to someone else — it names the
-            // constructor that failed — and it arrives in a modal with nothing
-            // selectable in it. Retyping `AUTH_RESTART caused by auth.sendCode`
-            // from a screenshot is how the useful half gets lost.
-            let copyable = err.to_string();
+            // constructor that failed. Retyping `AUTH_RESTART caused by
+            // auth.sendCode` from a screenshot is how the useful half gets lost.
             let copied = dialog.copied;
-            body = body.child(
-                div()
-                    .px(px(20.0))
-                    .pt(px(10.0))
-                    .pb(px(4.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(
-                        div()
-                            .id("login-error")
-                            .w_full()
-                            .min_w_0()
-                            .text_size(type_scale::TINY)
-                            .text_color(p.accent)
-                            .cursor_pointer()
-                            .child(err.clone())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                    copyable.clone(),
-                                ));
-                                if let Some(d) = this.login.as_mut() {
-                                    d.copied = true;
-                                }
-                                cx.notify();
-                            })),
+            ui.add_space(10.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.add_space(20.0);
+                if ui
+                    .add(
+                        egui::Label::new(
+                            egui::RichText::new(&err)
+                                .font(tgx_ui::fonts::sans(type_scale::TINY))
+                                .color(p.accent),
+                        )
+                        .sense(Sense::click()),
                     )
-                    .child(
-                        div()
-                            .text_size(type_scale::MICRO)
-                            .text_color(p.muted)
-                            .child(SharedString::from(if copied {
-                                "Copied to clipboard"
-                            } else {
-                                "Click the message to copy it"
-                            })),
-                    ),
-            );
+                    .clicked()
+                {
+                    ui.ctx().copy_text(err.clone());
+                    if let Some(d) = self.login.as_mut() {
+                        d.copied = true;
+                    }
+                }
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                ui.label(
+                    egui::RichText::new(if copied {
+                        "Copied to clipboard"
+                    } else {
+                        "Click the message to copy it"
+                    })
+                    .font(tgx_ui::fonts::sans(type_scale::MICRO))
+                    .color(p.muted),
+                );
+            });
         }
-
-        let action = dialog.stage.action();
-        let busy = dialog.busy;
-        let card = div()
-            .flex()
-            .flex_col()
-            .w(px(420.0))
-            // A cap, not a height: the card is as tall as its content until the
-            // window is too short for it, and then it scrolls instead of
-            // growing past both edges.
-            .max_h(relative(0.9))
-            .bg(p.bg)
-            .border_1()
-            .border_color(p.hairline)
-            .child(
-                div()
-                    .flex_none()
-                    .px(px(20.0))
-                    .py(px(16.0))
-                    .child(eyebrow(dialog.stage.title(), p)),
-            )
-            .child(rule(p))
-            .child(
-                div()
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .child(body)
-                    .child(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .right_0()
-                            .bottom_0()
-                            .child(Scrollbar::vertical(&dialog.scroll)),
-                    ),
-            )
-            .child(rule(p))
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .justify_between()
-                    .px(px(20.0))
-                    .py(px(16.0))
-                    .child(
-                        div()
-                            .id("login-cancel")
-                            .text_size(type_scale::SMALL)
-                            .text_color(p.muted)
-                            .cursor_pointer()
-                            .child(SharedString::from("Cancel"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                // Abandoning the dialog abandons the
-                                // half-finished credential with it, rather than
-                                // leaving a live login token sitting around for
-                                // the rest of the run. The connection is shared
-                                // and stays up; the token is what must not.
-                                this.bridge.spawn(crate::actions::forget_pending_login());
-                                this.login = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id("login-go")
-                            .text_size(type_scale::SMALL)
-                            .text_color(if busy { p.muted } else { p.fg })
-                            .cursor_pointer()
-                            .child(SharedString::from(if busy { "Working…" } else { action }))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.submit_login(cx);
-                                cx.notify();
-                            })),
-                    ),
-            );
-
-        Some(
-            div()
-                // **`id` and `occlude` are what make this modal.** A plain
-                // `div` with no id takes part in no hit testing at all, so a
-                // scrim built without them dims the window and stops nothing:
-                // clicks land on the nav bar, on chat rows and on settings
-                // behind it, and "Refresh chats" fires in the middle of a
-                // sign-in. Trading two stacked modals for one that blocks
-                // nothing is not a fix.
-                .id("login-scrim")
-                .occlude()
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                // A scrim, not a second window. A real second window is what
-                // could end up ordered behind the first while still holding
-                // every click in the application.
-                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.55))
-                .child(card),
-        )
+        ui.add_space(14.0);
     }
 
     /// Advance the sign-in by one step.
-    pub(super) fn submit_login(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn submit_login(&mut self) {
         let Some(dialog) = self.login.as_ref() else {
             return;
         };
@@ -271,23 +251,25 @@ impl Shell {
             return;
         }
         let stage = dialog.stage;
+        // Read out before anything below takes `&mut self.login`. Only the
+        // current stage's fields are looked at, which is also what stops a
+        // password typed at one step reaching the request made at another.
         let values: Vec<(Field, String)> = stage
             .fields()
             .iter()
-            .map(|f| (*f, dialog.value(*f, cx)))
+            .map(|f| (*f, dialog.value(*f).trim().to_string()))
             .collect();
         let get = |want: Field| -> String {
             values
                 .iter()
                 .find(|(f, _)| *f == want)
-                .map(|(_, v)| v.trim().to_string())
+                .map(|(_, v)| v.clone())
                 .unwrap_or_default()
         };
 
         // A stale failure must not sit under a fresh attempt.
         if let Some(d) = self.login.as_mut() {
-            d.error = None;
-            d.copied = false;
+            d.clear_error();
         }
 
         match stage {

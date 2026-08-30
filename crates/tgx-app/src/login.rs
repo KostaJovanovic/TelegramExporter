@@ -12,15 +12,13 @@
 //! and **success just closes it** — the status bar already reads
 //! `Signed in: <name>`.
 
-use gpui::{AppContext, Entity, ScrollHandle, SharedString, Window};
-use gpui_component::input::InputState;
-
 /// Where the sign-in has got to. There is exactly one of these at a time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Stage {
     /// No `api_id`/`api_hash` yet. **This is the first page of sign-in, not a
     /// Settings screen** — there is no Settings screen, and telling a new user
     /// to look for one sent them hunting for something that does not exist.
+    #[default]
     Credentials,
     Phone,
     Code,
@@ -153,76 +151,55 @@ impl Field {
     pub fn masked(self) -> bool {
         matches!(self, Field::Password | Field::ApiHash)
     }
+
+    /// The greyed-out example shown in an empty field.
+    pub fn placeholder(self) -> &'static str {
+        match self {
+            Field::ApiId => "12345678",
+            Field::ApiHash => "abcdef…",
+            Field::Phone => "+381…",
+            Field::Code => "12345",
+            // A password has no example anyone should be shown.
+            Field::Password => "",
+        }
+    }
 }
 
 /// The dialog's state. Held as `Option<LoginDialog>` on the shell, so "is one
 /// open?" and "which one?" cannot disagree.
+///
+/// The five buffers are plain `String`s. Under GPUI each was an
+/// `Entity<InputState>` that could only be built with a live `Window`, so
+/// nothing about this dialog was reachable from a test.
+#[derive(Debug, Default, Clone)]
 pub struct LoginDialog {
     pub stage: Stage,
-    pub api_id: Entity<InputState>,
-    pub api_hash: Entity<InputState>,
-    pub phone: Entity<InputState>,
-    pub code: Entity<InputState>,
-    pub password: Entity<InputState>,
+    pub api_id: String,
+    pub api_hash: String,
+    pub phone: String,
+    pub code: String,
+    pub password: String,
     /// Shown under the fields. Cleared on every submit, so a stale failure
     /// cannot sit under a fresh attempt.
-    pub error: Option<SharedString>,
+    pub error: Option<String>,
     /// Whether the last error was copied. Reset with the error, so the
     /// confirmation never sits under a message it does not belong to.
     pub copied: bool,
     pub busy: bool,
-    /// The card's body scrolls. The credentials stage carries five numbered
-    /// steps and a link, and a modal taller than the window put its own action
-    /// button off screen with no way to reach it.
-    pub scroll: ScrollHandle,
 }
 
 impl LoginDialog {
-    pub fn new(
-        stage: Stage,
-        window: &mut Window,
-        cx: &mut gpui::App,
-        api_id: &str,
-        api_hash: &str,
-        phone: &str,
-    ) -> Self {
-        // `Field::masked` is the only source of truth for which fields are
-        // secret. Passing a separate bool here let the two disagree, which
-        // is exactly how a credential ends up rendered in plain text.
-        fn field(
-            window: &mut Window,
-            cx: &mut gpui::App,
-            which: Field,
-            value: &str,
-            placeholder: &'static str,
-        ) -> Entity<InputState> {
-            let value = value.to_string();
-            cx.new(|cx| {
-                let mut state = InputState::new(window, cx).placeholder(placeholder);
-                if which.masked() {
-                    state = state.masked(true);
-                }
-                if !value.is_empty() {
-                    state.set_value(value, window, cx);
-                }
-                state
-            })
-        }
+    pub fn new(stage: Stage, api_id: &str, api_hash: &str, phone: &str) -> Self {
         Self {
             stage,
-            api_id: field(window, cx, Field::ApiId, api_id, "12345678"),
-            api_hash: field(window, cx, Field::ApiHash, api_hash, "abcdef…"),
-            phone: field(window, cx, Field::Phone, phone, "+381…"),
-            code: field(window, cx, Field::Code, "", "12345"),
-            password: field(window, cx, Field::Password, "", ""),
-            error: None,
-            copied: false,
-            busy: false,
-            scroll: ScrollHandle::default(),
+            api_id: api_id.to_string(),
+            api_hash: api_hash.to_string(),
+            phone: phone.to_string(),
+            ..Default::default()
         }
     }
 
-    pub fn state_for(&self, field: Field) -> &Entity<InputState> {
+    pub fn value(&self, field: Field) -> &str {
         match field {
             Field::ApiId => &self.api_id,
             Field::ApiHash => &self.api_hash,
@@ -232,8 +209,20 @@ impl LoginDialog {
         }
     }
 
-    pub fn value(&self, field: Field, cx: &gpui::App) -> String {
-        self.state_for(field).read(cx).value().to_string()
+    pub fn value_mut(&mut self, field: Field) -> &mut String {
+        match field {
+            Field::ApiId => &mut self.api_id,
+            Field::ApiHash => &mut self.api_hash,
+            Field::Phone => &mut self.phone,
+            Field::Code => &mut self.code,
+            Field::Password => &mut self.password,
+        }
+    }
+
+    /// Clear whatever the last attempt said, and its copy confirmation with it.
+    pub fn clear_error(&mut self) {
+        self.error = None;
+        self.copied = false;
     }
 }
 
@@ -347,6 +336,58 @@ mod tests {
         assert!(!Field::Phone.masked());
         assert!(!Field::Code.masked());
         assert!(!Field::ApiId.masked(), "the api_id is not secret");
+    }
+
+    #[test]
+    fn no_masked_field_offers_an_example_of_itself() {
+        // A placeholder is drawn in the clear whatever the field's mask says,
+        // so a realistic-looking one under `Password` is a credential shape on
+        // screen. The `api_hash` keeps an elided example because its *format*
+        // is what people get wrong, and `abcdef…` is not one.
+        assert_eq!(Field::Password.placeholder(), "");
+        assert!(!Field::ApiHash.placeholder().contains(char::is_numeric));
+    }
+
+    #[test]
+    fn a_dialog_carries_the_values_it_was_opened_with() {
+        // Reopening at the phone stage must not lose credentials already
+        // entered, or the second attempt asks for everything again.
+        let d = LoginDialog::new(Stage::Phone, "12345678", "deadbeef", "+381600000");
+        assert_eq!(d.value(Field::ApiId), "12345678");
+        assert_eq!(d.value(Field::ApiHash), "deadbeef");
+        assert_eq!(d.value(Field::Phone), "+381600000");
+        assert_eq!(d.value(Field::Code), "");
+        assert!(d.error.is_none());
+        assert!(!d.busy);
+    }
+
+    #[test]
+    fn every_field_is_reachable_for_reading_and_for_typing() {
+        // The two accessors must agree about which buffer is which, or a
+        // keystroke lands in a field the submit does not read.
+        let mut d = LoginDialog::default();
+        for field in [
+            Field::ApiId,
+            Field::ApiHash,
+            Field::Phone,
+            Field::Code,
+            Field::Password,
+        ] {
+            d.value_mut(field).push_str(field.label());
+            assert_eq!(d.value(field), field.label());
+        }
+    }
+
+    #[test]
+    fn clearing_the_error_clears_the_copy_confirmation_with_it() {
+        // "Copied" sitting under a message that has since been replaced is a
+        // claim that has quietly become false.
+        let mut d = LoginDialog::default();
+        d.error = Some("PHONE_CODE_INVALID".into());
+        d.copied = true;
+        d.clear_error();
+        assert!(d.error.is_none());
+        assert!(!d.copied);
     }
 
     #[test]

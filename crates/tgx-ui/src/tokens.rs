@@ -189,7 +189,10 @@ mod tests {
         assert_ne!(d.hairline, d.bg);
         assert!(lum(d.hairline) > lum(d.bg));
         assert!(lum(d.hairline) < lum(d.fg));
-        assert!(lum(d.rule) < lum(d.hairline), "the softer divider is softer");
+        assert!(
+            lum(d.rule) < lum(d.hairline),
+            "the softer divider is softer"
+        );
     }
 
     #[test]

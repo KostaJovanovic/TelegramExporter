@@ -351,10 +351,16 @@ fn a_skipped_file_still_advances_the_counter_and_keeps_its_thumbnail_record() {
         false,
     )
     .unwrap();
+    // **A third photo, not the first one again.** These used to be the same
+    // `MediaFacts` reused to stand for "another photo", which was harmless
+    // while the planner ignored Telegram's file id. It does not any more — a
+    // repeat reuses the first one's path, by design — so replaying photo 1
+    // here would be testing the de-duplication rather than the counter.
+    let another = plan::classify(&photo_media(photo(3, 100, 100, 500), false), false).unwrap();
 
     let (a, _) = plan::plan(&small, 1, "s", &mut book, &settings);
     let (skipped, job) = plan::plan(&huge, 2, "s", &mut book, &settings);
-    let (c, _) = plan::plan(&small, 3, "s", &mut book, &settings);
+    let (c, _) = plan::plan(&another, 3, "s", &mut book, &settings);
 
     assert_eq!(a["photo"], "photos/photo_1@s.jpg");
     assert_eq!(skipped["photo"], plan::TOO_LARGE);
