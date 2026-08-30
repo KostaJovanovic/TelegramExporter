@@ -7,8 +7,10 @@
 use super::*;
 use crate::login::Field;
 use eframe::egui::{Align, Layout, Ui};
-use tgx_ui::components::{action, block, button, eyebrow, field, row, rule};
-use tgx_ui::tokens::window;
+use tgx_ui::components::{
+    action, block, button, eyebrow, field, figure, meta, row, rule, text, title,
+};
+use tgx_ui::tokens::{space, window};
 
 /// How wide the dialog is. Wide enough for an api_hash on one line.
 const DIALOG_W: f32 = 420.0;
@@ -44,9 +46,9 @@ impl Shell {
                 let busy = dialog.busy;
                 let verb = stage.action();
 
-                ui.add_space(16.0);
-                row(ui, |ui| ui.label(eyebrow(stage.title(), &p)));
-                ui.add_space(16.0);
+                ui.add_space(space::STEP);
+                row(ui, |ui| ui.label(title(stage.title(), &p)));
+                ui.add_space(space::TIGHT);
                 rule(ui, &p);
 
                 // Everything that can grow — the hint, the numbered steps, an
@@ -68,6 +70,7 @@ impl Shell {
                 // has. This is the one screen in the window where the accent is
                 // not on Start export, because while the dialog is up it is the
                 // only thing that can be pressed at all.
+                ui.add_space(space::STEP);
                 row(ui, |ui| {
                     cancel = button(ui, "Cancel", true, false, &p).clicked();
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -110,14 +113,8 @@ impl Shell {
         };
         let stage = dialog.stage;
 
-        ui.add_space(14.0);
-        block(ui, |ui| {
-            ui.label(
-                egui::RichText::new(stage.hint())
-                    .font(tgx_ui::fonts::sans(window::SMALL))
-                    .color(p.muted),
-            );
-        });
+        ui.add_space(space::STEP);
+        block(ui, |ui| ui.label(text(stage.hint(), &p)));
 
         // Numbered, because these are steps taken on another site in order, and
         // a paragraph of prose describing a five-step form is how someone ends
@@ -129,23 +126,19 @@ impl Shell {
         // two-column grid is the shape the layout was drawn as.
         let steps = stage.steps();
         if !steps.is_empty() {
-            ui.add_space(10.0);
+            ui.add_space(space::STEP);
             block(ui, |ui| {
                 egui::Grid::new("login-steps")
                     .num_columns(2)
-                    .spacing([8.0, 6.0])
+                    .spacing([space::TIGHT, space::TIGHT])
                     .show(ui, |ui| {
                         for (i, step) in steps.iter().enumerate() {
-                            ui.label(
-                                egui::RichText::new(format!("{}", i + 1))
-                                    .font(tgx_ui::fonts::mono(window::SMALL))
-                                    .color(p.rule),
-                            );
-                            ui.label(
-                                egui::RichText::new(*step)
-                                    .font(tgx_ui::fonts::sans(window::SMALL))
-                                    .color(p.muted),
-                            );
+                            // The digit is `figure`, like every other number in
+                            // the window. It was `p.rule` — the divider grey,
+                            // which is not a text colour and on the light
+                            // appearance is very nearly the page.
+                            ui.label(figure(format!("{}", i + 1), &p));
+                            ui.label(text(*step, &p));
                             ui.end_row();
                         }
                     });
@@ -153,12 +146,15 @@ impl Shell {
         }
 
         if let Some(link) = stage.link() {
-            ui.add_space(12.0);
+            ui.add_space(space::STEP);
             row(ui, |ui| {
-                let text = egui::RichText::new(link.label)
-                    .font(tgx_ui::fonts::sans(window::SMALL))
+                // A link is the accent's one exception, and it is egui's own
+                // convention rather than this design's — `hyperlink_color` is
+                // set to the same value in `theme::install`.
+                let label = egui::RichText::new(link.label)
+                    .font(tgx_ui::fonts::sans(window::READING))
                     .color(p.accent);
-                if action(ui, text, true).clicked() {
+                if action(ui, label, true).clicked() {
                     ui.ctx().open_url(egui::OpenUrl::new_tab(link.url));
                 }
             });
@@ -168,10 +164,10 @@ impl Shell {
         // loop is over the stage's `login::Field`s.
         for kind in stage.fields() {
             let kind = *kind;
-            ui.add_space(14.0);
+            ui.add_space(space::STEP);
             block(ui, |ui| {
-                ui.label(tgx_ui::components::eyebrow(kind.label(), &p));
-                ui.add_space(4.0);
+                ui.label(eyebrow(kind.label(), &p));
+                ui.add_space(space::TIGHT);
                 let Some(dialog) = self.login.as_mut() else {
                     return;
                 };
@@ -197,30 +193,31 @@ impl Shell {
             // constructor that failed. Retyping `AUTH_RESTART caused by
             // auth.sendCode` from a screenshot is how the useful half gets lost.
             let copied = dialog.copied;
-            ui.add_space(10.0);
+            ui.add_space(space::STEP);
             block(ui, |ui| {
-                let text = egui::RichText::new(&err)
-                    .font(tgx_ui::fonts::sans(window::SMALL))
-                    .color(p.accent);
-                if action(ui, text, true).clicked() {
+                // **Ink, not the accent**, for the same reason a log warning is:
+                // this is the only red thing the dialog would contain apart from
+                // the button that submits it, and two reds on one small screen
+                // is one too many. The message is already the only line here in
+                // the text colour.
+                if action(ui, text(&err, &p), true).clicked() {
                     ui.ctx().copy_text(err.clone());
                     if let Some(d) = self.login.as_mut() {
                         d.copied = true;
                     }
                 }
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new(if copied {
+                ui.add_space(space::TIGHT);
+                ui.label(meta(
+                    if copied {
                         "Copied to clipboard"
                     } else {
                         "Click the message to copy it"
-                    })
-                    .font(tgx_ui::fonts::sans(window::MICRO))
-                    .color(p.muted),
-                );
+                    },
+                    &p,
+                ));
             });
         }
-        ui.add_space(14.0);
+        ui.add_space(space::STEP);
     }
 
     /// Advance the sign-in by one step.

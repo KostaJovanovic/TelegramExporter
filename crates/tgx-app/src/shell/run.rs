@@ -4,9 +4,10 @@ use super::*;
 use eframe::egui::{Align, Layout, Sense, Ui};
 use egui_extras::{Column, TableBuilder};
 use tgx_ui::components::{
-    action, block, caps, eyebrow, progress_bar, row, rule, thousands, EmptyState,
+    action, block, caps, eyebrow, figure, progress_bar, row, rule, text, thousands, title,
+    EmptyState,
 };
-use tgx_ui::tokens::window;
+use tgx_ui::tokens::{space, window};
 
 /// Widths for the queue's count columns.
 ///
@@ -31,9 +32,17 @@ const MEDIA_W: f32 = 62.0;
 /// which point the table scrolls sideways rather than losing the only cell that
 /// names the chat.
 const CHAT_MIN_W: f32 = 72.0;
-const COLUMN_GAP: f32 = 8.0;
-/// One queue row. Tight, because the panel holds a table, a bar and a log.
-const QUEUE_ROW_H: f32 = 20.0;
+const COLUMN_GAP: f32 = space::TIGHT;
+
+/// One queue row, and the header above it.
+///
+/// **26, not 20.** A row was 20 points tall carrying 13-point text, which is
+/// tighter than the text's own leading — the type filled the row edge to edge
+/// with nothing around it, and the row was also the click target that opens the
+/// folder an export wrote. `READING` at the design's body leading is 21, so 26
+/// gives it the same breathing room every other row in the window has.
+const QUEUE_ROW_H: f32 = 26.0;
+const HEADER_H: f32 = 20.0;
 
 impl Shell {
     /// **Bar and log off the bottom, queue in what is left — as panels.**
@@ -75,16 +84,16 @@ impl Shell {
 
     fn queue_panel(&mut self, ui: &mut Ui) {
         let p = self.palette;
-        ui.add_space(10.0);
+        ui.add_space(space::STEP);
         row(ui, |ui| {
-            ui.label(eyebrow("Queue", &p));
+            ui.label(title("Queue", &p));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if !self.queue.is_empty() {
                     ui.label(eyebrow(&format!("{} chats", self.queue.len()), &p));
                 }
             });
         });
-        ui.add_space(10.0);
+        ui.add_space(space::TIGHT);
         rule(ui, &p);
 
         if self.queue.is_empty() {
@@ -101,7 +110,7 @@ impl Shell {
         // cannot be held across it.
         let jobs: Vec<crate::queue::Job> = self.queue.jobs().to_vec();
         let mut opened = None;
-        ui.add_space(6.0);
+        ui.add_space(space::TIGHT);
         block(ui, |ui| {
             // The table takes its column gap from the ui's own spacing.
             ui.spacing_mut().item_spacing.x = COLUMN_GAP;
@@ -119,13 +128,12 @@ impl Shell {
                 .column(Column::exact(COUNT_W))
                 .column(Column::exact(TOPICS_W))
                 .column(Column::exact(MEDIA_W))
-                .header(18.0, |mut header| {
-                    // Uppercase headers, letterspaced, because the design says
-                    // so and because a column of counts needs its label to read
-                    // as a label.
+                .header(HEADER_H, |mut header| {
+                    // Uppercase headers, letterspaced, because a column of
+                    // counts needs its label to read as a label.
                     for label in ["Chat", "Status", "Messages", "Topics", "Media"] {
                         header.col(|ui| {
-                            ui.label(caps(label, window::MICRO, p.muted));
+                            ui.label(eyebrow(label, &p));
                         });
                     }
                 })
@@ -134,41 +142,32 @@ impl Shell {
                         let job = &jobs[r.index()];
                         let running = job.state == crate::queue::JobState::Exporting;
                         r.col(|ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(&job.title)
-                                        .font(tgx_ui::fonts::sans(window::SMALL))
-                                        .color(p.fg),
-                                )
-                                .truncate(),
-                            );
+                            ui.add(egui::Label::new(text(&job.title, &p)).truncate());
                         });
+                        // **The one place the accent appears in this table**,
+                        // and it means the same thing it means on the nav bar:
+                        // *this run*. The state of a row that is not running is
+                        // metadata like the counts beside it.
                         r.col(|ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(job.state.label())
-                                        .font(tgx_ui::fonts::sans(window::SMALL))
-                                        .color(if running { p.accent } else { p.muted }),
-                                )
-                                .truncate(),
-                            );
+                            let state = if running {
+                                caps(job.state.label(), p.accent)
+                            } else {
+                                eyebrow(job.state.label(), &p)
+                            };
+                            ui.add(egui::Label::new(state).truncate());
                         });
-                        // **Mono for every number**, as the stylesheet has it.
-                        // These are counts that tick upward while the run goes,
-                        // and Geist's proportional figures move the column
-                        // sideways on every update — `1` is 384 units against
-                        // `0`'s 663.
-                        for text in [
+                        // Counts that tick upward while the run goes, so Geist's
+                        // proportional figures would move the column sideways on
+                        // every update — `1` is 384 units against `0`'s 663.
+                        // `figure` is the mono, which is tabular by
+                        // construction.
+                        for n in [
                             thousands(job.messages as i64),
                             job.topics_text(),
                             job.media_text(),
                         ] {
                             r.col(|ui| {
-                                ui.label(
-                                    egui::RichText::new(text)
-                                        .font(tgx_ui::fonts::mono(window::SMALL))
-                                        .color(p.muted),
-                                );
+                                ui.label(figure(n, &p));
                             });
                         }
                         if job.root.is_some() && r.response().clicked() {
@@ -212,44 +211,41 @@ impl Shell {
         // A block, not a row inside an `allocate_ui` sized by hand: the bar and
         // its caption are stacked, and inside the gutter the available width
         // already is the bar's width.
-        ui.add_space(10.0);
+        ui.add_space(space::STEP);
         block(ui, |ui| {
             progress_bar(ui, fraction, &p);
-            ui.add_space(6.0);
-            ui.label(caps(&caption, window::MICRO, p.muted));
+            ui.add_space(space::TIGHT);
+            ui.label(eyebrow(&caption, &p));
         });
-        ui.add_space(10.0);
+        ui.add_space(space::STEP);
     }
 
     fn log_panel(&mut self, ui: &mut Ui) {
         let p = self.palette;
-        ui.add_space(8.0);
+        ui.add_space(space::STEP);
         row(ui, |ui| {
-            ui.label(eyebrow("Log", &p));
+            ui.label(title("Log", &p));
             // Two things the header has to say. A warning is marked so it
             // cannot be lost among the ordinary lines, and a thousand-line
             // transcript with one red line in it is exactly where it gets lost
             // — so the count is up here. And what the cap has dropped is stated
             // rather than silently presenting a truncated run as the whole run.
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 12.0;
+                ui.spacing_mut().item_spacing.x = space::STEP;
                 // **The one way out of this panel.** An export's own account of
                 // what it did used to stop at the screen: it could be read,
                 // photographed, and handed on no other way. egui can select the
                 // lines themselves now, but a transcript is wanted all at once.
                 if !self.journal.is_empty() {
                     let copied = self.log_copied;
-                    let text = caps(
-                        if copied { "Copied" } else { "Copy" },
-                        window::MICRO,
-                        // Ink while it is an offer, muted once it has been
-                        // taken — the same weight as the metadata beside it.
-                        if copied { p.muted } else { p.fg },
-                    );
-                    // Enabled either way: "Copied" is a report, not a control
-                    // that has been used up, and the transcript can be taken
-                    // again after it has grown.
-                    if action(ui, text, true).clicked() {
+                    // Ink while it is an offer, muted once it has been taken —
+                    // the same weight as the metadata beside it. Enabled either
+                    // way: "Copied" is a report, not a control that has been
+                    // used up, and the transcript can be taken again once it has
+                    // grown.
+                    let label = if copied { "Copied" } else { "Copy" };
+                    let ink = if copied { p.muted } else { p.fg };
+                    if action(ui, caps(label, ink), true).clicked() {
                         ui.ctx().copy_text(self.journal.to_text());
                         self.log_copied = true;
                     }
@@ -260,17 +256,17 @@ impl Shell {
                         &p,
                     ));
                 }
+                // **The accent, and it is still "this run".** A warning is
+                // something the run produced and has not been read yet, which is
+                // the same category as the progress bar beside it.
                 if self.journal.warnings() > 0 {
                     let n = self.journal.warnings();
-                    ui.label(caps(
-                        &format!("{n} warning{}", if n == 1 { "" } else { "s" }),
-                        window::MICRO,
-                        p.accent,
-                    ));
+                    let word = if n == 1 { "warning" } else { "warnings" };
+                    ui.label(caps(&format!("{n} {word}"), p.accent));
                 }
             });
         });
-        ui.add_space(8.0);
+        ui.add_space(space::TIGHT);
 
         if self.journal.is_empty() {
             EmptyState::new("Nothing logged yet", None).show(ui, &p, false);
@@ -289,17 +285,23 @@ impl Shell {
                 // so long lines used to start flush against the panel edge.
                 block(ui, |ui| {
                     for line in self.journal.lines() {
+                        // **A warning is ink, not the accent.** In a transcript
+                        // set entirely in `muted`, the text colour already *is*
+                        // the loud one — and the accent is spoken for: it means
+                        // *this run*, on the Start button, the progress fill and
+                        // the row that is exporting. Spending it on a fourth
+                        // thing is how it stopped meaning anything. Marked as a
+                        // warning by whoever wrote the line, never sniffed out
+                        // of its text.
+                        let ink = if line.warning { p.fg } else { p.muted };
                         ui.label(
                             egui::RichText::new(&line.text)
-                                .font(tgx_ui::fonts::sans(window::SMALL))
-                                // A warning is painted in the accent because it
-                                // was marked as one by whoever wrote it, never
-                                // sniffed out of its text.
-                                .color(if line.warning { p.accent } else { p.muted }),
+                                .font(tgx_ui::fonts::sans(window::LABEL))
+                                .color(ink),
                         );
                     }
                 });
-                ui.add_space(8.0);
+                ui.add_space(space::TIGHT);
             });
     }
 }
