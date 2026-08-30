@@ -11,10 +11,10 @@ use crate::list::SortMode;
 use chrono::{DateTime, Local};
 use eframe::egui::{Align, Layout, Sense, Ui};
 use tgx_ui::components::{
-    action, button, caps, count_text, eyebrow, field, figure, forum_dot, row, rule,
+    action, button, caps, count_text, disclosure, eyebrow, field, figure, forum_dot, row, rule,
     selection_label, text, tick_box, title, GUTTER,
 };
-use tgx_ui::tokens::{space, window};
+use tgx_ui::tokens::space;
 
 /// Every row is this tall, heading and chat alike.
 ///
@@ -214,13 +214,7 @@ impl Shell {
         ui.painter()
             .rect_filled(rect, egui::CornerRadius::ZERO, p.surface);
         inside(ui, rect, GUTTER, |ui| {
-            // The disclosure marker is drawn from the text face rather than
-            // assumed to exist as a glyph in some system font.
-            ui.label(
-                egui::RichText::new(if folded { "\u{25b8}" } else { "\u{25be}" })
-                    .font(tgx_ui::fonts::mono(window::LABEL))
-                    .color(p.muted),
-            );
+            disclosure(ui, folded, &p);
             ui.label(caps(category.label(), p.fg));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(figure(total.to_string(), &p));

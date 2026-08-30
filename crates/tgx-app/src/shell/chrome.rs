@@ -6,7 +6,7 @@
 use super::*;
 use eframe::egui::{Layout, Ui};
 use tgx_ui::components::{action, caps, edge_rule, eyebrow, row, NavCell};
-use tgx_ui::tokens::{metrics, window};
+use tgx_ui::tokens::{metrics, space, window};
 
 impl Shell {
     pub(super) fn nav_bar(&mut self, ui: &mut Ui) {
@@ -126,34 +126,36 @@ impl Shell {
         };
 
         edge_rule(ui, &p);
-        ui.add_space(8.0);
-        // Right-to-left throughout: the figure is the fixed part and the status
-        // is what has to give, so the one that truncates is the one that takes
-        // what is left. The first pass nested a left-to-right inside a
-        // right-to-left inside a horizontal to say the same thing, which is
-        // flexbox's `justify-between` transliterated rather than egui's answer
-        // to it.
+        ui.add_space(space::TIGHT);
+        // **The nested left-to-right is load-bearing, and taking it out was a
+        // regression.** The figure is the fixed part, so it is allocated first
+        // from the right; the status has to be laid out *forwards* in what
+        // remains, or a truncating label in a right-to-left layout fills the
+        // panel and draws its text against the far edge — which is what put the
+        // status line on the right-hand side of the window with nothing at all
+        // on the left.
         row(ui, |ui| {
             ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                 // The right-hand figure is ours and short, so it can be tracked.
                 ui.label(eyebrow(&right, &p));
-                // **In the mono, not letterspaced.** `eyebrow` goes through
-                // `components::tracked`, whose own doc says not to put a string
-                // of unknown length through it, and this line carries chat
-                // titles and raw RPC errors. The mono is TelegramAnalyser's
-                // choice for the same line, and it is the right one: a status
-                // that changes every few hundred milliseconds should not also
-                // change width under every character.
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(tgx_ui::components::uppercase(&self.status))
-                            .font(tgx_ui::fonts::mono(window::LABEL))
-                            .color(p.muted),
-                    )
-                    .truncate(),
-                );
+                ui.with_layout(Layout::left_to_right(egui::Align::Center), |ui| {
+                    // **In the mono, not letterspaced.** `eyebrow` goes through
+                    // `components::tracked`, whose own doc says not to put a
+                    // string of unknown length through it, and this line carries
+                    // chat titles and raw RPC errors. The mono also keeps a line
+                    // that changes several times a second from changing width
+                    // under every character.
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(tgx_ui::components::uppercase(&self.status))
+                                .font(tgx_ui::fonts::mono(window::LABEL))
+                                .color(p.muted),
+                        )
+                        .truncate(),
+                    );
+                });
             });
         });
-        ui.add_space(8.0);
+        ui.add_space(space::TIGHT);
     }
 }

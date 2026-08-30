@@ -107,7 +107,7 @@ impl Shell {
             ))
             .on_hover_text(full);
         });
-        ui.add_space(space::STEP);
+        ui.add_space(space::TIGHT);
     }
 
     fn format_section(&mut self, ui: &mut Ui) {
@@ -257,7 +257,12 @@ impl Shell {
                 .union(action(ui, text(label, &p), enabled))
                 .clicked();
         });
-        ui.add_space(space::STEP);
+        // **`TIGHT`, not `STEP`.** Twenty-odd of these run down a 400pt column,
+        // and a full step apart the section they belong to stopped reading as
+        // one thing: the gap between two switches was close enough to the gap
+        // between two sections that neither meant anything. Rows sit `TIGHT`
+        // apart and sections `BREAK`, which is four to one and unmistakable.
+        ui.add_space(space::TIGHT);
         clicked
     }
 
@@ -285,7 +290,7 @@ impl Shell {
                 committed = entry.lost_focus();
             });
         });
-        ui.add_space(space::STEP);
+        ui.add_space(space::TIGHT);
         committed
     }
 
