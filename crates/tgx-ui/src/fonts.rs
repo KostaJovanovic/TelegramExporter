@@ -54,10 +54,7 @@ const EMBEDDED: [(&str, &[u8]); 5] = [
     (MEDIUM, include_bytes!("../fonts/Geist-Medium.ttf")),
     (SEMIBOLD, include_bytes!("../fonts/Geist-SemiBold.ttf")),
     (MONO, include_bytes!("../fonts/GeistMono-Regular.ttf")),
-    (
-        MONO_MEDIUM,
-        include_bytes!("../fonts/GeistMono-Medium.ttf"),
-    ),
+    (MONO_MEDIUM, include_bytes!("../fonts/GeistMono-Medium.ttf")),
 ];
 
 /// Every face, under the keys the rest of the design asks for.

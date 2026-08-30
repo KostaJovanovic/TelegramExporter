@@ -1,58 +1,23 @@
-//! Draining the worker channel and applying what comes back.
+//! Applying what the worker sends back.
 //!
-//! **A worker event repaints the window; the window never polls for one.** The
-//! bridge's channel is awaited on GPUI's foreground executor and the pump
-//! calls `cx.notify()`. Polling from `render` instead means nothing is seen
-//! until some unrelated input causes a frame, which the user experiences as
-//! having to move the mouse to make the app work.
+//! **A worker event repaints the window; the window never waits to be asked.**
+//! Under GPUI that meant a task *awaiting* the channel on the foreground
+//! executor and calling `cx.notify()`, because a poll inside `render` only ran
+//! once something else had already caused a frame — which the user experienced
+//! as having to move the mouse to make the app work. An immediate-mode window
+//! has no await to schedule: `Shell::update` drains the bridge at the top of
+//! every frame, and what makes that correct is `bridge::Events` calling
+//! `request_repaint` on every send. The rule is unchanged; only which end holds
+//! it moved.
 //!
-//! Events are applied in batches: a chat list of four hundred rows arrives as
-//! one event, but an export emits progress steadily, and one repaint per event
-//! queues frames faster than they can be drawn.
+//! Events are applied in batches — the whole of `Bridge::drain`, then one
+//! rebuild. A chat list of four hundred rows arrives as one event, but an
+//! export emits progress steadily, and rebuilding the rows per event is
+//! quadratic work for a picture nobody sees until the batch is done.
 
 use super::*;
 
 impl Shell {
-    /// Drain the bridge into this view, for the life of the window.
-    ///
-    /// **This is the fix for the defect the whole window was judged through.**
-    /// The task awaits the channel on GPUI's foreground executor, so an event
-    /// arriving on a tokio worker thread wakes it, it applies the batch, and it
-    /// calls `cx.notify()` — which is what marks the window dirty. Nothing here
-    /// polls and nothing waits for a frame.
-    ///
-    /// Events are applied in batches: a chat list of four hundred rows arrives
-    /// as one event, but an export emits progress steadily, and one repaint per
-    /// event would queue frames faster than they can be drawn.
-    pub(super) fn start_pump(&mut self, cx: &mut Context<Self>) {
-        let Some(mut rx) = self.bridge.take_events() else {
-            return;
-        };
-        self._pump = Some(cx.spawn(async move |this, cx| {
-            while let Some(first) = rx.recv().await {
-                let mut batch = vec![first];
-                while let Ok(next) = rx.try_recv() {
-                    batch.push(next);
-                }
-                let applied = this.update(cx, |this, cx| {
-                    for event in batch {
-                        this.apply(event);
-                    }
-                    // Once per batch, not once per event. Counting a large
-                    // account emits one `Counted` per chat, and re-sorting the
-                    // whole list on each of them is quadratic work for a
-                    // picture nobody sees until the batch is done.
-                    this.rebuild_rows_if_stale();
-                    cx.notify();
-                });
-                if applied.is_err() {
-                    // The window is gone. Nothing left to notify.
-                    break;
-                }
-            }
-        }));
-    }
-
     /// Fold one event into the view.
     ///
     /// **`exporting` decides who may write to the progress bar.** An export is
@@ -61,7 +26,7 @@ impl Shell {
     /// mid-export paints "Counted 12 of 12 chats" over "6,000 of 6,643".
     pub(super) fn apply(&mut self, event: Event) {
         match event {
-            Event::Status(s) => self.status = s.into(),
+            Event::Status(s) => self.status = s,
             // A new line means what was copied is no longer what is on screen,
             // so the control stops claiming otherwise.
             Event::Log(s) => {
@@ -85,7 +50,7 @@ impl Shell {
                 // "Signed in: <name>", and a modal box saying it again is
                 // exactly what could end up ordered behind the window.
                 self.login = None;
-                self.status = format!("Signed in: {name}").into();
+                self.status = format!("Signed in: {name}");
             }
             Event::LoginStage(stage) => {
                 if let Some(d) = self.login.as_mut() {
@@ -97,7 +62,7 @@ impl Shell {
                 if let Some(d) = self.login.as_mut() {
                     d.busy = false;
                     d.copied = false;
-                    d.error = Some(msg.into());
+                    d.error = Some(msg);
                 }
             }
             Event::Chats(mut chats) => {
@@ -125,14 +90,14 @@ impl Shell {
                     self.chats.iter().map(|c| c.id).collect();
                 self.selected.retain(|id| live.contains(id));
                 self.rebuild_rows();
-                self.status = format!("{n} chats").into();
+                self.status = format!("{n} chats");
             }
 
             Event::Counted { chat_id, total } => self.set_count(chat_id, total),
             Event::CountProgress { done, total } => {
                 if !self.exporting {
                     self.count_progress = Some((done, total));
-                    self.status = format!("Counting {done} of {total} chats").into();
+                    self.status = format!("Counting {done} of {total} chats");
                 }
             }
             Event::CountFinished { counted, failed } => {
@@ -143,7 +108,7 @@ impl Shell {
                     if failed > 0 {
                         msg.push_str(&format!(", {failed} could not be counted"));
                     }
-                    self.status = msg.into();
+                    self.status = msg;
                 }
                 // A new count can reorder the list under "Most messages".
                 self.rebuild_rows();
@@ -151,7 +116,7 @@ impl Shell {
 
             Event::ChatStarted { chat_id, title } => {
                 self.queue.began(chat_id);
-                self.status = format!("Exporting {title}").into();
+                self.status = format!("Exporting {title}");
             }
             Event::ChatTotal { chat_id, total } => {
                 self.queue.set_expected(chat_id, total);
@@ -175,7 +140,7 @@ impl Shell {
                 // reading "Rate limited, waiting 60s" for the rest of that
                 // chat while the progress advanced beside it.
                 if let Some(title) = self.queue.title_of(chat_id) {
-                    self.status = format!("Exporting {title}").into();
+                    self.status = format!("Exporting {title}");
                 }
             }
             Event::ChatDone {
@@ -217,7 +182,7 @@ impl Shell {
             }
 
             Event::FloodWait(seconds) => {
-                self.status = format!("Rate limited, waiting {seconds}s").into();
+                self.status = format!("Rate limited, waiting {seconds}s");
             }
             Event::Finished { stopped } => {
                 self.exporting = false;
@@ -236,8 +201,8 @@ impl Shell {
                 // log, which is not where the user is looking.
                 self.journal.push(self.queue.summary());
                 self.status = match self.failure.take() {
-                    Some(why) => format!("{}: {why}", self.queue.summary()).into(),
-                    None => self.queue.summary().into(),
+                    Some(why) => format!("{}: {why}", self.queue.summary()),
+                    None => self.queue.summary(),
                 };
                 self.rebuild_rows();
             }
@@ -260,7 +225,7 @@ impl Shell {
                     Activity::Count => self.counting = false,
                     Activity::SignIn | Activity::Chats => {}
                 }
-                self.status = format!("Failed: {message}").into();
+                self.status = format!("Failed: {message}");
                 self.journal.warn(message);
             }
         }

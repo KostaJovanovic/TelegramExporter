@@ -2,7 +2,7 @@
 
 Guidance for Claude Code (claude.ai/code) working in this repository.
 
-A Rust/GPUI exporter for Telegram chats. It reproduces **Telegram Desktop's own
+A Rust/egui exporter for Telegram chats. It reproduces **Telegram Desktop's own
 export format byte for byte**, plus the one thing Desktop cannot do: forum
 supergroups split into one folder per topic.
 
@@ -89,7 +89,7 @@ tgx-format   Desktop's JSON schema, key order, escaping, sizes. No I/O, network 
 tgx-html     the pages, written from serialised maps. MUST NOT depend on grammers-*.
 tgx-media    classification, folder layout, filenames, stripped thumbnails.
 tgx-tg       grammers client, topics, engine, planning, download, enrichment (+ the `tgx` CLI).
-tgx-ui       the design system in GPUI: tokens, type scale, components.
+tgx-ui       the design system in egui: tokens, type scale, components, theme.
 tgx-app      the window. Depends only on tgx-ui + tgx-tg.
 tgx-parity   the oracle: lib + bin. Depends on format/html/media, never on tgx-tg.
 ```
@@ -114,13 +114,21 @@ count.
 leaves a file that is not truncated but **zero bytes**. Every path that can end
 an export goes through `Output::close`, with a `Drop` impl as backstop.
 
-**GPUI on the main thread, tokio on its own.** `tgx-app/src/bridge.rs` is the
-seam; shutdown drains, it does not stop. The channel is `tokio::sync::mpsc`, not
-`std`'s, because a `std` receiver can only be polled — and polling from `render`
-means nothing repaints until unrelated input causes a frame, which the user
-experiences as having to move the mouse to make the app work. `shell/mod.rs`
-awaits it on GPUI's foreground executor and calls `cx.notify()`. `Bridge::drain`
-is `#[cfg(test)]` so the polling path cannot come back.
+**egui on the main thread, tokio on its own.** `tgx-app/src/bridge.rs` is the
+seam; shutdown drains, it does not stop.
+
+**A worker event repaints the window.** Otherwise a result sits in the channel
+until something else causes a frame, which the user experiences as having to
+move the mouse to make the app work. `bridge::Events` is what guarantees it: it
+wraps the sender and calls `ctx.request_repaint()` after every send, so no call
+site has to remember to. `Shell::update` drains the whole batch at the top of
+each frame and rebuilds the rows once.
+
+The rule predates egui. Under GPUI the mechanism was the opposite — the channel
+had to be *awaitable*, `Bridge::drain` was `#[cfg(test)]` so a poll could not
+come back, and `shell/mod.rs` awaited on the foreground executor. Polling from a
+frame is now the only way to read a channel, and `Events` is what makes it
+correct. **Do not add a send path that bypasses it.**
 
 **One connection for the whole process.** `Session::connect` hands out a handle
 on a shared `Connection` (`tgx-tg/src/client.rs`); it does not open one.
@@ -230,10 +238,21 @@ sits beside the executable and an export is other people's conversation;
 
 ## Dependencies
 
-`gpui`, `gpui-component` and `winresource` are pinned **exactly**, not by caret,
-despite their READMEs suggesting `version = "*"`. All are pre-1.0, so a routine
-`cargo update` can break the interface with no code change of ours. Bump them
-deliberately, on their own commit, with the parity legs green either side.
+`winresource` is pinned **exactly**, not by caret: it is pre-1.0, so a routine
+`cargo update` can change its interface with no code change of ours, and what it
+breaks is a build script — the failure surfaces in a crate whose source did not
+change. Bump it deliberately, on its own commit, with the parity legs green
+either side.
+
+`gpui` and `gpui-component` carried the same pin and the same warning, and went
+with the UI swap. `eframe` takes a caret: it is past 0.1, ships a changelog and
+moves on a schedule.
+
+**`eframe` is `default-features = false` with `glow`, and it must stay that
+way.** `wgpu` drags in a shader compiler for a window that is a table, a
+transcript and a row of buttons; `default_fonts` would merge egui's own Ubuntu
+and Hack in as fallbacks, so a missing glyph would render in a typeface nobody
+chose. `tgx-ui` and `tgx-app` both declare it and must agree.
 
 `tools/gen_jpeg_header.py` generates the 623-byte JPEG header baked into
 `tgx-media/src/jpeg_header.rs`; `tools/extract_preview_samples.py` produced the

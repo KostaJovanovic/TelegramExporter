@@ -11,10 +11,9 @@ use super::*;
 impl Shell {
     // -- settings ----------------------------------------------------------
 
-    /// Read the fields back, persist, and queue the write-back.
-    pub(super) fn commit_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(form) = &self.form else { return };
-        form.collect(&mut self.settings, cx);
+    /// Read the fields back, persist, and write the stored values back in.
+    pub(super) fn commit_settings(&mut self) {
+        self.form.collect(&mut self.settings);
         self.settings.sort_mode = self.view.sort.key().into();
         self.settings.group_by_type = self.view.grouped;
         // Stored in the fixed category order rather than in iteration order, so
@@ -28,19 +27,18 @@ impl Shell {
         if let Err(e) = self.settings.save() {
             self.journal.warn(format!("could not save settings: {e}"));
         }
-        self.needs_field_sync = true;
-        cx.notify();
+        // **Written back at once**, not queued for the next frame. Under GPUI
+        // this had to wait for the first moment a `&mut Window` was in hand, so
+        // the shell carried a `needs_field_sync` flag and the render read it.
+        // The form is plain data now, so a clamped entry is visible on the same
+        // frame that clamped it.
+        self.form.sync(&self.settings);
     }
 
     /// A checkbox changed. Same path as a text field, minus the parsing.
-    pub(super) fn toggle_setting(
-        &mut self,
-        f: impl FnOnce(&mut Settings),
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn toggle_setting(&mut self, f: impl FnOnce(&mut Settings)) {
         f(&mut self.settings);
-        self.commit_settings(window, cx);
+        self.commit_settings();
     }
 
     // -- actions -----------------------------------------------------------
@@ -50,7 +48,7 @@ impl Shell {
     /// Making a second dialog is what put two modals on top of each other,
     /// which the user experienced as the app freezing the moment it logged
     /// them in.
-    pub(super) fn open_login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_login(&mut self) {
         if self.login.is_some() {
             return;
         }
@@ -66,10 +64,10 @@ impl Shell {
         };
         let hash = self.settings.api_hash.clone();
         let phone = self.settings.phone.clone();
-        self.login = Some(LoginDialog::new(stage, window, cx, &api_id, &hash, &phone));
+        self.login = Some(LoginDialog::new(stage, &api_id, &hash, &phone));
     }
 
-    pub(super) fn start_sign_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn start_sign_in(&mut self) {
         // Probe the session on disk, and open the dialog without waiting for
         // the answer. A signed-in account answers `SignedIn`, which closes the
         // dialog again — so the cost of already being signed in is that the
@@ -82,7 +80,7 @@ impl Shell {
         self.bridge
             .spawn(async move { crate::actions::sign_in(settings, tx).await });
         if !self.signed_in {
-            self.open_login(window, cx);
+            self.open_login();
         }
     }
 
@@ -136,10 +134,10 @@ impl Shell {
         self.count_progress = None;
     }
 
-    pub(super) fn start_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn start_export(&mut self) {
         // Whatever is in the fields is what the run should use, so the fields
         // are read here rather than trusted to have been committed already.
-        self.commit_settings(window, cx);
+        self.commit_settings();
         if !(self.settings.export_html || self.settings.export_json) {
             self.journal
                 .warn("Nothing to write: enable HTML, JSON or both under Format.");
@@ -161,7 +159,7 @@ impl Shell {
         self.begin_run();
         self.queue
             .start(queue.iter().map(|c| (c.id, c.title.clone())));
-        self.status = format!("Exporting {} chats…", queue.len()).into();
+        self.status = format!("Exporting {} chats…", queue.len());
         self.journal.push(format!(
             "Starting {} export(s) into {}",
             queue.len(),

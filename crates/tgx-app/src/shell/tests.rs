@@ -223,12 +223,12 @@ fn a_count_finishing_mid_export_does_not_touch_the_export_s_progress() {
         total: 12,
     });
     assert_eq!(s.count_progress, None);
-    assert_eq!(s.status.as_ref(), "Exporting a");
+    assert_eq!(s.status.as_str(), "Exporting a");
     s.apply(Event::CountFinished {
         counted: 12,
         failed: 0,
     });
-    assert_eq!(s.status.as_ref(), "Exporting a");
+    assert_eq!(s.status.as_str(), "Exporting a");
 }
 
 #[test]
@@ -240,13 +240,13 @@ fn a_rate_limit_does_not_take_the_status_line_for_the_rest_of_the_chat() {
     s.exporting = true;
     s.queue.start([(1, "news".to_string())]);
     s.apply(Event::FloodWait(60));
-    assert!(s.status.as_ref().contains("Rate limited"));
+    assert!(s.status.as_str().contains("Rate limited"));
     s.apply(Event::Progress {
         chat_id: 1,
         done: 200,
         total: 6643,
     });
-    assert_eq!(s.status.as_ref(), "Exporting news");
+    assert_eq!(s.status.as_str(), "Exporting news");
 }
 
 #[test]
@@ -263,7 +263,7 @@ fn a_run_that_could_not_start_says_why_and_not_only_how_many() {
     });
     s.apply(Event::Finished { stopped: true });
     assert!(
-        s.status.as_ref().contains("cannot write into"),
+        s.status.as_str().contains("cannot write into"),
         "got {}",
         s.status
     );
@@ -288,7 +288,7 @@ fn a_sign_in_failing_mid_export_does_not_stop_the_export() {
     assert!(s.exporting, "a sign-in failure is not an export failure");
     assert!(s.counting, "nor a count failure");
     // It is still reported.
-    assert!(s.status.as_ref().contains("did not answer"));
+    assert!(s.status.as_str().contains("did not answer"));
     // And it is not the export's stated cause, so it cannot reach the run's
     // summary line.
     assert!(s.failure.is_none());
@@ -377,7 +377,7 @@ fn stop_raises_the_flag_the_worker_reads() {
         s.exporting,
         "the run is over when the worker says so, not when the button is pressed"
     );
-    assert_eq!(s.status.as_ref(), "Stopping…");
+    assert_eq!(s.status.as_str(), "Stopping…");
 }
 
 #[test]
@@ -400,7 +400,7 @@ fn a_stopped_run_is_not_reported_as_a_success() {
     s.apply(Event::Finished { stopped: true });
     assert!(!s.exporting);
     assert_eq!(s.queue.jobs()[1].state, JobState::Stopped);
-    assert!(s.status.as_ref().contains("1 not run"), "got {}", s.status);
+    assert!(s.status.as_str().contains("1 not run"), "got {}", s.status);
 }
 
 #[test]

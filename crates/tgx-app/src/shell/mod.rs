@@ -6,13 +6,14 @@
 //! module would have forced every piece of shell state to `pub(crate)`.
 //!
 //! **The one rule this file exists to hold: a worker event repaints the
-//! window.** `pump()` used to be called only from inside `render`, and every
-//! `cx.notify()` sat in a click handler — so a chat list, a login advancing
-//! from Phone to Code, or an export's progress all sat in the queue until some
-//! unrelated input happened to cause a frame. Which the user experienced as
-//! moving the mouse to make the app work. The bridge was never the problem; the
-//! consumer was never scheduled. It is scheduled here, in [`Shell::start_pump`],
-//! and nothing else in this crate may reintroduce a poll-on-render.
+//! window.** Under GPUI that meant scheduling a task to *await* the channel,
+//! because a poll inside `render` only ran once something else had already
+//! caused a frame — which the user experienced as moving the mouse to make the
+//! app work. An immediate-mode window has no await to schedule: [`Shell::update`]
+//! drains the bridge at the top of every frame, and what makes that correct is
+//! that `bridge::Events` calls `request_repaint` on every send, so the frame it
+//! drains in is one a worker asked for. **Nothing in this crate may send an
+//! event by any route that does not wake the context.**
 
 mod chats;
 mod chrome;
@@ -28,17 +29,11 @@ use crate::list::{self, Category, SortMode};
 use crate::login::{LoginDialog, Stage};
 use crate::queue::Queue;
 use crate::settings_form::SettingsForm;
-use gpui::prelude::*;
-use gpui::{
-    div, px, Context, Entity, ScrollHandle, SharedString, Subscription, Task,
-    UniformListScrollHandle, Window,
-};
-use gpui_component::input::{InputEvent, InputState};
+use eframe::egui::{self, Context};
 use tgx_tg::cancel::Cancel;
 use tgx_tg::client::ChatInfo;
 use tgx_tg::config::Settings;
-use tgx_ui::components::{eyebrow, rule, vrule, NavCell};
-use tgx_ui::tokens::{metrics, Palette};
+use tgx_ui::tokens::Palette;
 
 /// The settings and queue column.
 ///
@@ -47,15 +42,16 @@ use tgx_ui::tokens::{metrics, Palette};
 /// wrong and it is the table that breaks, silently, by pushing the column that
 /// names the chat off the panel. 400px against the 900px minimum leaves the
 /// chat list 480, which is the proportion this figure is chosen to hold.
-pub const RIGHT_COLUMN_W: gpui::Pixels = px(400.0);
+pub const RIGHT_COLUMN_W: f32 = 400.0;
 
 /// One row as the list paints it.
 ///
-/// Owned, not borrowed, because it is a **cache**: `uniform_list` asks for its
-/// visible range on every frame, and re-filtering and re-sorting the whole
-/// account inside that callback is work done sixty times a second for an answer
-/// that changed once. Rebuilt by [`Shell::rebuild_rows`] when the chats, the
-/// filter, the sort, the grouping or a fold changes — and nowhere else.
+/// Owned, not borrowed, because it is a **cache**: the list is virtualised and
+/// asks for its visible range on every frame, and re-filtering and re-sorting
+/// the whole account inside that callback is work done sixty times a second for
+/// an answer that changed once. Rebuilt by [`Shell::rebuild_rows`] when the
+/// chats, the filter, the sort, the grouping or a fold changes — and nowhere
+/// else.
 pub enum PaintedRow {
     Heading {
         category: Category,
@@ -68,20 +64,22 @@ pub enum PaintedRow {
 pub struct Shell {
     /// The tokio side. The UI thread never blocks on it.
     bridge: Bridge,
-    /// The task draining the bridge into this view. Held rather than detached,
-    /// so it dies with the window instead of outliving it holding a weak handle
-    /// to something that is gone.
-    _pump: Option<Task<()>>,
-    /// Input subscriptions. A dropped `Subscription` unsubscribes, so these
-    /// have to be kept for as long as the fields they watch.
-    _subscriptions: Vec<Subscription>,
 
     palette: Palette,
     settings: Settings,
-    /// The editable settings' text fields. `None` in the headless shell the
-    /// interaction tests drive: an `InputState` needs a `Window` to exist.
-    form: Option<SettingsForm>,
-    search: Option<Entity<InputState>>,
+    /// The editable settings' text fields.
+    ///
+    /// Not an `Option` any more. Under GPUI these were `Entity<InputState>`,
+    /// which cannot exist without a live `Window`, so the headless shell the
+    /// interaction tests drive had to carry `None` and skip them. egui binds a
+    /// field to a `&mut String`, so the buffer is ordinary data and the tests
+    /// reach the same one the window does.
+    form: SettingsForm,
+    /// The filter box's buffer. **The one copy** — `view.filter` is written
+    /// from it, never typed into separately, because a second copy of the same
+    /// string is how the empty state ends up quoting something other than what
+    /// is in the box.
+    search: String,
 
     signed_in: bool,
     /// Tracked separately from `chats.is_empty()`: the list is empty both
@@ -114,7 +112,7 @@ pub struct Shell {
     /// "which one?" cannot disagree — the same shape as `login` below.
     sort_open: bool,
 
-    status: SharedString,
+    status: String,
     /// Why the run could not proceed, if something said so.
     ///
     /// Held only until the run ends, because a run that ends with a stated
@@ -131,113 +129,32 @@ pub struct Shell {
     /// "is one open?" and "which one?" cannot disagree.
     login: Option<LoginDialog>,
 
-    chat_scroll: UniformListScrollHandle,
-    settings_scroll: ScrollHandle,
-    queue_scroll: ScrollHandle,
-    log_scroll: ScrollHandle,
     /// Whether the log's Copy control has been used since the last line landed.
     ///
     /// Cleared by every new line, because the thing on the clipboard is then no
     /// longer the thing on screen, and a control still reading "Copied" over a
     /// log that has moved on is a claim that has quietly become false.
     log_copied: bool,
-    /// Set when a committed setting has to be written back into its field, so a
-    /// clamped entry is visible. Applied at the top of the next frame, which is
-    /// the first moment a `&mut Window` is in hand.
-    needs_field_sync: bool,
+    /// Whether the startup work has been submitted. The bridge cannot wake a
+    /// window that does not exist yet, so the two jobs `Shell::new` used to
+    /// spawn are submitted on the first frame instead — see [`Shell::update`].
+    started: bool,
+    /// The palette changed and the context has not been told.
+    ///
+    /// `theme::install` re-uploads the font definitions, so calling it on every
+    /// frame would rebuild the glyph atlas sixty times a second for an answer
+    /// that changes when someone clicks the chip. Starts `true` so the first
+    /// frame installs it.
+    theme_stale: bool,
 }
 
 impl Shell {
     /// Build the shell.
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut this = Self::with_settings(Settings::load());
-        let form = SettingsForm::new(&this.settings, window, cx);
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Filter chats…"));
-
-        // The filter is read from the field, not typed into a mirror of it: a
-        // second copy of the same string is how the empty state ends up quoting
-        // something other than what is in the box.
-        this._subscriptions.push(cx.subscribe_in(
-            &search,
-            window,
-            |this, state, event: &InputEvent, _window, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.view.filter = state.read(cx).value().to_string();
-                    // On the filter changing, and only then: a search opens
-                    // what it found, but the user may still fold a category
-                    // while the search is running. See `list::reopen_matched`.
-                    list::reopen_matched(&this.chats, &mut this.view);
-                    this.rebuild_rows();
-                    cx.notify();
-                }
-            },
-        ));
-
-        // Committing on blur rather than on every keystroke: a half-typed
-        // number is not a decision, and writing settings.json per character
-        // would save `5`, `50`, `500` on the way to `5000`.
-        for state in [
-            &form.output_dir,
-            &form.page_size,
-            &form.size_limit,
-            &form.downloads,
-            &form.member_limit,
-        ] {
-            this._subscriptions.push(cx.subscribe_in(
-                state,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
-                        this.commit_settings(window, cx);
-                    }
-                },
-            ));
-        }
-
-        this.form = Some(form);
-        this.search = Some(search);
-        this.start_pump(cx);
-        // The one caller `config::lockdown_error` was written for. Until now
-        // nothing asked, and an ACL failure on the folder holding a bearer
-        // credential reached only `log::warn!`.
-        //
-        // **Submitted, not called.** The Windows implementation shells out to
-        // `icacls`, and this is on the path of building the window — a
-        // subprocess on a slow or network volume would hold the first frame
-        // with nothing on screen to say why.
-        let tx = this.bridge.sender();
-        this.bridge.spawn(async move {
-            crate::actions::report_data_dir_protection(&tx);
-            // Where to find the transcript of everything that follows. In the
-            // log panel because that is where someone already is when they
-            // want it, and the panel's own lines stop at the screen.
-            let _ = tx.send(crate::bridge::Event::Log(format!(
-                "Logging to {}",
-                tgx_tg::logging::log_file().display()
-            )));
-        });
-
-        // **Chats on launch, when there is a session to load them with.**
-        // Nothing used to connect until the user pressed 01, so a saved
-        // sign-in bought nothing on startup: the window opened onto "Not
-        // signed in" and an empty list, and the two presses that fixed it were
-        // the same two presses every time. A signed-in probe answers
-        // `SignedIn`, which loads the list — see `apply`.
-        //
-        // Gated on there being something to try with, so a fresh install does
-        // not open onto a failure it could have predicted. Testing for the
-        // session *file* rather than reading it: whether a credential exists
-        // is not the credential.
-        if this.settings.api_id != 0
-            && !this.settings.api_hash.is_empty()
-            && tgx_tg::config::session_file().exists()
-        {
-            let tx = this.bridge.sender();
-            let settings = this.settings.clone();
-            this.bridge
-                .spawn(async move { crate::actions::sign_in(settings, tx).await });
-        }
-        this
+    ///
+    /// Takes no context: everything here is data. The startup work waits for
+    /// the first frame, which is the first moment there is a window to wake.
+    pub fn new() -> Self {
+        Self::with_settings(Settings::load())
     }
 
     /// The same state without a window, for the interaction tests.
@@ -255,12 +172,12 @@ impl Shell {
         let palette = Palette::named(&settings.theme);
         // **Reported, not panicked.** This runs before `WINDOW_OPENED` is set,
         // so a panic here takes the hook's other branch and tells the user
-        // their GPU needs working DirectX drivers — for a failure to spawn two
-        // worker threads, which has nothing to do with the renderer and would
-        // send them to fix a graphics card that is fine. `report_startup_failure`
-        // is the path every other startup failure already takes, and it reaches
-        // `startup-error.log`, which is the only channel that survives a
-        // double-click.
+        // their machine needs working graphics drivers — for a failure to spawn
+        // two worker threads, which has nothing to do with the renderer and
+        // would send them to fix a graphics card that is fine.
+        // `report_startup_failure` is the path every other startup failure
+        // already takes, and it reaches `startup-error.log`, which is the only
+        // channel that survives a double-click.
         let bridge = match crate::bridge::Bridge::new() {
             Ok(b) => b,
             Err(e) => {
@@ -287,12 +204,10 @@ impl Shell {
         };
         Self {
             bridge,
-            _pump: None,
-            _subscriptions: Vec::new(),
             palette,
+            form: SettingsForm::new(&settings),
             settings,
-            form: None,
-            search: None,
+            search: String::new(),
             signed_in: false,
             loaded: false,
             exporting: false,
@@ -311,16 +226,72 @@ impl Shell {
             queue: Queue::default(),
             count_progress: None,
             login: None,
-            chat_scroll: UniformListScrollHandle::default(),
-            settings_scroll: ScrollHandle::default(),
-            queue_scroll: ScrollHandle::default(),
-            log_scroll: ScrollHandle::default(),
             log_copied: false,
-            needs_field_sync: false,
+            started: false,
+            theme_stale: true,
         }
     }
 
-    // -- the wake-up -------------------------------------------------------
+    /// The work `Shell::new` used to submit, deferred to the first frame.
+    ///
+    /// It has to be: a sender handed out before `Bridge::wake_with` cannot
+    /// repaint, and these two are the events that decide what the very first
+    /// screen says.
+    fn start_up(&mut self) {
+        let tx = self.bridge.sender();
+        // The one caller `config::lockdown_error` was written for. Until it
+        // existed nothing asked, and an ACL failure on the folder holding a
+        // bearer credential reached only `log::warn!`.
+        //
+        // **Submitted, not called.** The Windows implementation shells out to
+        // `icacls`, and this is on the path of building the window — a
+        // subprocess on a slow or network volume would hold the first frame
+        // with nothing on screen to say why.
+        self.bridge.spawn(async move {
+            crate::actions::report_data_dir_protection(&tx);
+            // Where to find the transcript of everything that follows. In the
+            // log panel because that is where someone already is when they
+            // want it, and the panel's own lines stop at the screen.
+            let _ = tx.send(crate::bridge::Event::Log(format!(
+                "Logging to {}",
+                tgx_tg::logging::log_file().display()
+            )));
+        });
+
+        // **Chats on launch, when there is a session to load them with.**
+        // Nothing used to connect until the user pressed 01, so a saved
+        // sign-in bought nothing on startup: the window opened onto "Not
+        // signed in" and an empty list, and the two presses that fixed it were
+        // the same two presses every time. A signed-in probe answers
+        // `SignedIn`, which loads the list — see `apply`.
+        //
+        // Gated on there being something to try with, so a fresh install does
+        // not open onto a failure it could have predicted. Testing for the
+        // session *file* rather than reading it: whether a credential exists
+        // is not the credential.
+        if self.settings.api_id != 0
+            && !self.settings.api_hash.is_empty()
+            && tgx_tg::config::session_file().exists()
+        {
+            let tx = self.bridge.sender();
+            let settings = self.settings.clone();
+            self.bridge
+                .spawn(async move { crate::actions::sign_in(settings, tx).await });
+        }
+    }
+
+    /// The filter box's text became this. **One writer for the filter.**
+    fn set_filter(&mut self, text: String) {
+        if self.view.filter == text {
+            return;
+        }
+        self.view.filter = text;
+        // On the filter changing, and only then: a search opens what it found,
+        // but the user may still fold a category while the search is running.
+        // See `list::reopen_matched`.
+        list::reopen_matched(&self.chats, &mut self.view);
+        self.rebuild_rows();
+    }
 
     // -- the one writer for a chat's count ---------------------------------
 
@@ -339,7 +310,7 @@ impl Shell {
             chat.message_count = count;
         }
         // A count changes what "Most messages" sorts on, so the rows are stale
-        // — but the rebuild waits for the end of the batch. See `start_pump`.
+        // — but the rebuild waits for the end of the batch. See `update`.
         self.rows_stale = true;
     }
 
@@ -422,69 +393,77 @@ impl Shell {
     }
 }
 
-impl Render for Shell {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // A clamped or rejected entry is written back here, at the first moment
-        // a `&mut Window` is in hand — not in the handler that clamped it.
-        if self.needs_field_sync {
-            self.needs_field_sync = false;
-            if let Some(form) = self.form.take() {
-                form.sync(&self.settings, window, cx);
-                self.form = Some(form);
-            }
+impl eframe::App for Shell {
+    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // **Before anything is drained.** Senders handed out before this cannot
+        // repaint, and the startup jobs below are handed one immediately.
+        self.bridge.wake_with(ctx);
+        if !self.started {
+            self.started = true;
+            self.start_up();
         }
+        if self.theme_stale {
+            self.theme_stale = false;
+            tgx_ui::theme::install(ctx, &self.palette);
+        }
+
+        // The whole batch, then one rebuild. Applying an event per frame would
+        // make a list of four hundred chats arrive over four hundred frames.
+        for event in self.bridge.drain() {
+            self.apply(event);
+        }
+        self.rebuild_rows_if_stale();
 
         let p = self.palette;
-        let body = div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .bg(p.bg)
-            .text_color(p.fg)
-            // **No backdrop.** A drifting grid was built here to the design's
-            // specification and then removed: it asked gpui for a frame
-            // continuously, and gpui has no partial invalidation, so the whole
-            // element tree was laid out again at display rate for as long as
-            // the window was open. It also drew hairlines across every panel,
-            // because the panels are unfilled by design and the grid therefore
-            // ran through the type rather than behind it. Do not add it back
-            // without solving both.
-            .child(self.nav_bar(cx))
-            .child(rule(&p))
-            .child(
-                div()
-                    .flex()
-                    .flex_1()
-                    // Without this the row's children are free to grow past it
-                    // and the panels below never scroll — they just get taller
-                    // than the window.
-                    .min_h_0()
-                    .child(self.chat_panel(cx))
-                    .child(vrule(&p))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_none()
-                            .w(RIGHT_COLUMN_W)
-                            .h_full()
-                            // The right column used to declare 100% height plus
-                            // 181px of children, so flex squeezed both panels
-                            // and the last settings row was the first thing cut
-                            // on a short window. Settings takes the slack and
-                            // scrolls; the run panel keeps its measured height.
-                            .child(self.settings_panel(cx))
-                            .child(rule(&p))
-                            .child(self.run_panel(cx)),
-                    ),
-            )
-            .child(rule(&p))
-            .child(self.status_bar());
+        // **No backdrop.** A drifting grid was built here to the design's
+        // specification and then removed: it asked for a frame continuously,
+        // and it drew hairlines across every panel, because the panels are
+        // unfilled by design and the grid therefore ran through the type rather
+        // than behind it. Do not add it back without solving both.
+        egui::TopBottomPanel::top("nav")
+            .frame(egui::Frame::NONE.fill(p.bg))
+            .show_separator_line(false)
+            .show(ctx, |ui| self.nav_bar(ui));
 
-        match self.login_panel(cx) {
-            Some(dialog) => body.child(dialog),
-            None => body,
-        }
+        egui::TopBottomPanel::bottom("status")
+            .frame(egui::Frame::NONE.fill(p.bg))
+            .show_separator_line(false)
+            .show(ctx, |ui| self.status_bar(ui));
+
+        egui::SidePanel::right("right")
+            .frame(egui::Frame::NONE.fill(p.bg))
+            .exact_width(RIGHT_COLUMN_W)
+            .resizable(false)
+            .show_separator_line(false)
+            .show(ctx, |ui| {
+                // Settings takes the slack and scrolls; the run panel keeps its
+                // measured height. The GPUI version declared 100% height plus
+                // 181px of children, so flex squeezed both panels and the last
+                // settings row was the first thing cut on a short window.
+                let run_height = (ui.available_height() * 0.45).min(320.0);
+                egui::TopBottomPanel::bottom("run")
+                    .frame(egui::Frame::NONE.fill(p.bg))
+                    .exact_height(run_height)
+                    .show_separator_line(false)
+                    .show_inside(ui, |ui| self.run_panel(ui));
+                self.settings_panel(ui);
+            });
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(p.bg))
+            .show(ctx, |ui| self.chat_panel(ui));
+
+        // Last, so it takes its clicks before anything under it does.
+        self.login_panel(ctx);
+    }
+
+    /// **Quitting mid-export cancels, and then waits.** See the `Drop` impl,
+    /// which is where the ordering is argued; this is the hook eframe gives for
+    /// the same moment, and it runs before the window is torn down rather than
+    /// after.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.cancel.cancel();
+        self.bridge.shutdown(std::time::Duration::from_secs(10));
     }
 }
 
@@ -517,6 +496,10 @@ fn other_theme(name: &str) -> &'static str {
 /// ordering: both calls are made here explicitly rather than left to field drop
 /// order, because the export only reaches a `close_all` if it has been told to
 /// stop *before* anything starts waiting for it to.
+///
+/// Kept as well as `App::on_exit`, because a `Shell` dropped without eframe
+/// having called that — a panic, or the headless shell in the tests — must
+/// still drain.
 impl Drop for Shell {
     fn drop(&mut self) {
         self.cancel.cancel();

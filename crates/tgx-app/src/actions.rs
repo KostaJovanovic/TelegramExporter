@@ -376,7 +376,8 @@ mod tests {
 
     #[tokio::test]
     async fn signing_in_without_credentials_reports_rather_than_panics() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (raw, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = crate::bridge::Events::detached(raw);
         sign_in(Settings::default(), tx).await;
         let mut events = Vec::new();
         while let Ok(e) = rx.try_recv() {
@@ -396,7 +397,8 @@ mod tests {
     async fn a_count_that_cannot_connect_still_ends_the_count() {
         // Otherwise the button is left reading "Stop counting" over a run that
         // never began, and the only control there is has become a lie.
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (raw, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = crate::bridge::Events::detached(raw);
         count_chats(Settings::default(), vec![1, 2], Cancel::new(), tx).await;
         let mut events = Vec::new();
         while let Ok(e) = rx.try_recv() {
@@ -415,7 +417,8 @@ mod tests {
         // Same failure as above, on the control that matters more: without the
         // Finished, `exporting` stays set and Start is disabled for the rest of
         // the session.
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (raw, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = crate::bridge::Events::detached(raw);
         export(Settings::default(), Vec::new(), Cancel::new(), tx).await;
         let mut events = Vec::new();
         while let Ok(e) = rx.try_recv() {
@@ -437,7 +440,8 @@ mod tests {
     async fn a_rate_limit_during_topic_discovery_skips_the_chat_rather_than_collapsing_it() {
         use std::time::Duration;
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (raw, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = crate::bridge::Events::detached(raw);
         let cancel = Cancel::new();
         let mut calls = 0u32;
         let outcome = resolve_topics("Some Forum", 42, &cancel, &tx, || {
@@ -478,7 +482,8 @@ mod tests {
     /// folder, and it must keep doing so.
     #[tokio::test]
     async fn a_real_refusal_still_degrades_to_one_folder() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (raw, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = crate::bridge::Events::detached(raw);
         let cancel = Cancel::new();
         let outcome = resolve_topics("Some Forum", 42, &cancel, &tx, || async {
             Result::<Vec<dialogs::Topic>, EnrichError>::Err(EnrichError::Refused(
@@ -507,7 +512,8 @@ mod tests {
     async fn a_cancel_during_the_retry_wait_is_reported_as_neither_split_nor_failed() {
         use std::time::Duration;
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (raw, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = crate::bridge::Events::detached(raw);
         let cancel = Cancel::new();
         cancel.cancel();
         let outcome = resolve_topics("Some Forum", 42, &cancel, &tx, || async {
