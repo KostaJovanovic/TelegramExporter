@@ -13,69 +13,55 @@
 //! intermediate theme file: letter-spacing, transitions and shadows are all
 //! expressible here, so there is nothing to work around and nothing to
 //! reinterpret.
+//!
+//! **Two appearances, not one.** TelegramAnalyser, which shares this palette,
+//! is dark-only by decision — "a second is a second design to keep in step".
+//! Here there is already a `theme` setting that a user can change and that is
+//! written to disk, so both have to exist regardless; what that costs is paid
+//! by [`Palette::named`] rather than by a switch at each call site.
 
-use gpui::{hsla, Hsla};
+use eframe::egui::Color32;
 
 /// One appearance.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
     /// The page itself, behind everything.
-    pub bg: Hsla,
+    pub bg: Color32,
     /// Body text.
-    pub fg: Hsla,
+    pub fg: Color32,
     /// Secondary text.
-    pub muted: Hsla,
+    pub muted: Color32,
     /// The 1px rule that does all the dividing. **Pure ink in light, mid grey
     /// in dark** — a dark theme with black hairlines shows nothing at all.
-    pub hairline: Hsla,
+    pub hairline: Color32,
     /// The softer divider.
-    pub rule: Hsla,
+    pub rule: Color32,
     /// A raised fill.
-    pub surface: Hsla,
+    pub surface: Color32,
     /// The one red.
-    pub accent: Hsla,
+    pub accent: Color32,
     /// Text on the accent.
-    pub accent_fg: Hsla,
+    pub accent_fg: Color32,
 }
 
-/// Convert a `#rrggbb` literal to GPUI's colour type.
+/// A `#rrggbb` literal, written the way the stylesheet writes it.
 ///
-/// Written as a `const fn`-shaped helper over the hex the stylesheet actually
-/// contains, so the tokens below read as the CSS does and a transcription error
-/// is visible on the line it happens.
-fn hex(rgb: u32) -> Hsla {
-    let r = ((rgb >> 16) & 0xff) as f32 / 255.0;
-    let g = ((rgb >> 8) & 0xff) as f32 / 255.0;
-    let b = (rgb & 0xff) as f32 / 255.0;
-    rgb_to_hsla(r, g, b, 1.0)
-}
-
-fn rgb_to_hsla(r: f32, g: f32, b: f32, a: f32) -> Hsla {
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let l = (max + min) / 2.0;
-    let d = max - min;
-    if d.abs() < f32::EPSILON {
-        return hsla(0.0, 0.0, l, a);
-    }
-    let s = if l > 0.5 {
-        d / (2.0 - max - min)
-    } else {
-        d / (max + min)
-    };
-    let h = if (max - r).abs() < f32::EPSILON {
-        ((g - b) / d + if g < b { 6.0 } else { 0.0 }) / 6.0
-    } else if (max - g).abs() < f32::EPSILON {
-        ((b - r) / d + 2.0) / 6.0
-    } else {
-        ((r - g) / d + 4.0) / 6.0
-    };
-    hsla(h, s, l, a)
+/// `const fn`, so every palette below is a compile-time constant and a
+/// transcription error is visible on the line it happens. Under GPUI this had
+/// to convert to HSL first, which is why it could not be `const` and why three
+/// of the tests below used to assert things about hue and saturation rather
+/// than about the colour anyone typed.
+pub const fn hex(rgb: u32) -> Color32 {
+    Color32::from_rgb(
+        ((rgb >> 16) & 0xff) as u8,
+        ((rgb >> 8) & 0xff) as u8,
+        (rgb & 0xff) as u8,
+    )
 }
 
 impl Palette {
     /// `:root` — the light appearance.
-    pub fn light() -> Self {
+    pub const fn light() -> Self {
         Self {
             bg: hex(0xffffff),
             fg: hex(0x0a0a0a),
@@ -89,7 +75,7 @@ impl Palette {
     }
 
     /// `:root[data-theme="dark"]`.
-    pub fn dark() -> Self {
+    pub const fn dark() -> Self {
         Self {
             bg: hex(0x0a0a0a),
             fg: hex(0xe8e8e8),
@@ -111,21 +97,32 @@ impl Palette {
             Self::dark()
         }
     }
+
+    /// Is this the light appearance?
+    ///
+    /// egui's `Visuals` carries a `dark_mode` flag that some widgets read to
+    /// pick their own contrast, so it has to be told which of the two this is
+    /// rather than inferring it from the fills.
+    pub fn is_light(&self) -> bool {
+        *self == Self::light()
+    }
 }
 
 /// The type scale, at the clamp ceilings the stylesheet declares.
+///
+/// Points rather than `gpui::Pixels`: egui sizes text in points and scales the
+/// whole UI by the display's DPI, so these are the same numbers in a type the
+/// toolkit accepts directly.
 pub mod type_scale {
-    use gpui::{px, Pixels};
-
-    pub const MEGA: Pixels = px(200.0);
-    pub const HUGE: Pixels = px(112.0);
-    pub const H1: Pixels = px(56.0);
-    pub const H2: Pixels = px(28.0);
-    pub const H3: Pixels = px(16.0);
-    pub const BODY: Pixels = px(16.0);
-    pub const SMALL: Pixels = px(13.0);
-    pub const TINY: Pixels = px(11.0);
-    pub const MICRO: Pixels = px(10.0);
+    pub const MEGA: f32 = 200.0;
+    pub const HUGE: f32 = 112.0;
+    pub const H1: f32 = 56.0;
+    pub const H2: f32 = 28.0;
+    pub const H3: f32 = 16.0;
+    pub const BODY: f32 = 16.0;
+    pub const SMALL: f32 = 13.0;
+    pub const TINY: f32 = 11.0;
+    pub const MICRO: f32 = 10.0;
 }
 
 /// Rhythm and tracking.
@@ -151,14 +148,15 @@ pub mod rhythm {
 
 /// Metrics.
 pub mod metrics {
-    use gpui::{px, Pixels};
-
     /// `--gap`
-    pub const GAP: Pixels = px(24.0);
-    /// `--radius: 0`. Square corners are the design, not a default.
-    pub const RADIUS: Pixels = px(0.0);
+    pub const GAP: f32 = 24.0;
+    /// `--radius: 0`. Square corners are the design, not a default — and
+    /// egui's default widget is a rounded raised button with a shadow, so this
+    /// is a value that has to be applied rather than merely declared. See
+    /// `theme::install`.
+    pub const RADIUS: f32 = 0.0;
     /// `--nav-offset`
-    pub const NAV_HEIGHT: Pixels = px(60.0);
+    pub const NAV_HEIGHT: f32 = 60.0;
     /// Below this the layout stops being merely tight: the Chat column goes.
     /// It still fits a 1366x768 laptop under its taskbar.
     pub const MIN_WINDOW: (f32, f32) = (900.0, 620.0);
@@ -167,6 +165,11 @@ pub mod metrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sum of a colour's channels, which is enough to order greys.
+    fn lum(c: Color32) -> u32 {
+        c.r() as u32 + c.g() as u32 + c.b() as u32
+    }
 
     #[test]
     fn the_two_appearances_are_genuinely_different() {
@@ -179,38 +182,31 @@ mod tests {
     #[test]
     fn a_dark_hairline_is_not_black() {
         // A dark theme with black hairlines shows nothing at all. In light it
-        // is pure ink; in dark it is a mid grey.
+        // is pure ink; in dark it is a mid grey, lighter than the page and
+        // darker than the text.
         let (l, d) = (Palette::light(), Palette::dark());
         assert_eq!(l.hairline, l.fg, "light hairlines are the ink colour");
         assert_ne!(d.hairline, d.bg);
-        assert!(
-            d.hairline.l > d.bg.l,
-            "the dark hairline must be lighter than the page"
-        );
-        assert!(d.hairline.l < d.fg.l, "and darker than the text");
+        assert!(lum(d.hairline) > lum(d.bg));
+        assert!(lum(d.hairline) < lum(d.fg));
+        assert!(lum(d.rule) < lum(d.hairline), "the softer divider is softer");
     }
 
     #[test]
-    fn hex_conversion_round_trips_the_greys() {
-        // #ffffff and #0a0a0a are achromatic: saturation must be zero, or the
-        // whole palette drifts toward a colour cast.
-        let white = hex(0xffffff);
-        assert!((white.l - 1.0).abs() < 1e-4, "got {white:?}");
-        assert!(white.s.abs() < 1e-4, "white gained saturation: {white:?}");
-        let near_black = hex(0x0a0a0a);
-        assert!(
-            (near_black.l - 10.0 / 255.0).abs() < 1e-3,
-            "got {near_black:?}"
-        );
-        assert!(near_black.s.abs() < 1e-4);
+    fn hex_reads_the_literal_the_stylesheet_contains() {
+        // The whole point of writing them as `0xrrggbb`: what comes out is what
+        // was typed. Under GPUI this had to round-trip through HSL, so the test
+        // could only check that white stayed unsaturated.
+        assert_eq!(hex(0xffffff), Color32::from_rgb(255, 255, 255));
+        assert_eq!(hex(0x0a0a0a), Color32::from_rgb(10, 10, 10));
+        assert_eq!(hex(0xe60023), Color32::from_rgb(0xe6, 0x00, 0x23));
     }
 
     #[test]
     fn the_accent_really_is_red() {
-        let a = Palette::light().accent; // #e60023
-                                         // Hue near 0 (or 1) and strongly saturated.
-        assert!(a.h < 0.03 || a.h > 0.97, "hue was {}", a.h);
-        assert!(a.s > 0.9, "saturation was {}", a.s);
+        for a in [Palette::light().accent, Palette::dark().accent] {
+            assert!(a.r() > a.g() && a.r() > a.b(), "{a:?}");
+        }
     }
 
     #[test]
@@ -221,8 +217,16 @@ mod tests {
     }
 
     #[test]
+    fn each_appearance_knows_which_one_it_is() {
+        // egui's `Visuals::dark_mode` is read by widgets that pick their own
+        // contrast, so getting this backwards is not cosmetic.
+        assert!(Palette::light().is_light());
+        assert!(!Palette::dark().is_light());
+    }
+
+    #[test]
     fn corners_are_square_and_the_minimum_window_fits_a_laptop() {
-        assert_eq!(metrics::RADIUS, gpui::px(0.0));
+        assert_eq!(metrics::RADIUS, 0.0);
         let (w, h) = metrics::MIN_WINDOW;
         assert_eq!((w, h), (900.0, 620.0));
         assert!(h < 768.0, "must fit a 1366x768 laptop under its taskbar");

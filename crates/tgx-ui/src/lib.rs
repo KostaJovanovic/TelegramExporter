@@ -1,7 +1,8 @@
-//! The Swiss/International design system, in GPUI.
+//! The Swiss/International design system, in egui.
 
 pub mod components;
 pub mod fonts;
+pub mod theme;
 pub mod tokens;
 
 pub use components::{
@@ -9,4 +10,5 @@ pub use components::{
     soft_rule, thousands, tick_box, tracked, uppercase, vrule, EmptyState, ListState, NavCell,
 };
 pub use fonts::{MONO, SANS};
+pub use theme::install;
 pub use tokens::{metrics, rhythm, type_scale, Palette};
