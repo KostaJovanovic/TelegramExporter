@@ -4,6 +4,7 @@ members = [
     "crates/tgx-format",
     "crates/tgx-html",
     "crates/tgx-media",
+    "crates/tgx-archive",
     "crates/tgx-tg",
     "crates/tgx-ui",
     "crates/tgx-app",

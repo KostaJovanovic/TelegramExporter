@@ -88,15 +88,18 @@ convention:
 tgx-format   Desktop's JSON schema, key order, escaping, sizes. No I/O, network or UI.
 tgx-html     the pages, written from serialised maps. MUST NOT depend on grammers-*.
 tgx-media    classification, folder layout, filenames, stripped thumbnails.
+tgx-archive  the database output: telegram.sqlite. MUST NOT depend on grammers-* or tgx-tg.
 tgx-tg       grammers client, topics, engine, planning, download, enrichment (+ the `tgx` CLI).
 tgx-ui       the design system in egui: tokens, type scale, components, theme.
 tgx-app      the window. Depends only on tgx-ui + tgx-tg.
-tgx-parity   the oracle: lib + bin. Depends on format/html/media, never on tgx-tg.
+tgx-parity   the oracle: lib + bin. Depends on format/html/media/archive, never on tgx-tg.
 ```
 
 A Telegram type in `tgx-html` would let Desktop's markup depend on wire shapes,
 and the harness could no longer replay recorded JSON through it. That is the
-whole reason the rule exists.
+whole reason the rule exists, and `tgx-archive` is there for the same one: the
+archive leg merges a real export into a store twice and reads Desktop's own
+bytes back, which is only possible offline.
 
 **Both outputs come from one map.** `tgx-tg/src/output.rs` takes the payload
 that goes into `result.json`, strips the presentation-only `_p` key, and hands

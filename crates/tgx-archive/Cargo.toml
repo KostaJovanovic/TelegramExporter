@@ -1,0 +1,33 @@
+[package]
+name = "tgx-archive"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The database output: one SQLite file of every message, version, participant and media blob an export has seen. No Telegram types."
+
+[dependencies]
+tgx-format = { path = "../tgx-format" }
+
+# Pinned exactly, not by caret. `grammers-session` already links this exact
+# version for its session file — `[dependencies.libsql] version = "0.9.30",
+# features = ["core"]`, behind its `sqlite-storage` feature — so nothing new is
+# compiled here and the binary does not grow. A *second* version would carry
+# its own `libsql-ffi`, and the two would export the same `sqlite3_*` symbols
+# and fail at link time. That is also why `rusqlite` must never be added: its
+# bundled `libsqlite3-sys` is the same clash wearing a different name.
+#
+# Bump it deliberately, on its own commit, in step with grammers' pin, with the
+# parity legs green either side — the same rule `winresource` gets, and for the
+# same reason: what breaks is not our source.
+libsql = { version = "=0.9.30", default-features = false, features = ["core"] }
+
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+
+# **A dev-dependency, not a dependency.** Nothing here calls tokio; the store's
+# methods are `async` because libsql's API is, and the runtime is whoever's
+# calls them — the engine's, or `#[tokio::test]`'s below.
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }

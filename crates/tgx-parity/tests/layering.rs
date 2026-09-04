@@ -68,6 +68,47 @@ fn tgx_html_does_not_depend_on_grammers() {
     );
 }
 
+/// `tgx-archive` is the database output. It takes the message payload as a
+/// serialised map — exactly what `result.json` carries, minus `_p` — and knows
+/// nothing of Telegram's wire types, for the same reason `tgx-html` does not:
+/// **the store must be replayable by the harness from recorded data.** The
+/// archive leg merges a real Desktop export into a store twice and reads
+/// Desktop's own bytes back out, and it can only do that offline if nothing in
+/// the store needs a connection to exist.
+#[test]
+fn tgx_archive_does_not_depend_on_grammers() {
+    let names = dependency_names(&manifest("tgx-archive"));
+    let offenders: Vec<&String> = names.iter().filter(|n| n.starts_with("grammers")).collect();
+    assert!(
+        offenders.is_empty(),
+        "tgx-archive/Cargo.toml depends on {offenders:?} — the store must not depend on \
+         grammers-tl-types (or any grammers-* crate). It takes the same serialised map the \
+         JSON and HTML writers take, so the harness can replay a recorded result.json \
+         through it with no network connection; that is what the archive leg proves. \
+         See CLAUDE.md's Architecture section."
+    );
+}
+
+/// The other half of the rule above, and the one that is easier to break by
+/// accident: `tgx-tg` owns the engine, the client and every typed error, so
+/// reaching for it from the store is the obvious shortcut the moment the store
+/// wants a `Settings` or a `Progress`. It would also make the store
+/// unreachable from `tgx-parity`, which must never depend on `tgx-tg` — so the
+/// archive leg would stop compiling, which is a late and confusing way to
+/// learn the layer was crossed.
+#[test]
+fn tgx_archive_does_not_depend_on_tgx_tg() {
+    let names = dependency_names(&manifest("tgx-archive"));
+    assert!(
+        !names.iter().any(|n| n == "tgx-tg"),
+        "tgx-archive/Cargo.toml depends on tgx-tg — the store sits *below* the engine, not \
+         beside it. Anything it needs from a run is passed in as a value. Depending on \
+         tgx-tg would also put it out of reach of tgx-parity, which may not depend on \
+         tgx-tg, and the archive leg would have nowhere to live. See CLAUDE.md's \
+         Architecture section."
+    );
+}
+
 /// `tgx-app` is the window. It reaches Telegram only through `tgx-tg`, which
 /// owns the client, the engine and every typed error the UI is allowed to see.
 /// A direct `grammers-*` dependency lets a wire type reach the widgets, and the
@@ -87,6 +128,33 @@ fn tgx_app_does_not_depend_on_grammers() {
          through tgx-tg, which owns the client and the typed errors the UI may see. A direct \
          grammers-* dependency lets a wire type reach the widgets. See CLAUDE.md's \
          Architecture section."
+    );
+}
+
+/// CLAUDE.md says "tgx-app: the window. Depends only on tgx-ui + tgx-tg", and
+/// until this test existed that was a sentence rather than a rule.
+///
+/// It is worth a check of its own because the pressure to break it is real and
+/// looks harmless every time: the window needs one constant or one type from a
+/// lower crate — the database file name, say — and adding the path dependency
+/// is a one-line change that compiles. Then the window knows about the store's
+/// vocabulary, and the seam that keeps every Telegram and storage concern
+/// behind `tgx-tg` has a second hole in it. Whatever the window needs, `tgx-tg`
+/// re-exports or does on its behalf.
+#[test]
+fn tgx_app_depends_only_on_tgx_ui_and_tgx_tg() {
+    let names = dependency_names(&manifest("tgx-app"));
+    let ours: Vec<&String> = names.iter().filter(|n| n.starts_with("tgx-")).collect();
+    let strays: Vec<&&String> = ours
+        .iter()
+        .filter(|n| n.as_str() != "tgx-ui" && n.as_str() != "tgx-tg")
+        .collect();
+    assert!(
+        strays.is_empty(),
+        "tgx-app/Cargo.toml depends on {strays:?} — the window may name only tgx-ui and \
+         tgx-tg. Anything it needs from a lower crate comes through tgx-tg, which owns the \
+         client, the engine, the store and every typed error the UI is allowed to see. \
+         See CLAUDE.md's Architecture section."
     );
 }
 

@@ -3229,6 +3229,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tgx-archive"
+version = "0.1.0"
+dependencies = [
+ "libsql",
+ "log",
+ "serde_json",
+ "tgx-format",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
 name = "tgx-format"
 version = "0.1.0"
 dependencies = [
@@ -3262,9 +3274,11 @@ dependencies = [
  "regex",
  "serde_json",
  "sha2 0.10.9",
+ "tgx-archive",
  "tgx-format",
  "tgx-html",
  "tgx-media",
+ "tokio",
 ]
 
 [[package]]
@@ -3280,6 +3294,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "tgx-archive",
  "tgx-format",
  "tgx-html",
  "tgx-media",

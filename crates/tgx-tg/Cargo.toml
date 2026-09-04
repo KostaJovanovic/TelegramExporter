@@ -10,6 +10,7 @@ description = "The Telegram client and the export engine."
 tgx-format = { path = "../tgx-format" }
 tgx-html = { path = "../tgx-html" }
 tgx-media = { path = "../tgx-media" }
+tgx-archive = { path = "../tgx-archive" }
 
 grammers-client = "0.10"
 grammers-session = { version = "0.10", features = ["sqlite-storage"] }

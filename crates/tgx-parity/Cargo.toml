@@ -22,3 +22,11 @@ regex = "1"
 sha2 = "0.10"
 tgx-html = { path = "../tgx-html" }
 tgx-media = { path = "../tgx-media" }
+
+# The store, for the archive leg. **Never `tgx-tg`** — see `tests/layering.rs`.
+# The whole point of a store that takes serialised maps is that the oracle can
+# replay a recorded export through it with no connection.
+tgx-archive = { path = "../tgx-archive" }
+# The store's methods are async because libsql's are, so the leg drives them on
+# a current-thread runtime it builds itself. No other leg needs one.
+tokio = { version = "1", features = ["rt", "time"] }
