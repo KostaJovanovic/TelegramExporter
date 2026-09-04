@@ -7,6 +7,7 @@
 //! the standing risk in the roadmap. So the legs live here, and
 //! `tests/corpus.rs` runs the same code against a small committed corpus.
 
+pub mod archive_leg;
 pub mod corpus;
 pub mod html_leg;
 pub mod json_leg;

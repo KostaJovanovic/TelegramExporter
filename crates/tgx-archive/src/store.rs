@@ -538,6 +538,24 @@ impl Store {
         Ok(gone.len())
     }
 
+    /// How many superseded payloads this chat has accumulated.
+    ///
+    /// One per time a re-read found a message different from the stored one.
+    /// The archive leg reads it as an assertion: two merges of an export
+    /// nobody edited in between must leave this at zero.
+    pub async fn version_count(&self, chat_id: i64) -> Result<i64, Error> {
+        let row = self
+            .row(
+                "SELECT COUNT(*) FROM versions WHERE chat_id = ?1",
+                params![chat_id],
+            )
+            .await?;
+        Ok(match row {
+            Some(r) => r.get::<i64>(0)?,
+            None => 0,
+        })
+    }
+
     /// Every message of one topic, oldest first.
     pub async fn messages_of(
         &self,

@@ -8,6 +8,7 @@
 //! tgx-parity json   "N:\telegram export\UA KOLAB TELEGRAM"
 //! tgx-parity html   "N:\telegram export\UA KOLAB TELEGRAM"
 //! tgx-parity media  "N:\telegram export\UA KOLAB TELEGRAM"
+//! tgx-parity archive "N:\telegram export\UA KOLAB TELEGRAM"
 //! tgx-parity wire   "Exports\UA KOLAB TELEGRAM" "N:\telegram export\UA KOLAB"
 //! tgx-parity corpus "N:\telegram export\UA KOLAB TELEGRAM" reference
 //! ```
@@ -20,7 +21,7 @@
 
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
-use tgx_parity::{corpus, html_leg, json_leg, media_leg, topic_folders, wire_leg};
+use tgx_parity::{archive_leg, corpus, html_leg, json_leg, media_leg, topic_folders, wire_leg};
 
 fn main() -> std::process::ExitCode {
     match run() {
@@ -74,6 +75,7 @@ fn run() -> Result<u32> {
         "json" => json_leg::run(&topics),
         "html" => html_leg::run(&topics),
         "media" => media_leg::run(&topics),
+        "archive" => archive_leg::run(&topics),
         // The workspace's own `reference/` is where the corpus test looks, so
         // it is the default destination: the documented command and the tested
         // path cannot drift apart.
@@ -84,7 +86,9 @@ fn run() -> Result<u32> {
                 .unwrap_or_else(tgx_parity::corpus::default_dir);
             corpus::build(&root, &topics, &out)
         }
-        other => bail!("unknown leg {other:?}; expected one of: json, html, media, wire, corpus"),
+        other => bail!(
+            "unknown leg {other:?}; expected one of: json, html, media, archive, wire, corpus"
+        ),
     }
 }
 
@@ -94,6 +98,7 @@ usage: tgx-parity <leg> <export root> [args]
   json    re-emit each result.json and byte-diff it
   html    replay each result.json through our writer and diff the pages
   media   replan every attachment's file name and diff the tree
+  archive merge each result.json into the store twice, read it back, byte-diff
   wire    diff our own export against a reference run: ids, size decisions,
           and every field a converter bug would change
             tgx-parity wire <our export> <reference export>

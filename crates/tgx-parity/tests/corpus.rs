@@ -19,7 +19,7 @@
 //! which CI passes, alongside a step that raises a GitHub annotation.
 
 use std::path::PathBuf;
-use tgx_parity::{corpus, html_leg, json_leg, media_leg, topic_folders};
+use tgx_parity::{archive_leg, corpus, html_leg, json_leg, media_leg, topic_folders};
 
 /// What a run should do when `MANIFEST.txt` is not where it should be.
 #[derive(Debug, PartialEq, Eq)]
@@ -136,6 +136,21 @@ fn every_html_page_is_reproduced_exactly() {
     };
     let failures = html_leg::run(&topics).expect("running the html leg");
     assert_eq!(failures, 0, "{failures} topics did not replay exactly");
+}
+
+/// The database output, held to the same standard as the writers.
+///
+/// All four topics go into **one** store under one chat id, which is the shape
+/// a forum export really has — `messages` is keyed `(chat_id, id)`, and a topic
+/// leaking into another's read-back is exactly the kind of thing a per-topic
+/// store would never notice.
+#[test]
+fn a_two_run_archive_reads_back_desktops_bytes() {
+    let Some(topics) = topics_or_skip() else {
+        return;
+    };
+    let failures = archive_leg::run(&topics).expect("running the archive leg");
+    assert_eq!(failures, 0, "{failures} topics did not read back exactly");
 }
 
 #[test]

@@ -362,6 +362,9 @@ if errorlevel 1 set SAVE_ERROR=1
 echo.
 cargo run -q -p tgx-parity -- media "%PARITYROOT%"
 if errorlevel 1 set SAVE_ERROR=1
+echo.
+cargo run -q -p tgx-parity -- archive "%PARITYROOT%"
+if errorlevel 1 set SAVE_ERROR=1
 call :since TS "parity"
 goto end
 
@@ -632,6 +635,8 @@ cargo run -q -p tgx-parity -- html "%PARITYROOT%"
 if errorlevel 1 (echo [warn] the pages no longer match Desktop line for line & set "PARITY_FAILED=1")
 cargo run -q -p tgx-parity -- media "%PARITYROOT%"
 if errorlevel 1 (echo [warn] media names no longer land where Desktop put them & set "PARITY_FAILED=1")
+cargo run -q -p tgx-parity -- archive "%PARITYROOT%"
+if errorlevel 1 (echo [warn] the database no longer reads back Desktop's bytes & set "PARITY_FAILED=1")
 exit /b !PARITY_FAILED!
 
 
