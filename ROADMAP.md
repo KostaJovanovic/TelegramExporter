@@ -120,7 +120,12 @@ Stated rather than hidden. None of these is a defect being ignored.
   in place would need a re-import path; there is none.
 - **A media replacement on an edited message is not picked up.** The media keys
   are outside the volatile list, so the archive keeps the file the message
-  carried when it was first seen.
+  carried when it was first seen. The one exception is a stored `"(File …"`
+  placeholder, which records a refusal to fetch rather than a fact about the
+  message, and is replaced once a run does fetch the file.
+- **A sync only backfills files on messages it re-reads.** Raising the size
+  limit or switching a media kind back on fills in what the window covers;
+  anything older needs "Re-read the whole history".
 - **No command writes a blob back out to disk.** `Store::blob` exists and
   nothing calls it outside tests; getting a file out of `telegram.sqlite` today
   means a SQL client.

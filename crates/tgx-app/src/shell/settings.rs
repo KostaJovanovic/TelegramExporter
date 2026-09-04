@@ -121,12 +121,29 @@ impl Shell {
         ui.add_space(space::TIGHT);
     }
 
+    /// **Classic or Database — an exclusive choice, drawn as one.**
+    ///
+    /// The two boxes at the top of this section behave as a pair: ticking one
+    /// unticks the other, and each mode's own controls go dim when it is not
+    /// the one selected. There is no radio in the design system and adding one
+    /// for two options would be a component built for a single call site; a
+    /// tick box that cannot be un-ticked into nothing says the same thing.
+    ///
+    /// They were three independent checkboxes first. That let someone tick HTML
+    /// and Database together, which reads as "both outputs" and is really "pay
+    /// for a complete re-read of the chat on every run, then call it
+    /// incremental" — the cost of Classic with none of the benefit of Database.
     fn format_section(&mut self, ui: &mut Ui) {
         let p = self.palette;
+        let db = self.settings.export_db;
         section(ui, "Format", &p);
-        for (label, on, change) in [
+
+        if self.check(ui, "Classic — Telegram Desktop's folders", !db, true) && db {
+            self.toggle_setting(|s| s.export_db = false);
+        }
+        for (label, on, which) in [
             (
-                "HTML (browsable, like Telegram Desktop)",
+                "HTML (browsable, like Desktop)",
                 self.settings.export_html,
                 0,
             ),
@@ -135,42 +152,32 @@ impl Shell {
                 self.settings.export_json,
                 1,
             ),
-            (
-                "Database (telegram.sqlite, kept up to date across runs)",
-                self.settings.export_db,
-                2,
-            ),
-            (
-                "Split forum topics into separate folders",
-                self.settings.split_topics,
-                3,
-            ),
         ] {
-            if self.check(ui, label, on, true) {
-                self.toggle_setting(|s| match change {
+            // Indented under Classic by the disabled state rather than by
+            // space: these are what Classic writes, and in Database mode they
+            // write nothing.
+            if self.check(ui, label, on, !db) {
+                self.toggle_setting(move |s| match which {
                     0 => s.export_html = !s.export_html,
-                    1 => s.export_json = !s.export_json,
-                    2 => s.export_db = !s.export_db,
-                    _ => s.split_topics = !s.split_topics,
+                    _ => s.export_json = !s.export_json,
                 });
             }
         }
-        let page = self.number_row(ui, "Messages per HTML page", true, |f| &mut f.page_size);
-        if page {
+        if self.number_row(ui, "Messages per HTML page", !db, |f| &mut f.page_size) {
             self.commit_settings();
         }
 
-        // The two sync controls sit here rather than in a section of their own,
-        // because they are meaningless without the box above them — and they
-        // are drawn disabled when it is off for the same reason the media kinds
-        // are: a control that changes nothing must not look like one that does.
-        let db = self.settings.export_db;
+        ui.add_space(space::TIGHT);
+        if self.check(ui, "Database — one file, kept up to date", db, true) && !db {
+            self.toggle_setting(|s| s.export_db = true);
+        }
         hint(
             ui,
-            "One file beside your exports holding every message, edit and file \
-             this app has ever seen in these chats — including messages later \
-             deleted on Telegram. The HTML and JSON exports are unaffected.",
-            &self.palette,
+            "Instead of a new folder each run: one telegram.sqlite beside your \
+             exports, media inside it, holding every message, every edit and \
+             everything deleted on Telegram since a run first saw it. Re-runs \
+             sync rather than re-export.",
+            &p,
         );
         if self.number_row(ui, "Re-read the last N messages", db, |f| {
             &mut f.reread_window
@@ -187,10 +194,26 @@ impl Shell {
         }
         hint(
             ui,
-            "Both apply only when Database is the *only* format ticked, which \
-             makes the run a quick sync. With HTML or JSON on, the whole history \
-             is read anyway and every deletion is noticed.",
-            &self.palette,
+            "A sync only re-reads the newest messages, so that is as far back as \
+             it notices an edit or a deletion — or picks up a file an earlier \
+             run skipped. Re-read the whole history to catch the rest.",
+            &p,
+        );
+
+        ui.add_space(space::TIGHT);
+        if self.check(
+            ui,
+            "Split forum topics into separate folders",
+            self.settings.split_topics,
+            true,
+        ) {
+            self.toggle_setting(|s| s.split_topics = !s.split_topics);
+        }
+        hint(
+            ui,
+            "Applies to both: Classic writes one folder per topic, and the \
+             database records which topic each message belongs to.",
+            &p,
         );
     }
 

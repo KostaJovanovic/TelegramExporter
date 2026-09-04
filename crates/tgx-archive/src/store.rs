@@ -67,6 +67,24 @@ pub const VOLATILE: &[&str] = &[
     "poll",
 ];
 
+/// Media keys, and the prefix of the strings Desktop writes when it saved no
+/// file: *"(File not included…"*, *"(File exceeds maximum size…"*.
+///
+/// A stored placeholder is not history to be preserved — it is a record that
+/// the run declined to fetch something, and the moment a later run does fetch
+/// it, the placeholder is simply wrong. So these keys are replaceable **only
+/// when what is stored is a placeholder**; a real path is never overwritten,
+/// which is what keeps a media replacement on an edited message from rewriting
+/// what the message originally carried.
+///
+/// Without this, raising the size limit and re-syncing puts the bytes in
+/// `blobs` and leaves the payload still saying the file was too large.
+/// `tgx-tg`'s `the_skip_placeholders_keep_the_shape_the_archive_matches_on`
+/// ties the prefix here to `plan::NOT_INCLUDED` and `plan::TOO_LARGE`, which
+/// this layer may not import.
+const MEDIA_KEYS: &[&str] = &["file", "photo", "thumbnail", "file_size", "photo_file_size"];
+const SKIPPED_PREFIX: &str = "(File ";
+
 /// A chat with no topics, and a forum's General topic, are both id 1 — mirrors
 /// `tgx_media::topics::GENERAL_TOPIC_ID`, which this layer may not depend on.
 /// Only ever the value *inserted* when the caller could not resolve a topic;
@@ -186,6 +204,26 @@ pub fn merge_volatile(
 ) -> Map<String, Value> {
     let mut out = stored.clone();
     for key in VOLATILE {
+        match fresh.get(*key) {
+            Some(v) => {
+                out.insert((*key).to_string(), v.clone());
+            }
+            None => {
+                out.remove(*key);
+            }
+        }
+    }
+    // A media key the earlier run declined to fetch. See [`MEDIA_KEYS`]: the
+    // placeholder is a record of a refusal, not of what the message carried,
+    // and a run that has now fetched the file must be allowed to say so.
+    for key in MEDIA_KEYS {
+        let was_skipped = out
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|s| s.starts_with(SKIPPED_PREFIX));
+        if !was_skipped {
+            continue;
+        }
         match fresh.get(*key) {
             Some(v) => {
                 out.insert((*key).to_string(), v.clone());
@@ -1074,5 +1112,40 @@ mod tests {
         let keys: Vec<&String> = out.keys().collect();
         let ordered = tgx_format::order::ordered(&out);
         assert_eq!(keys, ordered.keys().collect::<Vec<&String>>());
+    }
+
+    #[test]
+    fn a_file_the_earlier_run_declined_to_fetch_is_filled_in_later() {
+        // Exported once with a 20 MB limit, so Desktop's placeholder went in.
+        let mut stored = msg(10, "look at this");
+        stored.insert(
+            "file".into(),
+            json!("(File exceeds maximum size. Change data exporting settings to download.)"),
+        );
+        // Re-synced with the limit raised: the run has the real path now.
+        let mut fresh = msg(10, "look at this");
+        fresh.insert("file".into(), json!("video_files/clip.mp4"));
+        fresh.insert("file_size".into(), json!(48_000_000));
+
+        let out = merge_volatile(&stored, &fresh);
+        assert_eq!(
+            out["file"],
+            json!("video_files/clip.mp4"),
+            "a placeholder is a record of a refusal, not of what the message carried"
+        );
+    }
+
+    #[test]
+    fn a_real_media_path_is_never_overwritten_by_a_re_read() {
+        let mut stored = msg(10, "x");
+        stored.insert("file".into(), json!("files/original.mp3"));
+        let mut fresh = msg(10, "x");
+        fresh.insert("file".into(), json!("files/REPLACED.mp3"));
+
+        assert_eq!(
+            merge_volatile(&stored, &fresh)["file"],
+            json!("files/original.mp3"),
+            "only placeholders are replaceable; history is not"
+        );
     }
 }

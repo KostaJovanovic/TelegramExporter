@@ -215,7 +215,7 @@ pub async fn export(
         // **No folder when nothing goes into one.** With only the Database
         // format ticked there is nothing to write, and reserving a directory
         // anyway would leave an empty `Dev Team (7)` behind on every sync.
-        let root = if settings.export_html || settings.export_json {
+        let root = if settings.writes_folders() {
             match tgx_tg::engine::unique_dir(
                 std::path::Path::new(&settings.output_dir),
                 &chat.title,

@@ -80,16 +80,11 @@ async fn main() -> Result<()> {
                 .collect();
             for flag in &flags {
                 match *flag {
+                    // Database *mode*: it replaces the folder export, it
+                    // does not join it. `export_html` and `export_json` are
+                    // left as they are and simply ignored, so the flag does not
+                    // quietly rewrite the settings file for the next run.
                     "--db" => settings.export_db = true,
-                    // Not "database instead of files" as a mode of its own:
-                    // what a run reads is decided by which formats are on, so
-                    // this just turns the other two off and the engine draws
-                    // its own conclusion.
-                    "--db-only" => {
-                        settings.export_db = true;
-                        settings.export_html = false;
-                        settings.export_json = false;
-                    }
                     "--full" => settings.reread_all = true,
                     other => return Err(anyhow!("unknown flag {other:?}\n\n{USAGE}")),
                 }
@@ -100,9 +95,7 @@ async fn main() -> Result<()> {
                 .map(String::as_str)
                 .map(str::trim)
                 .find(|w| !w.is_empty() && !w.starts_with("--"))
-                .ok_or_else(|| {
-                    anyhow!("usage: tgx export [--db|--db-only] [--full] <chat title>")
-                })?;
+                .ok_or_else(|| anyhow!("usage: tgx export [--db] [--full] <chat title>"))?;
             export(&settings, want).await
         }
         _ => {
@@ -120,11 +113,11 @@ tgx — Telegram Desktop-format exporter
   tgx export <title>   export the chat whose title matches
 
   export flags:
-    --db        also merge every message into Exports/telegram.sqlite
-    --db-only   the database and nothing else — a sync, reading what is new
-                plus a trailing window for edits and deletions
-    --full      with --db-only, walk the whole history so older deletions
-                are noticed too
+    --db      Database mode instead of folders: sync into
+              Exports/telegram.sqlite, media included
+    --full    with --db, walk the whole history rather than the trailing
+              window — needed for older deletions and for files an earlier
+              run skipped
 
 Credentials come from TelegramExporterData/settings.json, or from the
 TG_API_ID and TG_API_HASH environment variables.";
@@ -249,6 +242,15 @@ async fn chats(settings: &Settings) -> Result<()> {
 }
 
 async fn export(settings: &Settings, want: &str) -> Result<()> {
+    // The window's "Nothing to write" guard, which the CLI did not have: a
+    // settings file with both Classic formats off would read the whole chat and
+    // produce nothing.
+    if !settings.writes_anything() {
+        return Err(anyhow!(
+            "nothing to write: settings.json has HTML and JSON off and Database off. \
+             Pass --db, or turn a format on."
+        ));
+    }
     let session = connected(settings).await?;
     let list = dialogs::list_chats(&session.client)
         .await
@@ -293,8 +295,7 @@ async fn export(settings: &Settings, want: &str) -> Result<()> {
     // **No folder when nothing is going into one.** A database-only run would
     // otherwise reserve an export directory, write nothing into it, and leave
     // an empty `Dev Team (3)` behind on every sync.
-    let files = settings.export_html || settings.export_json;
-    let root = if files {
+    let root = if settings.writes_folders() {
         let root =
             tgx_tg::engine::unique_dir(std::path::Path::new(&settings.output_dir), &chat.title)?;
         println!("  into {}", root.display());

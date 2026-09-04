@@ -85,31 +85,45 @@ pub struct Settings {
 
     pub output_dir: String,
 
-    // Output formats — Telegram Desktop offers both; so do we.
+    // Classic: Telegram Desktop's own output. Desktop offers both; so do we.
+    // Ignored entirely in Database mode — see `export_db`.
     pub export_html: bool,
     pub export_json: bool,
 
-    /// Merge every message the run reads into `<output_dir>/telegram.sqlite`,
-    /// media bytes included.
+    /// **Database mode**, which replaces the Classic export rather than joining
+    /// it.
     ///
-    /// Unlike the other two this one **accumulates**: it is one file for the
-    /// whole export root, it keeps every version of a message it has seen
-    /// edited, and a message Telegram stops returning stays in it, marked with
-    /// the date it was noticed missing. Off by default, because it is a second
-    /// copy of everything.
+    /// Classic writes a fresh, complete folder every run: a photograph of the
+    /// chat as it is now, in Desktop's format, byte for byte. Database writes
+    /// one accumulating `telegram.sqlite` for the whole export root, with the
+    /// media inside it — new messages are added, an edited message keeps its
+    /// earlier versions, and a message Telegram stops returning stays, marked
+    /// with the date it went missing.
+    ///
+    /// **The two are a choice, not a pair of ticks.** Running both meant paying
+    /// for a full history read on every run — Classic has to re-read the chat
+    /// from the beginning to produce a standalone folder — and then calling the
+    /// result incremental. Database mode syncs: what is new, plus
+    /// [`Self::reread_window`] for edits and deletions.
+    ///
+    /// Off by default. Classic is what this tool is for; this is the thing it
+    /// can do that Desktop cannot.
     pub export_db: bool,
 
-    /// How many of the newest stored messages a **database-only** run re-reads,
+    /// How many of the newest archived messages a Database sync re-reads,
     /// looking for edits, reactions and deletions.
     ///
-    /// Only consulted when nothing else is being written: with HTML or JSON on,
-    /// the run walks the whole history anyway and the database is filled from
-    /// that pass. 0 means "only what is new", which is the fastest sync and the
-    /// one that never notices an edit.
+    /// 0 means "only what is new", which is the fastest sync and the one that
+    /// never notices an edit. Ignored in Classic mode, which always reads
+    /// everything.
     pub reread_window: usize,
 
-    /// Make a database-only run walk the whole history instead of the window,
-    /// so deletions older than the window are noticed.
+    /// Make a Database sync walk the whole history instead of the window.
+    ///
+    /// Needed for anything the window cannot reach: deletions further back than
+    /// `reread_window`, and files an earlier run skipped because the size limit
+    /// or the media switches were set differently at the time. A sync only
+    /// backfills messages it actually re-reads.
     pub reread_all: bool,
 
     // Media
@@ -227,6 +241,21 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Does this run write Desktop-format folders?
+    ///
+    /// The one place the Classic/Database choice is turned into "is there a
+    /// folder", so the engine, both front ends and the "nothing to write" guard
+    /// cannot come to different conclusions about it.
+    pub fn writes_folders(&self) -> bool {
+        !self.export_db && (self.export_html || self.export_json)
+    }
+
+    /// Is there any output at all? A Classic run with both formats unticked
+    /// would read the whole chat and write nothing.
+    pub fn writes_anything(&self) -> bool {
+        self.export_db || self.writes_folders()
+    }
+
     pub fn size_limit_bytes(&self) -> Option<i64> {
         if self.size_limit_mb > 0 {
             // Saturating, because this number comes out of `settings.json` and

@@ -190,36 +190,33 @@ pub fn detail_wanted() -> bool {
 
 /// Does this run read a trailing window instead of the whole history?
 ///
-/// **Decided by the formats, not by a mode switch.** Pulled out as a function
-/// of four booleans because it is the one decision in `run` that changes what
-/// the export *means*, and every way of getting it wrong is silent: read a
-/// window when a folder was wanted and the export is short; read the whole
-/// history every sync and the feature is pointless.
+/// **Database mode is the incremental one; that is the whole point of it.** A
+/// Classic export re-reads the chat from the beginning every time, because it
+/// is producing a complete standalone folder. If Database mode did that too it
+/// would cost exactly as much and save nothing.
 ///
 /// A first sync reads everything (`stored == 0`): there is nothing to window
 /// against, and windowing anyway would store the newest few hundred messages of
 /// a chat and call the archive done.
-pub fn reads_a_window(files: bool, export_db: bool, reread_all: bool, stored: i64) -> bool {
-    export_db && !files && !reread_all && stored > 0
+pub fn reads_a_window(database_mode: bool, reread_all: bool, stored: i64) -> bool {
+    database_mode && !reread_all && stored > 0
 }
 
-/// In a database-only run, is this file worth fetching?
+/// Is this file worth fetching in Database mode?
 ///
-/// Only when the message is new to the archive *and* the bytes are not there
-/// already. Four inputs rather than a `store` lookup, because
-/// `already_stored` cannot answer the whole question on its own: nothing
-/// reaches `blobs` until the pool has run, so two messages in one run carrying
-/// the same file would both pass it and the file would be downloaded twice.
-fn worth_fetching(
-    verdict: Option<tgx_archive::Merge>,
-    file_id: i64,
-    already_queued: bool,
-    already_stored: bool,
-) -> bool {
-    matches!(verdict, Some(tgx_archive::Merge::Inserted))
-        && file_id != 0
-        && !already_queued
-        && !already_stored
+/// **The question is whether the archive has the bytes, not whether the message
+/// is new.** Gating on `Merge::Inserted` looks right and is not: it means a
+/// file is only ever fetched on the run that first saw its message, so anything
+/// missed the first time — media switched off, over the size limit, a download
+/// that failed — is missed for good, and no later sync goes back for it. The
+/// database is supposed to end up holding the files.
+///
+/// `already_stored` cannot answer it alone: nothing reaches `blobs` until the
+/// pool has run, so two messages in one run carrying the same file would both
+/// pass and the file would be downloaded twice. `already_queued` is what this
+/// run has already promised.
+fn worth_fetching(file_id: i64, already_queued: bool, already_stored: bool) -> bool {
+    file_id != 0 && !already_queued && !already_stored
 }
 
 /// A setting, spelled the way a log reader wants to read it.
@@ -590,16 +587,21 @@ impl<'a> ChatExporter<'a> {
             root: root.map(Path::to_path_buf),
             ..Default::default()
         };
-        // The store, if this run has one. Read through a local so every use
-        // below is one `Option` test rather than a field lookup on `self` that
-        // would borrow the exporter across the read loop.
+        // **Classic or Database — the two are a choice, not a set of ticks.**
+        //
+        // Classic writes Desktop's folders and re-reads the chat from the
+        // beginning every time, because it is producing a complete standalone
+        // export. Database writes one accumulating file, holds the media inside
+        // it, and syncs. Letting them run together meant paying for a full
+        // history read on every run and calling the result incremental, which
+        // is the worst of both and was the first thing to go.
+        //
+        // `root` is `None` in Database mode, so `files` and `db` are always
+        // opposites; both names are kept because the code below reads better
+        // saying which of the two facts it depends on.
         let db = self.settings.export_db;
-        // Whether a folder is being written at all. **This is what decides how
-        // much of the history the run reads** — not a mode switch. HTML or JSON
-        // on means the whole thing, so the database is filled from a pass that
-        // was happening anyway.
         let files = root.is_some();
-        let db_only = db && !files;
+        debug_assert_eq!(db, !files, "Classic and Database are exclusive");
         // **One timestamp for the whole run.** Every `first_seen`, `last_seen`
         // and `deleted_seen` this chat writes is the same second, so a query
         // asking "what did that export do" gets one answer rather than a smear
@@ -931,9 +933,9 @@ impl<'a> ChatExporter<'a> {
             let (stored_all, stored_live) = store.message_count(chat.id).await?;
             result.db_archived = stored_all as usize;
             // A first sync has nothing to window against, so it reads
-            // everything — otherwise "tick only Database" on a fresh archive
-            // would store the newest 500 messages and call it done.
-            result.windowed = reads_a_window(files, db, self.settings.reread_all, stored_all);
+            // everything — otherwise a fresh archive would store the newest 500
+            // messages of a chat and call itself done.
+            result.windowed = reads_a_window(db, self.settings.reread_all, stored_all);
             if result.windowed {
                 start = store
                     .window_start(chat.id, self.settings.reread_window)
@@ -955,7 +957,7 @@ impl<'a> ChatExporter<'a> {
                      deletions — older deletions need \"Re-read the whole history\"",
                     self.settings.reread_window
                 )));
-            } else if db_only {
+            } else if db {
                 progress(Progress::Log(
                     "database: reading the whole history, so every deletion is noticed".into(),
                 ));
@@ -1203,14 +1205,13 @@ impl<'a> ChatExporter<'a> {
                             // carrying the same file would both pass it and the
                             // file would be downloaded twice. `queued_files` is
                             // what this run has already promised to fetch.
-                            if db_only {
+                            if db {
                                 if let Some(store) = &self.store {
                                     let fresh: Vec<PendingDownload> = sink.jobs.split_off(before);
                                     for pending in fresh {
                                         let id = pending.job.file_id;
                                         let kind = pending.job.kind;
                                         let wanted = worth_fetching(
-                                            db_verdict,
                                             id,
                                             queued_files.contains(&(id, kind)),
                                             id != 0 && store.has_blob(id, kind).await?,
@@ -1974,48 +1975,50 @@ mod tests {
     }
 
     #[test]
-    fn a_window_is_read_only_when_the_database_is_the_only_output() {
-        // A folder is being written: the whole history, always — that pass is
-        // what fills the database, and it is what lets deletions be noticed.
-        assert!(!reads_a_window(true, true, false, 6643));
-        // Database only, with an archive to window against.
-        assert!(reads_a_window(false, true, false, 6643));
+    fn only_a_database_run_reads_a_window() {
+        // Database mode with an archive to window against: the whole point.
+        assert!(reads_a_window(true, false, 6643));
+        // Classic re-reads the chat from the beginning every time — it is
+        // producing a complete standalone folder.
+        assert!(!reads_a_window(false, false, 6643));
         // The first sync has nothing to window against, so it reads everything.
-        assert!(!reads_a_window(false, true, false, 0));
+        assert!(!reads_a_window(true, false, 0));
         // "Re-read the whole history" overrides the window.
-        assert!(!reads_a_window(false, true, true, 6643));
-        // And with the database off there is no window in the first place.
-        assert!(!reads_a_window(false, false, false, 6643));
+        assert!(!reads_a_window(true, true, 6643));
     }
 
     #[test]
-    fn a_file_already_in_the_database_is_not_downloaded_again() {
-        use tgx_archive::Merge;
-        // The only combination that fetches: a message new to the archive,
-        // carrying a file with an id, not already promised, not already stored.
-        assert!(worth_fetching(Some(Merge::Inserted), 77, false, false));
+    fn a_file_missing_from_the_archive_is_fetched_however_old_its_message_is() {
+        // The question is whether the *archive* has the bytes, never whether
+        // the message is new. Gating on "the message was just inserted" means a
+        // file skipped the first time — media off, over the size limit, a
+        // download that failed — is skipped for good.
+        assert!(worth_fetching(77, false, false));
 
-        // Already stored by an earlier run.
-        assert!(!worth_fetching(Some(Merge::Inserted), 77, false, true));
+        // Already stored by an earlier run: nothing to do.
+        assert!(!worth_fetching(77, false, true));
         // Already promised by an earlier message in *this* run. `has_blob`
         // cannot see this — nothing reaches `blobs` until the pool has run — so
         // without the queue set the file would be fetched twice.
-        assert!(!worth_fetching(Some(Merge::Inserted), 77, true, false));
-        // A message we already had: its media was fetched on the run that
-        // inserted it.
-        assert!(!worth_fetching(Some(Merge::Unchanged), 77, false, false));
-        assert!(!worth_fetching(
-            Some(Merge::Changed {
-                previous_version: 1
-            }),
-            77,
-            false,
-            false
-        ));
+        assert!(!worth_fetching(77, true, false));
         // A stripped thumbnail has no Telegram file id and is never archived.
-        assert!(!worth_fetching(Some(Merge::Inserted), 0, false, false));
-        // And with no database there is no verdict.
-        assert!(!worth_fetching(None, 77, false, false));
+        assert!(!worth_fetching(0, false, false));
+    }
+
+    /// `tgx-archive` may not depend on this crate, so `merge_volatile` matches
+    /// Desktop's "I did not save this" placeholders on their shared prefix
+    /// rather than on these constants. That is the only thing letting a
+    /// re-sync with a raised size limit replace the placeholder with the file
+    /// it finally fetched — so if the strings ever stop starting this way, the
+    /// backfill goes silently back to leaving the payload wrong.
+    #[test]
+    fn the_skip_placeholders_keep_the_shape_the_archive_matches_on() {
+        for placeholder in [plan::NOT_INCLUDED, plan::TOO_LARGE] {
+            assert!(
+                placeholder.starts_with("(File "),
+                "{placeholder:?} no longer matches tgx-archive's SKIPPED_PREFIX"
+            );
+        }
     }
 
     /// How many `Progress::Messages` a chat of `total` messages would send.

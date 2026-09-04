@@ -109,14 +109,20 @@ that goes into `result.json`, strips the presentation-only `_p` key, and hands
 the whole map to the HTML writer. The two cannot drift, and the writer stays
 testable with no connection — which is what makes the html leg possible.
 
-**The database is a fourth output, not a fourth writer.** It is fed the same
-payload the JSON and HTML receive, minus `_p`, and renders nothing. What a run
-*reads* is decided by its formats, not by a mode switch: HTML or JSON on means
-the whole history and every unseen stored message marked deleted; Database alone
-means a sync from the trailing window (`reread_window`, default 500), and
-`reread_all` forces the whole pass. `engine::reads_a_window` is that decision,
-pulled out as a function of four booleans because every way of getting it wrong
-is silent.
+**Classic or Database — the two are exclusive.** `Settings::writes_folders()`
+is the single place that choice becomes "is there a folder", so the engine, both
+front ends and the "nothing to write" guard cannot disagree. Classic writes
+Desktop's folders and re-reads the chat from the beginning every run, because it
+produces a complete standalone export. Database writes one accumulating
+`telegram.sqlite`, media inside, and syncs: what is new plus `reread_window`
+(default 500), with `reread_all` for the whole pass.
+
+Running both was the first design and it is the wrong one: Classic's full
+re-read happens anyway, so the pair costs exactly as much as Classic and is
+incremental in name only.
+
+**The database is fed the same map the writers are**, minus `_p`, and renders
+nothing.
 
 **A windowed run is not a short run.** It reads the newest few hundred messages
 on purpose, so it publishes no `Progress::Total`, sends `expected: 0` and
@@ -126,11 +132,17 @@ as `reached_end || <the count rule>`: `Ok(None)` is how the read loop ends on
 nearly every export, so that `||` silently removes the INCOMPLETE warning from
 all of them.
 
-**The database keeps what a re-read must not rewrite.** `merge_volatile`
-(`tgx-archive`) copies ten volatile keys — the text, the counters, the
-reactions — onto the stored payload and leaves everything else alone. The
-consequence is real and is in ROADMAP: a later converter fix never reaches a
-message already stored.
+**`merge_volatile` decides what a re-read may overwrite.** Ten volatile keys —
+the text, the counters, the reactions — plus any media key whose stored value is
+one of Desktop's `"(File …"` placeholders, which records a refusal to fetch
+rather than what the message carried. Everything else is left alone, so a later
+converter fix never reaches a stored message (in ROADMAP).
+
+**A file is fetched when the archive lacks the bytes, never when the message is
+new.** `worth_fetching` gated on `Merge::Inserted` first, which meant anything
+missed on the run that first saw a message — media off, over the size limit, a
+failed download — was missed for good. A sync backfills, but only for messages
+it re-reads, so the window bounds how far back that reaches.
 
 **One pass per chat, oldest first.** `engine.rs` uses
 `iter_messages(peer).reverse(true)` with a resume loop keyed on `offset_id`,

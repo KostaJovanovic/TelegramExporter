@@ -65,14 +65,14 @@ change:
 | **Split forums by topic** | on | |
 | **Member list** | first 10,000 | Large public channels stop serving the list well before that |
 | **Messages per page** | 1000 | |
-| **Database** | off | One `telegram.sqlite` beside your exports, described below |
+| **Format** | Classic | Classic writes Desktop's folders; Database writes one accumulating file. See below |
 
 ### The database
 
-Ticking **Database** adds a third format alongside HTML and JSON. Unlike those
-two, it does not produce a fresh folder each time: it keeps one
-`telegram.sqlite` beside your exports and merges every run into it, media
-included.
+**Database** is an alternative to the Classic export, not an addition to it.
+Classic writes a fresh folder every run, in Desktop's format. Database keeps one
+`telegram.sqlite` beside your exports and merges each run into it, media
+included — so re-running syncs instead of exporting the whole chat again.
 
 What that buys you is the thing a folder export cannot do. Export a chat today
 and again next month, and the second export simply won't contain whatever was
@@ -82,11 +82,12 @@ versions, and a message Telegram no longer returns stays in the file, marked
 with the date it went missing. **It can only keep what it has already seen**, so
 the first export is what starts the record.
 
-Tick only Database and nothing else, and the run becomes a quick sync: it reads
-what is new plus the newest few hundred messages again, looking for edits and
-deletions, instead of walking the whole history. That is the one to run
-regularly. With HTML or JSON also ticked, the whole history is read anyway and
-the database gets all of it.
+A Database run reads what is new plus the newest few hundred messages again,
+looking for edits and deletions, rather than walking the whole history. That is
+the one to run regularly. It honours the same media settings as Classic, and
+because it only re-reads the newest messages, that is also as far back as it
+will pick up a file an earlier run skipped — **Re-read the whole history**
+catches the rest.
 
 Two options are off on purpose, because they'd make the archive diverge from
 what Telegram Desktop writes: saving link-preview images, and labelling
@@ -122,12 +123,11 @@ And exports are other people's messages as much as yours. Store them like it.
 cargo run -p tgx-tg --bin tgx -- login
 cargo run -p tgx-tg --bin tgx -- chats
 cargo run -p tgx-tg --bin tgx -- export "Dev Team"
-cargo run -p tgx-tg --bin tgx -- export --db "Dev Team"       # folders and database
-cargo run -p tgx-tg --bin tgx -- export --db-only "Dev Team"  # sync, no folders
+cargo run -p tgx-tg --bin tgx -- export --db "Dev Team"   # database instead of folders
 ```
 
-`--full` makes a `--db-only` run walk the whole history rather than the trailing
-window, so deletions older than the window are noticed too.
+`--full` makes a `--db` run walk the whole history rather than the trailing
+window — needed for older deletions, and for files an earlier run skipped.
 
 `TG_API_ID` and `TG_API_HASH` work instead of the settings file.
 
