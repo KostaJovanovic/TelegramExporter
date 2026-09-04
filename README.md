@@ -70,9 +70,11 @@ change:
 ### The database
 
 **Database** is an alternative to the Classic export, not an addition to it.
-Classic writes a fresh folder every run, in Desktop's format. Database keeps one
-`telegram.sqlite` beside your exports and merges each run into it, media
-included — so re-running syncs instead of exporting the whole chat again.
+Classic writes a fresh folder every run, in Desktop's format. Database gives
+each chat its own `<chat name>.sqlite` beside your exports and merges each run
+into it, media included — so re-running syncs instead of exporting the whole
+chat again. Export a supergroup and a private chat and you get two files, each
+holding only that conversation.
 
 What that buys you is the thing a folder export cannot do. Export a chat today
 and again next month, and the second export simply won't contain whatever was

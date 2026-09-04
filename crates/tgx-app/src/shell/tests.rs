@@ -111,20 +111,15 @@ fn an_unreadable_theme_setting_still_opens_a_readable_window() {
 }
 
 #[test]
-fn the_theme_chip_names_the_appearance_it_switches_to() {
-    // A chip reading "LIGHT" that switches to dark is worse than no chip, and
-    // an edited settings file must not be able to produce one: anything that
-    // is not `light` is dark, exactly as `Palette::named` decides.
-    assert_eq!(other_theme("dark"), "light");
-    assert_eq!(other_theme("light"), "dark");
-    assert_eq!(other_theme("chartreuse"), "light");
-    // And the pair really does round-trip, or the chip toggles nothing.
-    assert_eq!(other_theme(other_theme("dark")), "dark");
-    assert_ne!(
-        Palette::named(other_theme("dark")),
-        Palette::named("dark"),
-        "the chip must actually change the palette"
-    );
+fn the_appearance_control_offers_exactly_the_two_palettes_that_exist() {
+    // The control was a chip on the nav bar naming the appearance it switched
+    // *to*; it is a Light / Dark strip in Settings now. What has to hold is
+    // unchanged: every name the strip can hand to `set_theme` must produce the
+    // palette it names, or the control is a label that lies. Asserted on the
+    // names rather than by driving `set_theme`, which writes settings.json.
+    assert_eq!(Palette::named(THEMES[0]), Palette::light());
+    assert_eq!(Palette::named(THEMES[1]), Palette::dark());
+    assert_ne!(Palette::named(THEMES[0]), Palette::named(THEMES[1]));
 }
 
 // -- the count, and its one writer ----------------------------------------
@@ -404,6 +399,92 @@ fn a_stopped_run_is_not_reported_as_a_success() {
     assert!(!s.exporting);
     assert_eq!(s.queue.jobs()[1].state, JobState::Stopped);
     assert!(s.status.as_str().contains("1 not run"), "got {}", s.status);
+}
+
+// -- the queue: clearing, adding, removing ---------------------------------
+
+#[test]
+fn a_stop_empties_the_work_list_as_well_as_marking_the_rows() {
+    // A chat left on `pending` after a Stop would be picked up by the next run
+    // as though it had been asked for again — the rows say Stopped and the
+    // export does it anyway.
+    let mut s = shell_with(vec![chat(1, "a", None), chat(2, "b", None)]);
+    s.exporting = true;
+    s.queue.start([(1, "a".to_string()), (2, "b".to_string())]);
+    s.pending.reset(s.chats.clone());
+    s.stop();
+    s.apply(Event::Finished { stopped: true });
+    assert!(s.pending.is_empty());
+    assert_eq!(s.queue.jobs()[1].state, JobState::Stopped);
+}
+
+#[test]
+fn a_chat_taken_out_of_the_queue_leaves_both_lists() {
+    // The two have to move together: out of the table alone and the export
+    // writes the chat with no row reporting it; out of the work list alone and
+    // a row says Queued for a chat that is never coming.
+    let mut s = shell_with(vec![chat(1, "a", None), chat(2, "b", None)]);
+    s.exporting = true;
+    s.queue.start([(1, "a".to_string()), (2, "b".to_string())]);
+    s.pending.reset(s.chats.clone());
+    s.remove_from_queue(2);
+    assert_eq!(s.queue.len(), 1);
+    assert_eq!(
+        s.pending
+            .snapshot()
+            .iter()
+            .map(|c| c.id)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+}
+
+#[test]
+fn the_chat_in_flight_cannot_be_taken_out_of_the_queue() {
+    // Stop is that row's control. `Queue::remove` refuses it, and the × is not
+    // painted on it either — two statements of one rule, because the second is
+    // a painting decision and the first has to hold whatever the panel does.
+    let mut s = shell_with(vec![chat(1, "a", None)]);
+    s.exporting = true;
+    s.queue.start([(1, "a".to_string())]);
+    s.queue.began(1);
+    s.remove_from_queue(1);
+    assert_eq!(s.queue.len(), 1);
+    assert_eq!(s.queue.jobs()[0].state, JobState::Exporting);
+}
+
+#[test]
+fn a_worker_that_ends_with_work_still_waiting_asks_for_another() {
+    // The one-frame race Add to queue opens: `exporting` is cleared when the
+    // worker's `Finished` is *applied*, a frame after it stopped draining, so a
+    // chat pushed in that window lands on a list nobody is reading. Without the
+    // resume its row says Queued for the rest of the session.
+    //
+    // The **decision** is what is checked, not the spawn: starting a worker
+    // opens a connection to Telegram, so a test that drove `Finished` through
+    // to the end would be a test that goes to the network — which nothing in
+    // this file does. See `actions::export`, which no test here reaches either.
+    let s = shell_with(vec![chat(1, "a", None)]);
+    s.pending.reset(s.chats.clone());
+    assert!(s.should_resume());
+    // A stop outranks it. A fresh worker would start and immediately cancel,
+    // which is a run in the log that never was.
+    s.cancel.cancel();
+    assert!(!s.should_resume());
+}
+
+#[test]
+fn a_finished_run_with_nothing_waiting_really_does_finish() {
+    // The other half of the rule above, driven all the way through because
+    // nothing is queued and so nothing is spawned. A resume that fired on an
+    // empty list would restart the worker after every single run.
+    let mut s = shell_with(vec![chat(1, "a", None)]);
+    s.exporting = true;
+    s.queue.start([(1, "a".to_string())]);
+    assert!(!s.should_resume(), "nothing is waiting");
+    s.apply(Event::Finished { stopped: false });
+    assert!(!s.exporting);
+    assert!(s.status.as_str().contains("Exported"), "got {}", s.status);
 }
 
 #[test]

@@ -113,8 +113,8 @@ tgx — Telegram Desktop-format exporter
   tgx export <title>   export the chat whose title matches
 
   export flags:
-    --db      Database mode instead of folders: sync into
-              Exports/telegram.sqlite, media included
+    --db      Database mode instead of folders: sync into the chat's own
+              Exports/<chat>.sqlite, media included
     --full    with --db, walk the whole history rather than the trailing
               window — needed for older deletions and for files an earlier
               run skipped
@@ -305,7 +305,7 @@ async fn export(settings: &Settings, want: &str) -> Result<()> {
         None
     };
 
-    let mut exporter = ChatExporter::new(&session.client, settings, session.session()).await?;
+    let mut exporter = ChatExporter::new(&session.client, settings, session.session());
     let mut last_line = String::new();
     let mut on_progress = |p: Progress| match p {
         Progress::Total { total, .. } => println!("  telegram counts {total} messages"),

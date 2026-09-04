@@ -16,8 +16,21 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// The one file, for the whole export root.
-pub const FILE_NAME: &str = "telegram.sqlite";
+/// The extension a chat's archive takes.
+///
+/// **One database per chat**, named after the chat — `Dev Team.sqlite` beside
+/// `Mum.sqlite` — so the only part of the name this crate gets to decide is the
+/// suffix. It was the whole name, `telegram.sqlite`, back when one file held
+/// every chat exported into a folder: convenient to open, and a single file
+/// holding several people's conversations, which is not what someone exporting
+/// one chat asked to produce or to hand on.
+///
+/// Which chat a file belongs to is still recorded *inside* it — every table is
+/// keyed by `chat_id` — so nothing about the schema changed, and a file that
+/// somehow ends up holding two chats is readable rather than corrupt. See
+/// [`Store::holds_another_chat`], which is how the exporter keeps that from
+/// happening quietly.
+pub const FILE_EXT: &str = "sqlite";
 
 /// Bumped only when the shape below changes in a way another build would
 /// misread. A build refuses a file it does not know rather than guessing.
@@ -154,7 +167,7 @@ pub enum Error {
     /// the worse one, because the other machine can then no longer open the
     /// export that was just made on this one.
     #[error(
-        "telegram.sqlite is schema version {found}, this build understands {wanted} — use the \
+        "this .sqlite is schema version {found}, this build understands {wanted} — use the \
          build that wrote it, or export to a different folder"
     )]
     Schema { found: i64, wanted: i64 },
@@ -334,6 +347,31 @@ impl Store {
     }
 
     // --- chats and topics ---------------------------------------------------
+
+    /// Does this file already hold a chat that is **not** `chat_id`?
+    ///
+    /// **The one question a per-chat file cannot answer from its name.** Two
+    /// chats can sanitise to the same filename — "Support" and "Support?" both
+    /// become `Support` — and the exporter names a file after the chat because
+    /// a name that changed between runs would turn every sync into a fresh
+    /// archive. So the check is against what the file *contains*: a chat that
+    /// finds somebody else in the file it was about to open takes a
+    /// distinguished name instead, and keeps taking it on every later run
+    /// because the answer here does not change.
+    ///
+    /// Asked of `chats` rather than `messages`, because a chat is recorded on
+    /// the way in — before its first message is merged, and even if it turns
+    /// out to have none. A collision detected only once messages existed would
+    /// let two chats share the empty file that one of them just created.
+    pub async fn holds_another_chat(&self, chat_id: i64) -> Result<bool, Error> {
+        let row = self
+            .row(
+                "SELECT 1 FROM chats WHERE id <> ?1 LIMIT 1",
+                params![chat_id],
+            )
+            .await?;
+        Ok(row.is_some())
+    }
 
     /// `first_seen` is set once and never moved; `last_seen` is this run.
     pub async fn upsert_chat(
@@ -848,6 +886,35 @@ mod tests {
         .as_object()
         .unwrap()
         .clone()
+    }
+
+    #[tokio::test]
+    async fn a_fresh_file_belongs_to_whichever_chat_opens_it() {
+        // The question one database per chat rests on. A file that has never
+        // been written to must not claim to hold somebody else, or the very
+        // first export of every chat would take a suffixed name.
+        let s = store("owner").await;
+        assert!(!s.holds_another_chat(7).await.unwrap());
+        s.upsert_chat(7, "Dev Team", "public_supergroup", 100)
+            .await
+            .unwrap();
+        assert!(!s.holds_another_chat(7).await.unwrap(), "its own chat");
+        // And a second chat finds the first, which is what sends it to a file
+        // of its own rather than into this one.
+        assert!(s.holds_another_chat(8).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_chat_is_recorded_before_it_has_any_messages() {
+        // `holds_another_chat` asks `chats` and not `messages` for exactly
+        // this: a chat that produced nothing still owns the file it created,
+        // so the next chat with the same sanitised title does not adopt it.
+        let s = store("empty-owner").await;
+        s.upsert_chat(7, "Support", "private_group", 100)
+            .await
+            .unwrap();
+        assert_eq!(s.message_count(7).await.unwrap(), (0, 0));
+        assert!(s.holds_another_chat(8).await.unwrap());
     }
 
     #[tokio::test]

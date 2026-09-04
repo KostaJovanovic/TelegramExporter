@@ -91,7 +91,7 @@ convention:
 tgx-format   Desktop's JSON schema, key order, escaping, sizes. No I/O, network or UI.
 tgx-html     the pages, written from serialised maps. MUST NOT depend on grammers-*.
 tgx-media    classification, folder layout, filenames, stripped thumbnails.
-tgx-archive  the database output: telegram.sqlite. MUST NOT depend on grammers-* or tgx-tg.
+tgx-archive  the database output: one <chat>.sqlite per chat. MUST NOT depend on grammers-* or tgx-tg.
 tgx-tg       grammers client, topics, engine, planning, download, enrichment (+ the `tgx` CLI).
 tgx-ui       the design system in egui: tokens, type scale, components, theme.
 tgx-app      the window. Depends only on tgx-ui + tgx-tg.
@@ -114,12 +114,24 @@ is the single place that choice becomes "is there a folder", so the engine, both
 front ends and the "nothing to write" guard cannot disagree. Classic writes
 Desktop's folders and re-reads the chat from the beginning every run, because it
 produces a complete standalone export. Database writes one accumulating
-`telegram.sqlite`, media inside, and syncs: what is new plus `reread_window`
+`<chat>.sqlite`, media inside, and syncs: what is new plus `reread_window`
 (default 500), with `reread_all` for the whole pass.
 
 Running both was the first design and it is the wrong one: Classic's full
 re-read happens anyway, so the pair costs exactly as much as Classic and is
 incremental in name only.
+
+**One database per chat, named after the chat.** `ChatExporter::open_archive`
+opens `<output_dir>/<sanitised title>.sqlite` at the top of every `run` and the
+assignment drops the previous chat's connection. The name has to be *stable* or
+a re-run would start a fresh archive instead of syncing, so it is deliberately
+not `unique_dir` — no `(2)` on a clash. The clash is caught inside the file
+instead: `Store::holds_another_chat` asks whether the `chats` table already
+names somebody else, and if it does the chat id joins the filename, on this run
+and on every later one. `chats` and not `messages`, because a chat is recorded
+before its first message and a chat that exported nothing still owns the file it
+made. A store that will not open now fails **that chat**, not the queue — with a
+file each, the next chat has every chance of working.
 
 **The database is fed the same map the writers are**, minus `_p`, and renders
 nothing.
@@ -257,16 +269,19 @@ gitignored and ACL-restricted on creation (a protection that does not exist on
 FAT32/exFAT). Do not run a live export or read stored credentials without the
 account holder saying so explicitly.
 
-**`Exports/` is not protected, and the database lives there.**
-`<output_dir>/telegram.sqlite` is one file holding every message, every earlier
-version, every participant and the media bytes of every chat exported into that
-root — other people's conversation, in the folder most likely to be copied to a
-drive. It is covered by the `Exports/` line in `.gitignore` like everything else
-there, and it is why `Settings::without_credentials` exists: the run record
-would otherwise carry the `api_hash` and the account's phone number out of the
-one directory that is ACL-restricted. A run that writes no folder still writes
-this file, and a database-only run's scratch tree (`.tgx-scratch/<chat>/<topic>/`)
-lives beside it for the length of the media pass.
+**`Exports/` is not protected, and the databases live there.**
+`<output_dir>/<chat>.sqlite` holds every message of that chat, every earlier
+version, every participant and every media byte — other people's conversation,
+in the folder most likely to be copied to a drive, in the file most likely to be
+handed to somebody on its own. That is why it is one file per chat and not one
+for the account: a file named after one conversation must not carry the others
+exported beside it. They are covered by the `Exports/` line in `.gitignore` like
+everything else there, and it is why `Settings::without_credentials` exists: the
+run record would otherwise carry the `api_hash` and the account's phone number
+out of the one directory that is ACL-restricted. A run that writes no folder
+still writes these files, and a database-only run's scratch tree
+(`.tgx-scratch/<chat>/<topic>/`) lives beside them for the length of the media
+pass.
 
 `ensure_data_dir` needs three guards that are easy to drop: `CREATE_NO_WINDOW`,
 a once-per-process flag, and an **absolute `System32\icacls.exe` path** — a

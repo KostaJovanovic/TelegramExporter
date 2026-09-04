@@ -469,6 +469,136 @@ fn paint_tick(ui: &Ui, rect: egui::Rect, ticked: bool, enabled: bool, hovered: b
     );
 }
 
+/// An exclusive choice, drawn as a strip of joined hairline cells.
+///
+/// **This is what "either / or" looks like here.** Two tick boxes that untick
+/// each other say the same thing, and that is what the Format section used to
+/// do — but a tick box promises independence, so a pair that does not behave
+/// independently is a control lying about its own kind. There is no radio in
+/// this design and adding one for two options would be a component built for a
+/// single call site; a strip where exactly one cell is filled is the same
+/// statement in primitives the design already has.
+///
+/// **Never `primary`.** The one red belongs to the run — see [`button`] — and a
+/// mode switch is not one.
+///
+/// Returns the index pressed, and **only when it is not already selected**:
+/// pressing the mode you are in is not a change, and reporting it as one writes
+/// `settings.json` on every stray click.
+pub fn segmented(
+    ui: &mut Ui,
+    options: &[&str],
+    selected: usize,
+    palette: &Palette,
+) -> Option<usize> {
+    let mut chosen = None;
+    ui.horizontal(|ui| {
+        // Joined, not spaced. A gap between two cells makes them two controls.
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for (i, label) in options.iter().enumerate() {
+            let on = i == selected;
+            let caption = egui::RichText::new(*label)
+                .font(fonts::sans(window::READING))
+                .color(if on { palette.fg } else { palette.muted });
+            // `surface` for the chosen cell, which is the one thing that colour
+            // means: a row that is selected. See the module docs.
+            let (fill, edge) = if on {
+                (palette.surface, palette.hairline)
+            } else {
+                (palette.bg, palette.rule)
+            };
+            let cell = egui::Button::new(caption)
+                .corner_radius(radius())
+                .fill(fill)
+                .stroke(Stroke::new(1.0_f32, edge));
+            let hit = ui.add(cell).on_hover_cursor(CursorIcon::PointingHand);
+            if hit.clicked() && !on {
+                chosen = Some(i);
+            }
+        }
+    });
+    chosen
+}
+
+/// The `[?]` a setting hangs its explanation on.
+///
+/// **Literally three characters** — bracket, question mark, bracket — in the
+/// mono, muted. Not a glyph and not an icon: `default_fonts` is off and this
+/// window registers two Latin faces with nothing behind them, so a character
+/// outside them draws as the replacement box. That is what [`disclosure`] is
+/// painted for. `[`, `?` and `]` are ASCII and cannot go missing.
+///
+/// **A popup rather than a sentence under the control.** The settings panel
+/// carried its explanations inline, and eight paragraphs interleaved with
+/// twenty-five switches is what made it read as cluttered — the prose competed
+/// with the controls and neither could be scanned. Not a tooltip either: a
+/// hover is not discoverable, and on a touchpad it means holding still. A mark
+/// that says *press me for the reason* is both findable and quiet.
+///
+/// `key` is the setting's own name and **is** the popup's identity. It must not
+/// be left to the auto-id: the panel shows a different set of rows in each
+/// mode, so an id derived from position would hand a popup to a different
+/// setting the moment the mode changed.
+pub fn help(ui: &mut Ui, key: &str, sentence: &str, palette: &Palette) {
+    let mark = egui::RichText::new("[?]")
+        .font(fonts::mono(window::LABEL))
+        .color(palette.muted);
+    let hit = action(ui, mark, true);
+    let _ = egui::Popup::from_toggle_button_response(&hit)
+        .id(egui::Id::new(("tgx-help", key)))
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .width(HELP_WIDTH)
+        .gap(4.0)
+        // The window's own frame, not egui's: `Frame::popup` is a rounded panel
+        // with a shadow, which is two of the three things `theme::install`
+        // exists to take off everything else.
+        .frame(
+            egui::Frame::NONE
+                .fill(palette.bg)
+                .stroke(Stroke::new(1.0_f32, palette.hairline))
+                .inner_margin(Margin::same(12)),
+        )
+        .show(|ui| {
+            ui.set_max_width(HELP_WIDTH);
+            ui.label(meta(sentence, palette));
+        });
+}
+
+/// The × that takes a row out of the queue.
+///
+/// **Painted, not typed**, for [`disclosure`]'s reason: `\u{00d7}` is one
+/// character outside the two registered faces away from drawing as nothing at
+/// all, and two line segments cannot go missing.
+///
+/// Disabled paints **nothing**. A greyed × on the row that is currently
+/// exporting would be one more mark in a table of numbers, offering something
+/// it will not do; an empty cell says the same thing and says it silently.
+/// Stop is the control for the chat that is running.
+pub fn dismiss(ui: &mut Ui, enabled: bool, palette: &Palette) -> Response {
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::splat(window::READING),
+        if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
+    if enabled {
+        let ink = if response.hovered() {
+            palette.fg
+        } else {
+            palette.muted
+        };
+        let arms = rect.shrink(3.0);
+        let stroke = Stroke::new(1.0_f32, ink);
+        let painter = ui.painter();
+        painter.line_segment([arms.left_top(), arms.right_bottom()], stroke);
+        painter.line_segment([arms.right_top(), arms.left_bottom()], stroke);
+        return response.on_hover_cursor(CursorIcon::PointingHand);
+    }
+    response
+}
+
 /// The disclosure marker on a category heading: ▸ folded, ▾ open.
 ///
 /// **Painted, not typed, and that is a fix rather than a preference.** It was
@@ -513,6 +643,13 @@ pub fn disclosure(ui: &mut Ui, folded: bool, palette: &Palette) -> Response {
 /// box aligned with the label — the kind of half-point mismatch that makes a
 /// row look assembled rather than laid out.
 const TICK_SIZE: f32 = window::READING;
+
+/// How wide a [`help`] popup is.
+///
+/// Wide enough for three lines of the small print, narrow enough that a
+/// sentence stays a sentence: run across a maximised window a paragraph becomes
+/// one 1,400-point line that the eye cannot get back to the start of.
+const HELP_WIDTH: f32 = 320.0;
 
 /// The share of the track an indeterminate bar paints.
 ///
@@ -917,6 +1054,153 @@ mod tests {
         });
         assert!(live.get());
         assert!(!dead.get());
+    }
+
+    /// Press the `[?]` and see whether anything opens.
+    ///
+    /// **Driven through a real `Context`, because there is nothing else that
+    /// can check it.** The popup is the whole reason twenty-five explanations
+    /// could come off the settings panel, and a mark that painted correctly and
+    /// opened nothing would look exactly like one that worked — the same shape
+    /// of defect as the tick box that was drawn on top of the row and swallowed
+    /// its click, which shipped because nobody could see it either. The window
+    /// cannot be photographed from outside (see `shell::shot`), so this is the
+    /// check that exists.
+    ///
+    /// `theme::install` first: `default_fonts` is off in this design and the
+    /// mark is set in a family only that call registers.
+    #[test]
+    fn pressing_the_help_mark_opens_a_popup_and_pressing_it_again_closes_it() {
+        let palette = Palette::dark();
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &palette);
+        let id = egui::Id::new(("tgx-help", "size_limit"));
+        let at = Cell::new(egui::Pos2::ZERO);
+
+        let frame = |press: bool| {
+            let mut input = egui::RawInput::default();
+            if press {
+                let pos = at.get();
+                input.events.push(egui::Event::PointerMoved(pos));
+                for pressed in [true, false] {
+                    input.events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    });
+                }
+            }
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let before = ui.next_widget_position();
+                    help(
+                        ui,
+                        "size_limit",
+                        "Files over this are not downloaded.",
+                        &palette,
+                    );
+                    at.set(before + egui::vec2(4.0, 4.0));
+                });
+            });
+        };
+
+        // One frame to lay it out and learn where the mark landed.
+        frame(false);
+        assert!(!egui::Popup::is_id_open(&ctx, id), "open before any click");
+        frame(true);
+        assert!(
+            egui::Popup::is_id_open(&ctx, id),
+            "the [?] painted and opened nothing"
+        );
+        // And it is a toggle, not a one-way door: the same press closes it,
+        // which is the only way to dismiss one with the pointer still on it.
+        frame(true);
+        assert!(!egui::Popup::is_id_open(&ctx, id));
+    }
+
+    /// A press somewhere in a rect, or nothing.
+    ///
+    /// Shared by the three controls below, all of which have the same problem:
+    /// they paint and they are new, so the only way to know they *do* anything
+    /// is to press them.
+    fn press(at: Option<egui::Pos2>) -> egui::RawInput {
+        let mut input = egui::RawInput::default();
+        if let Some(pos) = at {
+            input.events.push(egui::Event::PointerMoved(pos));
+            for pressed in [true, false] {
+                input.events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                });
+            }
+        }
+        input
+    }
+
+    #[test]
+    fn a_segmented_strip_reports_the_cell_pressed_and_not_the_one_already_chosen() {
+        // Pressing the mode you are in is not a change. Reported as one it
+        // would rewrite settings.json on every stray click — and, because the
+        // Settings panel replaces its rows on a mode change, redraw the whole
+        // section under the pointer for no reason.
+        let palette = Palette::dark();
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &palette);
+        let (left, right, got) = (Cell::new(None), Cell::new(None), Cell::new(None));
+
+        let frame = |at: Option<egui::Pos2>| {
+            let _ = ctx.run(press(at), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    // Wrapped so there is a response whose rect is the strip's
+                    // own: the panel's `min_rect` is the panel's width, which
+                    // put "the right-hand cell" a long way to the right of both.
+                    let laid =
+                        ui.horizontal(|ui| segmented(ui, &["Classic", "Database"], 0, &palette));
+                    got.set(laid.inner);
+                    let strip = laid.response.rect;
+                    let y = strip.center().y;
+                    left.set(Some(egui::pos2(strip.left() + strip.width() * 0.25, y)));
+                    right.set(Some(egui::pos2(strip.left() + strip.width() * 0.75, y)));
+                });
+            });
+        };
+
+        frame(None);
+        assert_eq!(got.get(), None, "nothing was pressed");
+        frame(right.get());
+        assert_eq!(got.get(), Some(1), "the second cell did nothing");
+        frame(left.get());
+        assert_eq!(got.get(), None, "the cell already chosen reported a change");
+    }
+
+    #[test]
+    fn a_dismiss_takes_a_click_when_it_is_live_and_none_when_it_is_not() {
+        // The × on a queue row. Disabled it paints nothing at all, which is the
+        // right look for the row that is exporting — and would be an
+        // indistinguishable look for a × that had quietly stopped working.
+        let palette = Palette::dark();
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &palette);
+        let (at, hit) = (Cell::new(None), Cell::new(false));
+
+        let frame = |live: bool, press_at: Option<egui::Pos2>| {
+            let _ = ctx.run(press(press_at), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let mark = dismiss(ui, live, &palette);
+                    at.set(Some(mark.rect.center()));
+                    hit.set(mark.clicked());
+                });
+            });
+        };
+
+        frame(true, None);
+        frame(true, at.get());
+        assert!(hit.get(), "a live × did not take the click");
+        frame(false, at.get());
+        assert!(!hit.get(), "a dead × took one");
     }
 
     #[test]

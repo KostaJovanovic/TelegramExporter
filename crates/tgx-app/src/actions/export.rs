@@ -89,17 +89,18 @@ where
     }
 }
 
-/// Export every selected chat, in queue order.
+/// Export every queued chat, in queue order.
 ///
 /// **Per-chat tallies live on the result, never on a shared counter** — see
 /// `tgx_tg::engine::ExportResult`. This function keeps nothing across chats
-/// except the queue position.
-pub async fn export(
-    settings: Settings,
-    chats: Vec<tgx_tg::client::ChatInfo>,
-    cancel: Cancel,
-    tx: Events,
-) {
+/// except the resolved peers.
+///
+/// **The work list is shared, not a snapshot.** It used to be a `Vec` handed
+/// over at spawn time, which made a run a fixed set of chats: adding one meant
+/// stopping and starting again, and losing whatever was in flight. Popping from
+/// [`Pending`] instead means the window can push while this loop runs, and a ×
+/// on a queued row removes a chat this loop then never sees.
+pub async fn export(settings: Settings, pending: Pending, cancel: Cancel, tx: Events) {
     use tgx_tg::engine::{ChatExporter, Progress};
 
     let session = match Session::connect(&settings).await {
@@ -123,8 +124,12 @@ pub async fn export(
     // chat — twenty full sweeps for a twenty-chat queue, to answer twenty
     // questions that one response already contains, which is exactly the
     // pattern that earns a flood wait before the export has written a byte.
-    let ids: Vec<i64> = chats.iter().map(|c| c.id).collect();
-    let peers = match dialogs::peer_refs_for(&session.client, &ids, &cancel).await {
+    //
+    // Read off the list rather than from an argument: what is waiting *now* is
+    // what this sweep has to cover, and anything added later is picked up by
+    // the one below.
+    let ids: Vec<i64> = pending.snapshot().iter().map(|c| c.id).collect();
+    let mut peers = match dialogs::peer_refs_for(&session.client, &ids, &cancel).await {
         Ok(p) => p,
         Err(e) => {
             // A transport failure here is not "these chats are gone" — that
@@ -140,38 +145,59 @@ pub async fn export(
         }
     };
 
-    // **Once for the whole queue**, like the one Telegram connection — and a
-    // database that will not open ends the queue rather than each chat, for the
-    // same reason an unwritable output folder does: every later chat would fail
-    // in exactly the same way.
-    let mut exporter = match ChatExporter::new(&session.client, &settings, session.session()).await
-    {
-        Ok(e) => e,
-        Err(e) => {
-            let _ = tx.send(Event::Failed {
-                activity: Activity::Export,
-                message: format!("cannot open the database: {e}"),
-            });
-            let _ = tx.send(Event::Finished { stopped: true });
-            return;
-        }
-    };
+    // **Once for the whole queue**, like the one Telegram connection: it holds
+    // the name book and the peer cache, which mean the same thing in every
+    // chat. The database no longer opens here — there is one file per chat and
+    // `run` opens it, so a database that will not open fails that chat and the
+    // queue carries on.
+    let mut exporter = ChatExporter::new(&session.client, &settings, session.session());
 
-    for chat in &chats {
+    // **Popped, not iterated.** The list is the window's too, so its length is
+    // not known here and can grow between two turns of this loop.
+    while let Some(chat) = pending.take_next() {
         if cancel.is_cancelled() {
             break;
         }
+        let chat = &chat;
         let _ = tx.send(Event::ChatStarted {
             chat_id: chat.id,
             title: chat.title.clone(),
         });
 
-        let Some(peer) = peers.get(&chat.id).copied() else {
-            let _ = tx.send(Event::ChatFailed {
-                chat_id: chat.id,
-                message: "no longer in the dialog list".into(),
-            });
-            continue;
+        let peer = match peers.get(&chat.id).copied() {
+            Some(p) => p,
+            None => {
+                // Queued after the run began, so the sweep above ran before
+                // anyone asked for it. Swept for **everything now waiting**
+                // rather than for this chat alone: a queue added to five times
+                // would otherwise pay five passes over the whole dialog list,
+                // which is the cost this sweep exists to avoid.
+                let mut later: Vec<i64> = pending.snapshot().iter().map(|c| c.id).collect();
+                later.push(chat.id);
+                match dialogs::peer_refs_for(&session.client, &later, &cancel).await {
+                    Ok(found) => peers.extend(found),
+                    Err(e) => {
+                        // One chat's failure, not the queue's: the first sweep
+                        // succeeded, so the connection worked a moment ago and
+                        // the chats behind this one deserve their turn.
+                        let _ = tx.send(Event::ChatFailed {
+                            chat_id: chat.id,
+                            message: format!("listing chats: {e}"),
+                        });
+                        continue;
+                    }
+                }
+                match peers.get(&chat.id).copied() {
+                    Some(p) => p,
+                    None => {
+                        let _ = tx.send(Event::ChatFailed {
+                            chat_id: chat.id,
+                            message: "no longer in the dialog list".into(),
+                        });
+                        continue;
+                    }
+                }
+            }
         };
 
         // Whether this chat is genuinely split into topic folders. Held rather

@@ -1,5 +1,17 @@
 # Database output: a third export format that accumulates across runs
 
+> **This document is the work order as it was written, kept as the record of
+> what was planned. It has been carried out, and two decisions in it were
+> reversed afterwards — read `CLAUDE.md` for what the code actually does.**
+>
+> 1. **Not a third format alongside HTML and JSON.** Classic and Database are
+>    exclusive: Classic re-reads the whole chat anyway, so running both cost
+>    exactly what Classic cost and was incremental in name only.
+> 2. **Not one file for the export root.** One `<chat>.sqlite` per chat. A
+>    database is the thing most likely to be handed to somebody, and a file
+>    named after one conversation must not carry every other chat exported into
+>    the same folder.
+
 This is a self-contained work order. Read `CLAUDE.md` first; everything it says
 still holds. Do the steps in order, run `save.bat test` after each step, and do
 not start the next step until the suite and the three corpus legs are green at

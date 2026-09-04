@@ -19,7 +19,7 @@ mod chats;
 mod chrome;
 mod commands;
 mod events;
-mod run;
+mod queue;
 mod settings;
 mod signin;
 
@@ -27,6 +27,7 @@ use crate::bridge::{Activity, Bridge, Event};
 use crate::journal::Journal;
 use crate::list::{self, Category, SortMode};
 use crate::login::{LoginDialog, Stage};
+use crate::pending::Pending;
 use crate::queue::Queue;
 use crate::settings_form::SettingsForm;
 use eframe::egui::{self, Context};
@@ -58,18 +59,24 @@ pub enum View {
     Chats,
     /// Where it goes and what it contains.
     Settings,
-    /// What a run is doing: the queue, the bar and the log.
-    Run,
+    /// The queue: what a run has to do, what it is doing, and the log.
+    ///
+    /// **Named for the thing, not for the activity.** It was `Run`, and the
+    /// panel inside it has always been headed QUEUE — so the tab and the thing
+    /// it opened had two different names, and the one the user could act on
+    /// (rows they can add to and take out of) was the one that was not on the
+    /// tab.
+    Queue,
 }
 
 impl View {
-    pub const ALL: [View; 3] = [View::Chats, View::Settings, View::Run];
+    pub const ALL: [View; 3] = [View::Chats, View::Settings, View::Queue];
 
     pub fn label(self) -> &'static str {
         match self {
             View::Chats => "Chats",
             View::Settings => "Settings",
-            View::Run => "Run",
+            View::Queue => "Queue",
         }
     }
 }
@@ -164,6 +171,14 @@ pub struct Shell {
     failure: Option<String>,
     journal: Journal,
     queue: Queue,
+    /// The same run's work list, as the worker sees it.
+    ///
+    /// [`Queue`] above is what the table paints — one row per chat, including
+    /// the ones that have already finished. This is what is *left to do*, and
+    /// the export worker pops from it. Two structures because they answer two
+    /// questions, and every writer touches both: `start_export` seeds them,
+    /// the × on a row removes from both. See [`crate::pending`].
+    pending: Pending,
     /// Chats counted so far, and how many there are. Separate from the export's
     /// progress because **one bar has two claimants** and the export owns it.
     count_progress: Option<(usize, usize)>,
@@ -271,6 +286,7 @@ impl Shell {
             failure: None,
             journal: Journal::default(),
             queue: Queue::default(),
+            pending: Pending::new(),
             count_progress: None,
             login: None,
             log_copied: false,
@@ -475,7 +491,7 @@ impl Shell {
 /// `u32`s. Raw because a PNG encoder is a dependency this app has no other use
 /// for; `tools/shot.ps1` turns it into an image.
 ///
-/// `TGX_SHOT_VIEW=chats|settings|run` picks which view to draw first.
+/// `TGX_SHOT_VIEW=chats|settings|queue` picks which view to draw first.
 ///
 /// Nothing here runs unless the variable is set, and it is read once.
 mod shot {
@@ -493,7 +509,7 @@ mod shot {
         match std::env::var("TGX_SHOT_VIEW").ok()?.as_str() {
             "chats" => Some(View::Chats),
             "settings" => Some(View::Settings),
-            "run" => Some(View::Run),
+            "queue" => Some(View::Queue),
             _ => None,
         }
     }
@@ -567,20 +583,19 @@ impl eframe::App for Shell {
         // than behind it. Do not add it back without solving both.
         let bare = egui::Frame::NONE.fill(p.bg);
 
+        // **One bar, because there were two and they read as two menus.** See
+        // [`Shell::top_bar`]: where you are on the left, what to do on the
+        // right, one hairline under the lot.
+        //
         // **An exact height, because `Ui::set_height` does not give one.** The
         // bar asked for `NAV_HEIGHT` from the inside and the panel still sized
         // itself to its contents, so five 30pt buttons sat in a 34pt strip with
         // their tops against the edge of the window.
-        egui::TopBottomPanel::top("nav")
+        egui::TopBottomPanel::top("top")
             .frame(bare)
             .exact_height(tgx_ui::tokens::metrics::NAV_HEIGHT)
             .show_separator_line(false)
-            .show(ctx, |ui| self.nav_bar(ui));
-
-        egui::TopBottomPanel::top("views")
-            .frame(bare)
-            .show_separator_line(false)
-            .show(ctx, |ui| self.view_bar(ui));
+            .show(ctx, |ui| self.top_bar(ui));
 
         egui::TopBottomPanel::bottom("status")
             .frame(bare)
@@ -594,7 +609,7 @@ impl eframe::App for Shell {
             .show(ctx, |ui| match self.body {
                 View::Chats => self.chat_panel(ui),
                 View::Settings => self.settings_panel(ui),
-                View::Run => self.run_panel(ui),
+                View::Queue => self.queue_view(ui),
             });
 
         // Last, so it takes its clicks before anything under it does.
@@ -617,19 +632,13 @@ impl eframe::App for Shell {
     }
 }
 
-/// The appearance the theme chip switches *to*.
+/// The two appearances, in the order the Settings panel offers them.
 ///
-/// **Anything that is not `light` is dark**, matching `Palette::named`, so an
-/// edited settings file cannot leave the chip promising an appearance the
-/// palette will not produce — a chip reading "LIGHT" that switches to dark is
-/// worse than no chip.
-fn other_theme(name: &str) -> &'static str {
-    if name == "light" {
-        "dark"
-    } else {
-        "light"
-    }
-}
+/// **The names are `Palette::named`'s own**, so a settings file cannot leave the
+/// control promising an appearance the palette will not produce. Anything else
+/// in the file falls back to dark — see `Palette::named` — and the segmented
+/// control then shows Dark, which is what is actually on screen.
+pub(super) const THEMES: [&str; 2] = ["light", "dark"];
 
 /// **Quitting mid-export cancels, and then waits.**
 ///

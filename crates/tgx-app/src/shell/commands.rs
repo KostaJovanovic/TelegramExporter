@@ -134,23 +134,39 @@ impl Shell {
         self.count_progress = None;
     }
 
+    /// Start a run, **or add to the one already going**.
+    ///
+    /// One button, two questions, and which is being asked is decided here and
+    /// nowhere else. The bar's third cell says which — "Start export" idle,
+    /// "Add to queue" mid-run — so the branch below is not a hidden mode.
+    ///
+    /// **A finished run is cleared before the next one begins.** Not doing so
+    /// left an hour-old row sitting above the run that was actually happening,
+    /// with its own counts, its own folder and a state that read as current.
+    /// Both lists go: [`Queue::start`] replaces the table, and
+    /// [`Pending::reset`] replaces the worker's work list.
     pub(super) fn start_export(&mut self) {
         // Whatever is in the fields is what the run should use, so the fields
         // are read here rather than trusted to have been committed already.
         self.commit_settings();
         if !self.settings.writes_anything() {
             self.journal
-                .warn("Nothing to write: pick HTML, JSON or Database under Format.");
+                .warn("Nothing to write: pick HTML or JSON under Classic, or choose Database.");
             self.status = "No output format selected".into();
             return;
         }
-        let queue: Vec<ChatInfo> = self
+        let picked: Vec<ChatInfo> = self
             .chats
             .iter()
             .filter(|c| self.selected.contains(&c.id))
             .cloned()
             .collect();
-        if queue.is_empty() {
+        if picked.is_empty() {
+            return;
+        }
+
+        if self.exporting {
+            self.add_to_run(picked);
             return;
         }
 
@@ -164,21 +180,56 @@ impl Shell {
         // is what the window should be showing. `suggest`, not `show`, so
         // looking at Settings mid-export is not undone on the next event.
         self.body_pinned = false;
-        self.suggest(View::Run);
+        self.suggest(View::Queue);
         self.queue
-            .start(queue.iter().map(|c| (c.id, c.title.clone())));
-        self.status = format!("Exporting {} chats…", queue.len());
+            .start(picked.iter().map(|c| (c.id, c.title.clone())));
+        self.pending.reset(picked.clone());
+        self.status = format!("Exporting {} chats…", picked.len());
         self.journal.push(format!(
             "Starting {} export(s) into {}",
-            queue.len(),
+            picked.len(),
             self.settings.output_dir
         ));
+        self.spawn_export();
+    }
 
+    /// Put more chats into a run that is already going.
+    ///
+    /// **Both lists, and only the ones the queue actually took.**
+    /// [`Queue::append`] refuses a chat that is already waiting or in flight
+    /// and re-queues one whose row has finished; pushing the whole selection
+    /// into `pending` regardless would export the chats in flight a second
+    /// time, with one row between them.
+    fn add_to_run(&mut self, picked: Vec<ChatInfo>) {
+        let queued = self
+            .queue
+            .append(picked.iter().map(|c| (c.id, c.title.clone())));
+        if queued.is_empty() {
+            self.status = "Already queued".into();
+            return;
+        }
+        self.pending
+            .extend(picked.into_iter().filter(|c| queued.contains(&c.id)));
+        let n = queued.len();
+        let chats = if n == 1 { "chat" } else { "chats" };
+        self.status = format!("Added {n} {chats} to the queue");
+        self.journal
+            .push(format!("Added {n} {chats} to the run in progress"));
+        self.log_copied = false;
+    }
+
+    /// Hand the work list to a worker.
+    ///
+    /// Split out because [`Shell::resume_if_more_queued`] needs the same three
+    /// lines: a run whose worker has finished while chats were being added is
+    /// restarted rather than left with rows nothing will ever reach.
+    pub(super) fn spawn_export(&mut self) {
         let tx = self.bridge.sender();
         let settings = self.settings.clone();
         let cancel = self.cancel.clone();
+        let pending = self.pending.clone();
         self.bridge
-            .spawn(async move { crate::actions::export(settings, queue, cancel, tx).await });
+            .spawn(async move { crate::actions::export(settings, pending, cancel, tx).await });
     }
 
     /// Ask the run to stop, and **wait for it to say it has**.

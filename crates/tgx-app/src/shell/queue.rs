@@ -1,10 +1,14 @@
 //! What a run is doing: the queue table, the progress bar and the log.
+//!
+//! **This is the panel; `crate::queue` is the model it paints.** Same word,
+//! two layers: `Queue` and `Job` hold the state and are testable without a
+//! window, and everything here is layout and clicks.
 
 use super::*;
 use eframe::egui::{Align, Layout, Sense, Ui};
 use egui_extras::{Column, TableBuilder};
 use tgx_ui::components::{
-    action, block, caps, eyebrow, figure, progress_bar, row, rule, text, thousands, title,
+    action, block, caps, dismiss, eyebrow, figure, progress_bar, row, rule, text, thousands, title,
     EmptyState,
 };
 use tgx_ui::tokens::{space, window};
@@ -38,6 +42,8 @@ const MEDIA_W: f32 = 88.0;
 /// what it should protect is a title long enough to recognise rather than the
 /// first two characters of one.
 const CHAT_MIN_W: f32 = 240.0;
+/// The × column. One control wide, and the table's own gap either side of it.
+const REMOVE_W: f32 = tgx_ui::tokens::window::READING;
 const COLUMN_GAP: f32 = space::TIGHT;
 
 /// One queue row, and the header above it.
@@ -60,7 +66,7 @@ impl Shell {
     /// the log's share is a *default* the user can drag, which is the right
     /// answer to a split whose better position depends on whether an export is
     /// running.
-    pub(super) fn run_panel(&mut self, ui: &mut Ui) {
+    pub(super) fn queue_view(&mut self, ui: &mut Ui) {
         let p = self.palette;
         let bare = egui::Frame::NONE.fill(p.bg);
 
@@ -110,7 +116,7 @@ impl Shell {
         if self.queue.is_empty() {
             EmptyState::new(
                 "Nothing queued",
-                Some("Tick the chats you want on the left, then choose Start export.".into()),
+                Some("Tick the chats you want under Chats, then press Start export.".into()),
             )
             // A short panel drops the hint and keeps the headline.
             .show(ui, &p, false);
@@ -121,6 +127,7 @@ impl Shell {
         // cannot be held across it.
         let jobs: Vec<crate::queue::Job> = self.queue.jobs().to_vec();
         let mut opened = None;
+        let mut removed = None;
         ui.add_space(space::TIGHT);
         block(ui, |ui| {
             // The table takes its column gap from the ui's own spacing.
@@ -139,10 +146,13 @@ impl Shell {
                 .column(Column::exact(COUNT_W))
                 .column(Column::exact(TOPICS_W))
                 .column(Column::exact(MEDIA_W))
+                .column(Column::exact(REMOVE_W))
                 .header(HEADER_H, |mut header| {
                     // Uppercase headers, letterspaced, because a column of
-                    // counts needs its label to read as a label.
-                    for label in ["Chat", "Status", "Messages", "Topics", "Media"] {
+                    // counts needs its label to read as a label. The last one
+                    // is blank: a heading over a column of × would be naming
+                    // the control rather than the data, and there is no data.
+                    for label in ["Chat", "Status", "Messages", "Topics", "Media", ""] {
                         header.col(|ui| {
                             ui.label(eyebrow(label, &p));
                         });
@@ -181,6 +191,24 @@ impl Shell {
                                 ui.label(figure(n, &p));
                             });
                         }
+                        // **Take this one out of the run.** Offered on every
+                        // row but the one exporting — see `Queue::remove` for
+                        // why that one is Stop's business.
+                        //
+                        // **It sits inside a click-sensing row and that is the
+                        // point.** egui gives a click to the topmost widget
+                        // that wants one, so the × takes it and the row does
+                        // not open a folder underneath. This is the same
+                        // mechanism that broke the chat list's tick box, used
+                        // deliberately and in the direction that is wanted:
+                        // there the box had to stay out of the row's way, here
+                        // it has to get in it.
+                        let live = !running;
+                        r.col(|ui| {
+                            if dismiss(ui, live, &p).clicked() {
+                                removed = Some(job.chat_id);
+                            }
+                        });
                         if job.root.is_some() && r.response().clicked() {
                             opened = Some(job.chat_id);
                         }
@@ -195,6 +223,36 @@ impl Shell {
                 }
             }
         }
+        if let Some(chat_id) = removed {
+            self.remove_from_queue(chat_id);
+        }
+    }
+
+    /// Drop a chat from the run — **from both lists, in this order**.
+    ///
+    /// `pending` is what the worker pops from and `queue` is what the table
+    /// paints, and a removal that reached only one of them is worse than none:
+    /// take it out of the table alone and the export writes the chat anyway
+    /// with no row reporting it, take it out of the work list alone and a row
+    /// sits at Queued for a chat that is never coming. `pending` first, so the
+    /// worker cannot pick it up in the window between the two.
+    ///
+    /// Removing the chat that is exporting is refused by `Queue::remove`, and
+    /// the × is not drawn on that row either — two statements of one rule,
+    /// because the second is a painting decision and the first has to hold
+    /// whatever the panel does.
+    pub(super) fn remove_from_queue(&mut self, chat_id: i64) {
+        let title = self.queue.title_of(chat_id).unwrap_or_default().to_string();
+        self.pending.remove(chat_id);
+        if !self.queue.remove(chat_id) {
+            // Refused, so the chat is in flight — and it was not in `pending`
+            // either, because the worker popped it before it began. The two
+            // lists are still in step and there is nothing to undo.
+            return;
+        }
+        self.journal
+            .push(format!("{title}: taken out of the queue"));
+        self.log_copied = false;
     }
 
     /// **One bar, two claimants.** The export claims it; while it is claimed

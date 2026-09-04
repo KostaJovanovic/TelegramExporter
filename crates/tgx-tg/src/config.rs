@@ -95,10 +95,10 @@ pub struct Settings {
     ///
     /// Classic writes a fresh, complete folder every run: a photograph of the
     /// chat as it is now, in Desktop's format, byte for byte. Database writes
-    /// one accumulating `telegram.sqlite` for the whole export root, with the
-    /// media inside it — new messages are added, an edited message keeps its
-    /// earlier versions, and a message Telegram stops returning stays, marked
-    /// with the date it went missing.
+    /// **one accumulating `<chat>.sqlite` per chat**, with the media inside it
+    /// — new messages are added, an edited message keeps its earlier versions,
+    /// and a message Telegram stops returning stays, marked with the date it
+    /// went missing.
     ///
     /// **The two are a choice, not a pair of ticks.** Running both meant paying
     /// for a full history read on every run — Classic has to re-read the chat
@@ -350,8 +350,8 @@ impl Settings {
     /// credentials taken out**.
     ///
     /// The database records the settings of every run so "why is this export
-    /// different from the last one" has an answer a year later. But
-    /// `telegram.sqlite` lives in `Exports/`, which is the folder people copy
+    /// different from the last one" has an answer a year later. But a chat's
+    /// `.sqlite` lives in `Exports/`, which is the folder people copy
     /// to a drive and mail to somebody — and `Settings` starts with `api_id`,
     /// `api_hash` and `phone`. `TelegramExporterData/` is ACL-restricted for
     /// exactly this reason and `Exports/` is not, so serialising `self` whole
@@ -449,8 +449,10 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    /// The run record goes into `Exports/telegram.sqlite`, which is not the
-    /// ACL-restricted directory and is the folder people copy off the machine.
+    /// The run record goes into the chat's own `Exports/<chat>.sqlite`, which is
+    /// not the ACL-restricted directory and is the file people copy off the
+    /// machine — one chat's database being the likeliest thing of all to be
+    /// handed to somebody.
     ///
     /// Written as "no credential *value* appears anywhere in the JSON" rather
     /// than "these three keys are absent", because the failure to catch is a

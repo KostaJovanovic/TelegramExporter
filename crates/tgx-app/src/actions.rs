@@ -6,6 +6,7 @@
 //! to be found on its next frame.
 
 use crate::bridge::{Activity, Event, Events};
+use crate::pending::Pending;
 use tgx_tg::cancel::Cancel;
 use tgx_tg::client::{LoginStep, Session};
 use tgx_tg::config::Settings;
@@ -419,7 +420,7 @@ mod tests {
         // the session.
         let (raw, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let tx = crate::bridge::Events::detached(raw);
-        export(Settings::default(), Vec::new(), Cancel::new(), tx).await;
+        export(Settings::default(), Pending::new(), Cancel::new(), tx).await;
         let mut events = Vec::new();
         while let Ok(e) = rx.try_recv() {
             events.push(e);

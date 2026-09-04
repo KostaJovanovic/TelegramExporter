@@ -111,14 +111,61 @@ pub struct Queue {
 }
 
 impl Queue {
-    /// Start a run. Replaces the previous one wholesale — the panel shows *this*
-    /// run, not a history, and mixing the two is how a row from an hour ago is
-    /// read as part of what is happening now.
+    /// Start a run. **Clears whatever the last one left behind.**
+    ///
+    /// The panel shows *this* run, not a history, and mixing the two is how a
+    /// row from an hour ago is read as part of what is happening now. Pressing
+    /// Start while a run is still going is a different question — see
+    /// [`append`](Self::append) — and `Shell::start_export` is the one place
+    /// that decides which of the two is being asked.
     pub fn start(&mut self, chats: impl IntoIterator<Item = (i64, String)>) {
         self.jobs = chats
             .into_iter()
             .map(|(id, title)| Job::new(id, title))
             .collect();
+    }
+
+    /// Add to a run that is already going. Returns the ids actually queued.
+    ///
+    /// **One row per chat, whatever happens.** A chat already waiting or in
+    /// flight is left alone: a second row with the same id would break the
+    /// keying every other method here does its lookup by, so `progressed` and
+    /// `finished` would update the first one and paint the second forever.
+    ///
+    /// A chat whose row has *finished* is reset instead of skipped. Ticking a
+    /// chat that has already run and pressing Start again is a plain request to
+    /// run it again, and the row it gets is the one it already had — back to
+    /// Queued, with its counts cleared so a stale figure cannot be read as this
+    /// run's.
+    pub fn append(&mut self, chats: impl IntoIterator<Item = (i64, String)>) -> Vec<i64> {
+        let mut queued = Vec::new();
+        for (id, title) in chats {
+            match self.jobs.iter().position(|j| j.chat_id == id) {
+                Some(at) if !self.jobs[at].state.is_finished() => continue,
+                Some(at) => self.jobs[at] = Job::new(id, title),
+                None => self.jobs.push(Job::new(id, title)),
+            }
+            queued.push(id);
+        }
+        queued
+    }
+
+    /// Take a row out of the queue.
+    ///
+    /// **Refuses the chat that is exporting**, and that is the rule rather than
+    /// an omission: the run is mid-write on it, the progress bar is scaled to
+    /// it, and dropping the row would leave every later event about it landing
+    /// on nothing. Stop is the control for the chat in flight. Everything else
+    /// — waiting, done, failed, stopped — can go.
+    pub fn remove(&mut self, chat_id: i64) -> bool {
+        let Some(at) = self.jobs.iter().position(|j| j.chat_id == chat_id) else {
+            return false;
+        };
+        if self.jobs[at].state == JobState::Exporting {
+            return false;
+        }
+        self.jobs.remove(at);
+        true
     }
 
     pub fn is_empty(&self) -> bool {
@@ -401,6 +448,59 @@ mod tests {
         assert_eq!(q.jobs()[0].media_text(), "");
         q.finished(1, 5, 5, Some(1), 12, 2, Some(PathBuf::from("a")));
         assert_eq!(q.jobs()[0].media_text(), "12 (2 failed)");
+    }
+
+    #[test]
+    fn a_chat_added_mid_run_joins_the_queue_without_disturbing_it() {
+        let mut q = queue_of(2);
+        q.began(1);
+        q.progressed(1, 300, 6000);
+        assert_eq!(q.append([(5, "later".to_string())]), vec![5]);
+        assert_eq!(q.len(), 3);
+        assert_eq!(q.jobs()[0].state, JobState::Exporting);
+        assert_eq!(q.jobs()[0].messages, 300, "the run in flight was touched");
+        assert_eq!(q.jobs()[2].state, JobState::Queued);
+    }
+
+    #[test]
+    fn a_chat_already_queued_does_not_get_a_second_row() {
+        // Two rows for one id would break the keying every lookup here does:
+        // `progressed` would update the first and the second would sit at
+        // Queued for the rest of the run.
+        let mut q = queue_of(2);
+        q.began(1);
+        assert!(q
+            .append([(1, "chat 1".into()), (2, "chat 2".into())])
+            .is_empty());
+        assert_eq!(q.len(), 2);
+    }
+
+    #[test]
+    fn re_ticking_a_finished_chat_re_runs_the_row_it_already_had() {
+        // Ticking a chat that has run and pressing Start again asks for it
+        // again. It gets its own row back, cleared — not a second row, and not
+        // a stale count read as this run's.
+        let mut q = queue_of(1);
+        q.finished(1, 6643, 6643, None, 12, 0, Some(PathBuf::from("a")));
+        assert_eq!(q.append([(1, "chat 1".into())]), vec![1]);
+        assert_eq!(q.len(), 1);
+        assert_eq!(q.jobs()[0].state, JobState::Queued);
+        assert_eq!(q.jobs()[0].messages, 0);
+        assert_eq!(q.jobs()[0].media, None);
+    }
+
+    #[test]
+    fn the_row_that_is_exporting_is_the_one_row_that_cannot_be_removed() {
+        // The run is mid-write on it and the bar is scaled to it; every later
+        // event about it would land on nothing. Stop is that row's control.
+        let mut q = queue_of(3);
+        q.began(2);
+        assert!(!q.remove(2));
+        assert!(q.remove(3), "a waiting chat can go");
+        q.finished(1, 5, 5, None, 0, 0, Some(PathBuf::from("a")));
+        assert!(q.remove(1), "so can a finished one");
+        assert_eq!(q.len(), 1);
+        assert!(!q.remove(404), "a chat that is not there says so");
     }
 
     #[test]

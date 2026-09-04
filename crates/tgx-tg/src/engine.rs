@@ -522,7 +522,18 @@ pub struct ChatExporter<'a> {
     /// the last live run belonged to 13 people. Shared by the forward-origin and
     /// service-message paths, which ask the same question about the same store.
     peers_tried: std::collections::HashSet<String>,
-    /// **One store for the whole queue**, like the one Telegram connection.
+    /// **The chat being exported right now, and its own database.**
+    ///
+    /// One file per chat — see [`Self::open_archive`]. It was one store for the
+    /// whole queue, opened once in `new`, which meant a queue of six chats put
+    /// six people's conversations into a single file in the folder most likely
+    /// to be copied to a drive.
+    ///
+    /// Still a field rather than a parameter threaded through the run, because
+    /// forty call sites below ask `self.store` the same question and a
+    /// forty-first argument helps none of them. Replaced at the top of every
+    /// [`run`](Self::run); assigning drops the previous connection, which is
+    /// what closes the last chat's file.
     ///
     /// Opened here rather than by the callers, so neither `tgx-app` nor the CLI
     /// has to name `tgx-archive` — the window may depend only on `tgx-ui` and
@@ -531,23 +542,8 @@ pub struct ChatExporter<'a> {
 }
 
 impl<'a> ChatExporter<'a> {
-    /// Async only because opening the database is.
-    ///
-    /// An unopenable database ends the queue the way an unwritable output
-    /// folder does: every later chat would fail the same way, so failing once
-    /// and loudly beats failing per chat.
-    pub async fn new(
-        client: &'a Client,
-        settings: &'a Settings,
-        session: Arc<SqliteSession>,
-    ) -> Result<Self, ExportError> {
-        let store = if settings.export_db {
-            let path = Path::new(&settings.output_dir).join(tgx_archive::FILE_NAME);
-            Some(tgx_archive::Store::open(&path).await?)
-        } else {
-            None
-        };
-        Ok(Self {
+    pub fn new(client: &'a Client, settings: &'a Settings, session: Arc<SqliteSession>) -> Self {
+        Self {
             client,
             settings,
             names: NameBook {
@@ -556,8 +552,44 @@ impl<'a> ChatExporter<'a> {
             },
             session,
             peers_tried: std::collections::HashSet::new(),
-            store,
-        })
+            store: None,
+        }
+    }
+
+    /// Open this chat's database, and **be sure it is this chat's**.
+    ///
+    /// The name is the chat's, sanitised the same way a folder's is, so a
+    /// re-run finds the file the last run wrote and syncs into it. That is the
+    /// whole point of Database mode, and it is why this is not
+    /// [`unique_dir`]: a `(2)` suffix handed out on a clash would make every
+    /// run a fresh archive.
+    ///
+    /// Which leaves the clash itself. Two chats can sanitise to one name, and
+    /// putting both in one file is precisely what one-database-per-chat exists
+    /// to stop. So the plain name is tried first and kept unless the file turns
+    /// out to hold somebody else, in which case the chat id joins the name —
+    /// and it goes on joining it on every later run, because the file it
+    /// collided with still holds that other chat.
+    ///
+    /// **An unopenable database fails this chat, not the queue.** It used to
+    /// fail the queue, and that was right when there was one file: every later
+    /// chat would have hit the same locked file. With a file each, the next
+    /// chat has every chance of working.
+    async fn open_archive(&self, chat: &ChatInfo) -> Result<tgx_archive::Store, ExportError> {
+        let dir = Path::new(&self.settings.output_dir);
+        let base = tgx_media::topics::sanitize_component(&chat.title, "chat");
+        let ext = tgx_archive::FILE_EXT;
+        let store = tgx_archive::Store::open(&dir.join(format!("{base}.{ext}"))).await?;
+        if !store.holds_another_chat(chat.id).await? {
+            return Ok(store);
+        }
+        // Dropped before the second is opened: two live connections to two
+        // files is not a problem, but leaving one open on a file this chat has
+        // decided not to use is a handle nothing will close until the next
+        // chat replaces it.
+        drop(store);
+        let distinct = dir.join(format!("{base} ({}).{ext}", chat.id));
+        Ok(tgx_archive::Store::open(&distinct).await?)
     }
 
     /// Export one chat into `root`.
@@ -602,6 +634,15 @@ impl<'a> ChatExporter<'a> {
         let db = self.settings.export_db;
         let files = root.is_some();
         debug_assert_eq!(db, !files, "Classic and Database are exclusive");
+        // **This chat's own file, opened here rather than once per queue.**
+        // The assignment drops the previous chat's connection, so exactly one
+        // is open at a time and the file the last chat wrote is released before
+        // this one starts. See [`Self::open_archive`].
+        self.store = if db {
+            Some(self.open_archive(chat).await?)
+        } else {
+            None
+        };
         // **One timestamp for the whole run.** Every `first_seen`, `last_seen`
         // and `deleted_seen` this chat writes is the same second, so a query
         // asking "what did that export do" gets one answer rather than a smear

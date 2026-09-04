@@ -127,8 +127,12 @@ Stated rather than hidden. None of these is a defect being ignored.
   limit or switching a media kind back on fills in what the window covers;
   anything older needs "Re-read the whole history".
 - **No command writes a blob back out to disk.** `Store::blob` exists and
-  nothing calls it outside tests; getting a file out of `telegram.sqlite` today
-  means a SQL client.
+  nothing calls it outside tests; getting a file out of a chat's `.sqlite`
+  today means a SQL client.
+- **Two chats whose titles sanitise to one name get one plain file and one
+  suffixed with the chat id.** `Store::holds_another_chat` decides it, so which
+  chat gets the plain name is whichever exported first — stable afterwards, but
+  not predictable in advance and not shown anywhere but the run's log.
 - **`participants` keeps ex-members and `participants.json` does not.** The file
   is a snapshot of the chat now; the table is everyone ever seen in it. The two
   will disagree, on purpose.

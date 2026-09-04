@@ -20,7 +20,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('chats', 'settings', 'run')]
+    [ValidateSet('chats', 'settings', 'queue')]
     [string]$View = 'chats',
     [string]$Out = "$env:TEMP\tgx-shot.png",
     [string]$Exe = "dist\TelegramExporter.exe",

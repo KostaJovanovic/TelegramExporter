@@ -194,7 +194,17 @@ impl Shell {
             Event::Finished { stopped } => {
                 self.exporting = false;
                 if stopped {
+                    // Nothing left on the work list either: the rows that never
+                    // ran are marked Stopped, and a chat still sitting in
+                    // `pending` would be picked up by the next run as though it
+                    // had been asked for again.
+                    self.pending.clear();
                     self.queue.stop_remaining();
+                } else if self.resume_if_more_queued() {
+                    // The run is not over — see `resume_if_more_queued`. The
+                    // summary below is a report on a finished run, and writing
+                    // it here would announce one that is still going.
+                    return;
                 }
                 // The queue is the one writer of what the run did; a worker
                 // that composed its own sentence was the second, and the two
@@ -236,5 +246,34 @@ impl Shell {
                 self.journal.warn(message);
             }
         }
+    }
+
+    /// A worker stopped with work still on the list. Pick it up.
+    ///
+    /// **This closes a one-frame race whose other outcome is a stuck queue.**
+    /// Add to queue pushes onto `pending` whenever `exporting` is set, and
+    /// `exporting` is cleared when the worker's `Finished` is *applied* — a
+    /// frame or more after the worker sent it and stopped draining. A chat
+    /// added inside that window lands on a list nobody is reading, and its row
+    /// says Queued for the rest of the session.
+    ///
+    /// Refused after a Stop: the flag is still raised, and a fresh worker would
+    /// start and immediately cancel, which is a run in the log that never was.
+    fn resume_if_more_queued(&mut self) -> bool {
+        if !self.should_resume() {
+            return false;
+        }
+        self.exporting = true;
+        self.spawn_export();
+        true
+    }
+
+    /// The decision above, split out so it can be checked without a network.
+    ///
+    /// `spawn_export` opens a connection to Telegram, so a test that drove the
+    /// whole of [`Self::resume_if_more_queued`] would be a test that goes to
+    /// the wire — which nothing in `shell/tests.rs` does.
+    pub(super) fn should_resume(&self) -> bool {
+        !self.pending.is_empty() && !self.cancel.is_cancelled()
     }
 }

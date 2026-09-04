@@ -18,6 +18,7 @@ mod bridge;
 mod journal;
 mod list;
 mod login;
+mod pending;
 mod queue;
 mod settings_form;
 mod shell;

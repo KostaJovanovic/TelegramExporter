@@ -128,8 +128,9 @@ fn archive_message(e: &tgx_archive::Error) -> String {
     let raw = e.to_string();
     if raw.contains("SQLITE_BUSY") || raw.to_lowercase().contains("database is locked") {
         return format!(
-            "telegram.sqlite is being written by something else — close the other \
-             TelegramExporter or `tgx` run on this output folder and try again ({raw})"
+            "this chat's .sqlite is being written by something else — close the other \
+             TelegramExporter or `tgx` run on this output folder, or the viewer \
+             holding the file, and try again ({raw})"
         );
     }
     raw
