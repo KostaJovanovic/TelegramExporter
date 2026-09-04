@@ -228,7 +228,7 @@ impl Shell {
         }
     }
 
-    /// Drop a chat from the run — **from both lists, in this order**.
+    /// Drop a chat from the run — **from all three, in this order**.
     ///
     /// `pending` is what the worker pops from and `queue` is what the table
     /// paints, and a removal that reached only one of them is worse than none:
@@ -236,6 +236,14 @@ impl Shell {
     /// with no row reporting it, take it out of the work list alone and a row
     /// sits at Queued for a chat that is never coming. `pending` first, so the
     /// worker cannot pick it up in the window between the two.
+    ///
+    /// **And the third is the tick in the chat list**, which is the one this
+    /// shipped without. The tick is what `start_export` reads, so a × that took
+    /// the row out and left the tick set meant the chat came straight back on
+    /// the next Start — the removal undone by the button most likely to be
+    /// pressed after it. `selected` is not a separate wish from the queue; it
+    /// is the same one held where the chats are, and × says *not this chat*
+    /// whichever panel it is said in.
     ///
     /// Removing the chat that is exporting is refused by `Queue::remove`, and
     /// the × is not drawn on that row either — two statements of one rule,
@@ -246,10 +254,13 @@ impl Shell {
         self.pending.remove(chat_id);
         if !self.queue.remove(chat_id) {
             // Refused, so the chat is in flight — and it was not in `pending`
-            // either, because the worker popped it before it began. The two
-            // lists are still in step and there is nothing to undo.
+            // either, because the worker popped it before it began. Nothing to
+            // undo, and the tick stays: the chat is being exported, so saying
+            // it was deselected would be the interface disagreeing with what
+            // the run is doing.
             return;
         }
+        self.selected.remove(&chat_id);
         self.journal
             .push(format!("{title}: taken out of the queue"));
         self.log_copied = false;

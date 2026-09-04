@@ -440,6 +440,36 @@ fn a_chat_taken_out_of_the_queue_leaves_both_lists() {
 }
 
 #[test]
+fn a_chat_taken_out_of_the_queue_does_not_come_back_on_the_next_start() {
+    // Shipped broken. The × removed the row and left the tick in the chat
+    // list, and the tick is what `start_export` reads — so the removal was
+    // undone by the very next press of the button beside it.
+    let mut s = shell_with(vec![chat(1, "a", None), chat(2, "b", None)]);
+    s.selected.insert(1);
+    s.selected.insert(2);
+    s.queue.start([(1, "a".to_string()), (2, "b".to_string())]);
+    s.pending.reset(s.chats.clone());
+    s.remove_from_queue(2);
+    assert!(!s.selected.contains(&2), "the tick outlived the row");
+    assert!(s.selected.contains(&1), "and only that chat's tick went");
+}
+
+#[test]
+fn the_chat_in_flight_keeps_its_tick_because_it_keeps_its_row() {
+    // The other half: a removal that is refused must not half-happen. The
+    // export is writing this chat, so unticking it would be the interface
+    // disagreeing with what the run is doing.
+    let mut s = shell_with(vec![chat(1, "a", None)]);
+    s.selected.insert(1);
+    s.exporting = true;
+    s.queue.start([(1, "a".to_string())]);
+    s.queue.began(1);
+    s.remove_from_queue(1);
+    assert!(s.selected.contains(&1));
+    assert_eq!(s.queue.len(), 1);
+}
+
+#[test]
 fn the_chat_in_flight_cannot_be_taken_out_of_the_queue() {
     // Stop is that row's control. `Queue::remove` refuses it, and the × is not
     // painted on it either — two statements of one rule, because the second is
