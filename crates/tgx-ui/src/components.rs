@@ -410,6 +410,16 @@ pub fn uppercase(text: &str) -> String {
 ///
 /// The box is a fixed 12px and never shrinks: in a row with a long title, a
 /// flexible tick vanishes before the title does.
+/// **`#[must_use]` because throwing this away is a control that does nothing.**
+///
+/// It senses clicks, so inside a row that is *itself* click-sensing the box
+/// sits on top and swallows the click — egui gives one to the topmost widget
+/// that wants it. Discarding the response then means the pointer lands on the
+/// box, the row never hears it, and the one part of the row that looks most
+/// like the control is the one part that does not work. That shipped in the
+/// chat list. Use [`tick_mark`] inside such a row.
+#[must_use = "a tick box whose response is dropped is a control that does nothing; \
+              inside a click-sensing row use tick_mark"]
 pub fn tick_box(ui: &mut Ui, ticked: bool, enabled: bool, palette: &Palette) -> Response {
     let (rect, response) = ui.allocate_exact_size(
         Vec2::splat(TICK_SIZE),
@@ -419,14 +429,33 @@ pub fn tick_box(ui: &mut Ui, ticked: bool, enabled: bool, palette: &Palette) -> 
             Sense::hover()
         },
     );
-    let ink = if enabled { palette.fg } else { palette.muted };
-    let border = match (enabled, response.hovered()) {
-        // Hover brightens the border to the ink colour. The box is 12px and
-        // carries no label of its own, so without this the only way to find out
-        // whether the pointer is on it is to click.
-        (true, true) => palette.fg,
-        (true, false) => palette.hairline,
-        (false, _) => palette.muted,
+    // Hover brightens the border to the ink colour. The box is 12px and carries
+    // no label of its own, so without this the only way to find out whether the
+    // pointer is on it is to click.
+    paint_tick(ui, rect, ticked, enabled, response.hovered(), palette);
+    response
+}
+
+/// The same box, painted with **no interaction of its own**.
+///
+/// For a row that is the control — a chat row is 46 points of hit target and
+/// the box is a readout of what it says, not a second place to click. Sensing
+/// nothing is what lets the click reach the row underneath.
+pub fn tick_mark(ui: &mut Ui, ticked: bool, palette: &Palette) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(TICK_SIZE), Sense::hover());
+    // `hovered: false` — the row paints its own hover, and a box that lit up
+    // independently would suggest it was separately clickable, which is the
+    // impression this whole change exists to remove.
+    paint_tick(ui, rect, ticked, true, false, palette);
+}
+
+/// Shared, so an interactive tick and an inert one cannot drift apart.
+fn paint_tick(ui: &Ui, rect: egui::Rect, ticked: bool, enabled: bool, hovered: bool, p: &Palette) {
+    let ink = if enabled { p.fg } else { p.muted };
+    let border = match (enabled, hovered) {
+        (true, true) => p.fg,
+        (true, false) => p.hairline,
+        (false, _) => p.muted,
     };
     let painter = ui.painter();
     if ticked {
@@ -438,7 +467,6 @@ pub fn tick_box(ui: &mut Ui, ticked: bool, enabled: bool, palette: &Palette) -> 
         Stroke::new(1.0_f32, border),
         egui::StrokeKind::Inside,
     );
-    response
 }
 
 /// The disclosure marker on a category heading: ▸ folded, ▾ open.

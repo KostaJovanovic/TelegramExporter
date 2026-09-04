@@ -12,7 +12,7 @@ use chrono::{DateTime, Local};
 use eframe::egui::{Align, Layout, Sense, Ui};
 use tgx_ui::components::{
     action, button, caps, count_text, disclosure, eyebrow, field, figure, forum_dot, row, rule,
-    selection_label, text, tick_box, GUTTER,
+    selection_label, text, tick_box, tick_mark, GUTTER,
 };
 use tgx_ui::tokens::space;
 
@@ -138,12 +138,20 @@ impl Shell {
                     }
                 });
 
-            if tick_box(ui, self.view.grouped, true, &p).clicked() {
+            // Box and label are one control, as in the settings panel. This was
+            // the chat row's bug the other way up: the box worked and the words
+            // beside it were a plain label, so clicking the thing you read did
+            // nothing.
+            let hit = tick_box(ui, self.view.grouped, true, &p).union(action(
+                ui,
+                eyebrow("Group by type", &p),
+                true,
+            ));
+            if hit.clicked() {
                 self.view.grouped = !self.view.grouped;
                 self.rebuild_rows();
                 self.commit_settings();
             }
-            ui.label(eyebrow("Group by type", &p));
         });
 
         if chosen != before {
@@ -252,7 +260,11 @@ impl Shell {
         let indent = if self.view.grouped { 30.0 } else { GUTTER };
         inside(ui, rect, indent, |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
-            tick_box(ui, ticked, true, &p);
+            // **Painted, not clickable.** The row is the control; a box that
+            // sensed clicks would sit on top of it and take them, and the 12px
+            // square that looks most like the switch would be the one place
+            // clicking did nothing.
+            tick_mark(ui, ticked, &p);
             ui.add_space(12.0);
             // A forum is marked by a painted dot, never by a suffix on the
             // stored title — presentation in the string is what the filter then
