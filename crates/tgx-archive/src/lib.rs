@@ -19,3 +19,7 @@
 //! It renders nothing. Both outputs still come from the one map that
 //! `tgx-tg/src/output.rs` builds; this is a fourth *output*, not a fourth
 //! writer.
+
+pub mod store;
+
+pub use store::{merge_volatile, Error, Merge, Store, StoredMessage, FILE_NAME, SCHEMA_VERSION};
