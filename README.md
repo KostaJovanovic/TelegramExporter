@@ -65,6 +65,28 @@ change:
 | **Split forums by topic** | on | |
 | **Member list** | first 10,000 | Large public channels stop serving the list well before that |
 | **Messages per page** | 1000 | |
+| **Database** | off | One `telegram.sqlite` beside your exports, described below |
+
+### The database
+
+Ticking **Database** adds a third format alongside HTML and JSON. Unlike those
+two, it does not produce a fresh folder each time: it keeps one
+`telegram.sqlite` beside your exports and merges every run into it, media
+included.
+
+What that buys you is the thing a folder export cannot do. Export a chat today
+and again next month, and the second export simply won't contain whatever was
+deleted in between — it is a photograph of the chat as it is now. The database
+keeps both: new messages are added, an edited message keeps its earlier
+versions, and a message Telegram no longer returns stays in the file, marked
+with the date it went missing. **It can only keep what it has already seen**, so
+the first export is what starts the record.
+
+Tick only Database and nothing else, and the run becomes a quick sync: it reads
+what is new plus the newest few hundred messages again, looking for edits and
+deletions, instead of walking the whole history. That is the one to run
+regularly. With HTML or JSON also ticked, the whole history is read anyway and
+the database gets all of it.
 
 Two options are off on purpose, because they'd make the archive diverge from
 what Telegram Desktop writes: saving link-preview images, and labelling
@@ -86,7 +108,9 @@ And exports are other people's messages as much as yours. Store them like it.
 ## What it won't do
 
 - Reach chats your account can't already see. It has exactly your access, no more.
-- Bring back deleted messages. Those are gone from Telegram's servers too.
+- Bring back messages deleted before you first exported them. Those are gone
+  from Telegram's servers too. Turn on **Database** and it will keep anything
+  deleted *after* a run has seen it.
 - Finish a huge forum quickly. History arrives in one sequential pass, at the
   rate Telegram hands it over.
 - Run without a GPU — the window renders through DirectX. If it can't start,
@@ -98,7 +122,12 @@ And exports are other people's messages as much as yours. Store them like it.
 cargo run -p tgx-tg --bin tgx -- login
 cargo run -p tgx-tg --bin tgx -- chats
 cargo run -p tgx-tg --bin tgx -- export "Dev Team"
+cargo run -p tgx-tg --bin tgx -- export --db "Dev Team"       # folders and database
+cargo run -p tgx-tg --bin tgx -- export --db-only "Dev Team"  # sync, no folders
 ```
+
+`--full` makes a `--db-only` run walk the whole history rather than the trailing
+window, so deletions older than the window are noticed too.
 
 `TG_API_ID` and `TG_API_HASH` work instead of the settings file.
 
@@ -108,5 +137,5 @@ cargo run -p tgx-tg --bin tgx -- export "Dev Team"
 lints and the full suite, and `save.bat build` produces the release exe in
 `dist/`. That folder is self-contained — copy it to a stick and it works there.
 
-Rust, [GPUI](https://www.gpui.rs) and
+Rust, [egui](https://github.com/emilk/egui) and
 [grammers](https://github.com/Lonami/grammers). MIT licensed.

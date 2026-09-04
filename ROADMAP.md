@@ -14,13 +14,14 @@ split into one folder per topic.
 
 | Area | State | Evidence |
 |---|---|---|
-| Oracle harness | **done** | three legs: `tgx-parity json\|html\|media <root>` |
+| Oracle harness | **done** | four legs: `tgx-parity json\|html\|media\|archive <root>` |
 | `tgx-format` | **done** | JSON leg: 4 of 4 topics byte-identical, 6,643 messages |
 | `tgx-html` | **done** | HTML leg: 4 of 4 topics reproduced exactly, 256,780 lines |
 | `tgx-media` | **done** | Media leg: 830 of 836 filenames; the six are the custom-emoji ceiling |
 | `tgx-tg` | **run at the wire, 2026-08-27** | a live export, diffed against a Desktop export of the same supergroup. It found four features nothing emitted. See `AUDIT.md`. |
+| `tgx-archive` | **done, 2026-09-04** | Archive leg: 4 of 4 topics merged twice and read back as Desktop's exact bytes, 6,643 messages |
 | `tgx-ui` / `tgx-app` | **done, and about to be replaced** | every interaction rule is implemented and the window was driven to confirm it. See "The egui swap". |
-| Packaging | **done** | release binary 20.4 MB, assets embedded, icon and version resource, CI on `windows-latest`, 30 MB ceiling |
+| Packaging | **done** | release binary **9.9 MB** as of 2026-09-04 (20.4 MB under GPUI), assets embedded, icon and version resource, CI on `windows-latest`, 30 MB ceiling |
 
 Baseline on the `refactor` branch, 2026-08-29: **574 tests green, three legs
 green, corpus sha256-verified**, fmt and clippy clean.
@@ -59,9 +60,13 @@ gets written, it is out of scope.
 - [ ] The harness itself, last, once nothing else is moving. `wire_leg.rs` is
       1,114 lines.
 
-The workspace stays at seven crates. The layering it encodes is load-bearing —
-`tgx-html` must not know Telegram's wire types, or the harness could no longer
-replay a recorded `result.json` through it.
+The workspace stays at seven crates through the refactor. It is **eight** as of
+2026-09-04: `tgx-archive` was added for the database output, for exactly the
+reason the rule exists rather than in spite of it — the store takes serialised
+maps and no Telegram types, so the harness can merge a recorded `result.json`
+into it and read Desktop's bytes back with no connection. The layering it
+encodes is load-bearing: `tgx-html` must not know Telegram's wire types, or the
+harness could no longer replay a recorded `result.json` through it.
 
 ---
 
@@ -105,7 +110,41 @@ magnitude, and the binary with it.
 
 Stated rather than hidden. None of these is a defect being ignored.
 
+**The database output**
+
+- **A later converter fix never reaches a message already stored.**
+  `merge_volatile` copies ten volatile keys onto the stored payload and leaves
+  the rest alone, which is what stops a re-read rewriting history — and means
+  every other key on a message is whatever the build that first saw it wrote. A
+  new extension key does not appear on old rows either. Correcting an archive
+  in place would need a re-import path; there is none.
+- **A media replacement on an edited message is not picked up.** The media keys
+  are outside the volatile list, so the archive keeps the file the message
+  carried when it was first seen.
+- **No command writes a blob back out to disk.** `Store::blob` exists and
+  nothing calls it outside tests; getting a file out of `telegram.sqlite` today
+  means a SQL client.
+- **`participants` keeps ex-members and `participants.json` does not.** The file
+  is a snapshot of the chat now; the table is everyone ever seen in it. The two
+  will disagree, on purpose.
+- **Scheduled messages are not archived at all**, and a database-only run does
+  not even fetch them. They are messages that *might* happen, so merging them
+  into `messages` would have the next sync mark each one deleted the moment it
+  was really sent. `scheduled.json` is still written by any run with a folder.
+- **A blob over 256 MB is not archived.** The bytes are read whole and then
+  handed to libsql as a second owned copy, so the peak is twice the file. The
+  `media` row is still written and the file stays in the export folder — but a
+  database-only run with the size limit set to unlimited will simply not have
+  it.
+
 **Blind spots in the oracle**
+
+- **The archive leg replays recorded payloads**, so like the other three it says
+  nothing about the wire — and nothing about the engine either: not whether the
+  right payload reaches the store, not whether the deletion sweep runs only
+  after a finished walk, not whether the media ingest picks up the file that was
+  actually written. Synthetic tests cover the decisions; the rest needs a live
+  run.
 
 - **The html leg proves the writer, not the pipeline.** `html_leg.rs` lifts the
   presentation-only `_p` map out of Desktop's own pages and feeds it back in, so

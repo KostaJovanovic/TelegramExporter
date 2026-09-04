@@ -18,7 +18,7 @@ the relevant part before changing the area it covers.
 save.bat                    # menu; also takes an action as an argument
 save.bat test               # fmt + clippy + every suite, same as CI
 save.bat build              # release build -> dist\TelegramExporter.exe
-save.bat parity             # all three replay legs against corpus or drive
+save.bat parity             # all four replay legs against corpus or drive
 save.bat corpus             # cut reference\ out of the reference export
 save.bat wire <export dir>  # diff a live export against the reference run
 save.bat clean              # report target\ and empty it
@@ -35,6 +35,8 @@ cargo test -p tgx-tg the_last_target_wins       # one test by name substring
 cargo clippy --all-targets --all-features -- -D warnings
 cargo run -p tgx-app --bin TelegramExporter     # the window
 cargo run -p tgx-tg  --bin tgx -- login|chats|export "<title>"
+cargo run -p tgx-tg  --bin tgx -- export --db-only "<title>"   # sync the database
+cargo run -p tgx-parity -- archive reference                    # one leg on its own
 ```
 
 CI (`windows-latest`) runs fmt, clippy with `-D warnings`, `cargo test --all`,
@@ -55,12 +57,13 @@ writers and diffed. `crates/tgx-parity` is that harness.
 | `json` | reference `result.json` → our emitter → byte diff | 4/4 topics, 6,643 messages |
 | `html` | reference `result.json` → our writer → line diff vs Desktop's pages | 4/4 topics, 256,780 lines |
 | `media` | reference `result.json` → our name planner → diff the tree | 830/836 (ceiling: custom emoji) |
+| `archive` | reference `result.json` → two merges into the store → read back → byte diff | 4/4 topics, 6,643 messages |
 | `wire` | our own live export vs a reference run | run once, 2026-08-27; see `AUDIT.md` |
 
 The reference export is `N:\telegram export\UA KOLAB TELEGRAM`. No leg reads
 media — the media leg diffs *names* against the tree the JSON records — so
 `save.bat corpus` cuts only the 7.8 MB text half into `reference/`, where
-`crates/tgx-parity/tests/corpus.rs` runs all three legs as an ordinary
+`crates/tgx-parity/tests/corpus.rs` runs all four replay legs as an ordinary
 `cargo test`, sha256-checked against `MANIFEST.txt`.
 
 `reference/` is gitignored: it is verbatim chat history from real people and
@@ -106,6 +109,29 @@ that goes into `result.json`, strips the presentation-only `_p` key, and hands
 the whole map to the HTML writer. The two cannot drift, and the writer stays
 testable with no connection — which is what makes the html leg possible.
 
+**The database is a fourth output, not a fourth writer.** It is fed the same
+payload the JSON and HTML receive, minus `_p`, and renders nothing. What a run
+*reads* is decided by its formats, not by a mode switch: HTML or JSON on means
+the whole history and every unseen stored message marked deleted; Database alone
+means a sync from the trailing window (`reread_window`, default 500), and
+`reread_all` forces the whole pass. `engine::reads_a_window` is that decision,
+pulled out as a function of four booleans because every way of getting it wrong
+is silent.
+
+**A windowed run is not a short run.** It reads the newest few hundred messages
+on purpose, so it publishes no `Progress::Total`, sends `expected: 0` and
+`messages_measured: false` on `ChatDone`, and is judged complete by
+`reached_end` rather than by a count. Do **not** write `ExportResult::complete`
+as `reached_end || <the count rule>`: `Ok(None)` is how the read loop ends on
+nearly every export, so that `||` silently removes the INCOMPLETE warning from
+all of them.
+
+**The database keeps what a re-read must not rewrite.** `merge_volatile`
+(`tgx-archive`) copies ten volatile keys — the text, the counters, the
+reactions — onto the stored payload and leaves everything else alone. The
+consequence is real and is in ROADMAP: a later converter fix never reaches a
+message already stored.
+
 **One pass per chat, oldest first.** `engine.rs` uses
 `iter_messages(peer).reverse(true)` with a resume loop keyed on `offset_id`,
 routing each message to its topic's `Output` as it arrives. Do not convert this
@@ -113,7 +139,11 @@ to per-topic thread fetches: `messages.getReplies` returns nothing for the
 General topic, so that silently loses it and multiplies requests by the topic
 count.
 
-**Closing drains.** The JSON is streamed, so a run abandoned without `close()`
+**Closing drains, and the database commits in the same place.** `close_all` is
+the one point every exit from `run` already passes through, so the batch commit
+lives there too — the store has no `Drop` backstop that could cover a missed
+site, because a `Drop` cannot await. The JSON is streamed, so a run abandoned
+without `close()`
 leaves a file that is not truncated but **zero bytes**. Every path that can end
 an export goes through `Output::close`, with a `Drop` impl as backstop.
 
@@ -175,10 +205,17 @@ Each was found by diffing, not by reasoning:
 
 ## What no test here can catch
 
-The three replay legs prove everything *downstream* of the wire and open no
+The four replay legs prove everything *downstream* of the wire and open no
 sockets. `convert.rs` and `plan.rs` — TL object in, Desktop JSON out — have only
 synthetic fixtures (`crates/tgx-tg/tests/`), because the reference records
 Desktop's output, not Telegram's input.
+
+The archive leg is downstream of the wire too, and downstream of the *converter*
+as well: it replays recorded payloads. So it says nothing about whether the
+engine hands the store the right payload, whether the deletion sweep runs only
+after a finished walk, or whether the media ingest picks up the file that was
+actually written. Those have synthetic tests and a live check, like the rest of
+the wire.
 
 This is not theoretical. `Session::connect` once took `SenderPool`'s handle and
 dropped its runner, so every request was cancelled before it was sent, with all
@@ -207,6 +244,17 @@ is a bearer credential**: anyone who can read it can act as the account. It is
 gitignored and ACL-restricted on creation (a protection that does not exist on
 FAT32/exFAT). Do not run a live export or read stored credentials without the
 account holder saying so explicitly.
+
+**`Exports/` is not protected, and the database lives there.**
+`<output_dir>/telegram.sqlite` is one file holding every message, every earlier
+version, every participant and the media bytes of every chat exported into that
+root — other people's conversation, in the folder most likely to be copied to a
+drive. It is covered by the `Exports/` line in `.gitignore` like everything else
+there, and it is why `Settings::without_credentials` exists: the run record
+would otherwise carry the `api_hash` and the account's phone number out of the
+one directory that is ACL-restricted. A run that writes no folder still writes
+this file, and a database-only run's scratch tree (`.tgx-scratch/<chat>/<topic>/`)
+lives beside it for the length of the media pass.
 
 `ensure_data_dir` needs three guards that are easy to drop: `CREATE_NO_WINDOW`,
 a once-per-process flag, and an **absolute `System32\icacls.exe` path** — a
@@ -256,6 +304,16 @@ way.** `wgpu` drags in a shader compiler for a window that is a table, a
 transcript and a row of buttons; `default_fonts` would merge egui's own Ubuntu
 and Hack in as fallbacks, so a missing glyph would render in a typeface nobody
 chose. `tgx-ui` and `tgx-app` both declare it and must agree.
+
+`libsql` is pinned **exactly** at `=0.9.30`, `default-features = false` with
+`features = ["core"]`. `grammers-session` already links that exact version for
+its session file, behind its own `sqlite-storage` feature — so `tgx-archive`
+compiles nothing new and the binary does not grow (9.9 MB before and after).
+A *second* version would bring its own `libsql-ffi`, and the two would export
+the same `sqlite3_*` symbols and fail at link time; **`rusqlite` is the same
+clash under another name and must not be added.** Bump it deliberately, on its
+own commit, in step with grammers' pin, with the parity legs green either side —
+the `winresource` rule, for the same reason.
 
 `egui_extras` is the egui project's own companion crate, held at the same
 version as `eframe` and taken `default-features = false` — its image, SVG,
