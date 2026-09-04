@@ -89,6 +89,29 @@ pub struct Settings {
     pub export_html: bool,
     pub export_json: bool,
 
+    /// Merge every message the run reads into `<output_dir>/telegram.sqlite`,
+    /// media bytes included.
+    ///
+    /// Unlike the other two this one **accumulates**: it is one file for the
+    /// whole export root, it keeps every version of a message it has seen
+    /// edited, and a message Telegram stops returning stays in it, marked with
+    /// the date it was noticed missing. Off by default, because it is a second
+    /// copy of everything.
+    pub export_db: bool,
+
+    /// How many of the newest stored messages a **database-only** run re-reads,
+    /// looking for edits, reactions and deletions.
+    ///
+    /// Only consulted when nothing else is being written: with HTML or JSON on,
+    /// the run walks the whole history anyway and the database is filled from
+    /// that pass. 0 means "only what is new", which is the fastest sync and the
+    /// one that never notices an edit.
+    pub reread_window: usize,
+
+    /// Make a database-only run walk the whole history instead of the window,
+    /// so deletions older than the window are noticed.
+    pub reread_all: bool,
+
     // Media
     pub media_kinds: Vec<String>,
     /// 0 == unlimited.
@@ -177,6 +200,9 @@ impl Default for Settings {
             output_dir: app_dir().join("Exports").to_string_lossy().into_owned(),
             export_html: true,
             export_json: true,
+            export_db: false,
+            reread_window: 500,
+            reread_all: false,
             media_kinds: MEDIA_KINDS.iter().map(|s| s.to_string()).collect(),
             size_limit_mb: 20,
             download_media: true,
@@ -283,7 +309,39 @@ impl Settings {
         // the doc comments on the fields true.
         out.size_limit_mb = out.size_limit_mb.max(0);
         out.member_limit = out.member_limit.max(0);
+        // Zero is a real answer here — "only what is new" — so unlike
+        // `page_size` this floors at 0 rather than 1. The ceiling is the panel's
+        // (`REREAD_RANGE`); a hand-edited file asking for ten million would only
+        // make a sync slower than the full pass it was meant to replace.
+        out.reread_window = out.reread_window.min(10_000);
         out
+    }
+
+    /// The settings as a record of what a run was configured to do, **with the
+    /// credentials taken out**.
+    ///
+    /// The database records the settings of every run so "why is this export
+    /// different from the last one" has an answer a year later. But
+    /// `telegram.sqlite` lives in `Exports/`, which is the folder people copy
+    /// to a drive and mail to somebody — and `Settings` starts with `api_id`,
+    /// `api_hash` and `phone`. `TelegramExporterData/` is ACL-restricted for
+    /// exactly this reason and `Exports/` is not, so serialising `self` whole
+    /// would carry an API credential and the account's phone number out of the
+    /// one directory that protects them.
+    ///
+    /// A deny-list rather than an allow-list, because the common change here is
+    /// *a new setting* and it must appear in the record without anyone
+    /// remembering to add it. `no_credential_reaches_the_run_record` is what
+    /// keeps the rare change — a new secret — from being the one that slips.
+    pub fn without_credentials(&self) -> Value {
+        const SECRET: [&str; 3] = ["api_id", "api_hash", "phone"];
+        let mut value = serde_json::to_value(self).unwrap_or(Value::Null);
+        if let Some(map) = value.as_object_mut() {
+            for key in SECRET {
+                map.remove(key);
+            }
+        }
+        value
     }
 
     pub fn load() -> Self {
@@ -361,6 +419,39 @@ use lockdown::{grantee, restrict_to_current_user, set_lockdown_error};
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// The run record goes into `Exports/telegram.sqlite`, which is not the
+    /// ACL-restricted directory and is the folder people copy off the machine.
+    ///
+    /// Written as "no credential *value* appears anywhere in the JSON" rather
+    /// than "these three keys are absent", because the failure to catch is a
+    /// fourth secret arriving under a name nobody thought to remove — and a
+    /// value search finds that where a key list would not.
+    #[test]
+    fn no_credential_reaches_the_run_record() {
+        let settings = Settings {
+            api_id: 1234567,
+            api_hash: "0123456789abcdef0123456789abcdef".into(),
+            phone: "+381641234567".into(),
+            export_db: true,
+            ..Settings::default()
+        };
+        let record = serde_json::to_string(&settings.without_credentials()).unwrap();
+
+        for secret in [
+            "0123456789abcdef0123456789abcdef",
+            "+381641234567",
+            "1234567",
+        ] {
+            assert!(
+                !record.contains(secret),
+                "{secret:?} reached the run record:\n{record}"
+            );
+        }
+        // And it is still a record of the run, not an empty object.
+        assert!(record.contains("\"export_db\":true"), "got {record}");
+        assert!(record.contains("\"page_size\""), "got {record}");
+    }
 
     #[test]
     fn an_absurd_size_limit_does_not_wrap_into_a_negative_one() {

@@ -165,12 +165,20 @@ pub enum Event {
         done: usize,
         total: i64,
     },
-    /// A finished chat. `messages` is what was **written**, which is a measured
-    /// number and so replaces whatever the list was carrying.
+    /// A finished chat. `messages` is what was written.
     ChatDone {
         chat_id: i64,
         messages: usize,
         expected: i64,
+        /// **Is `messages` the size of the chat, or just what this run read?**
+        ///
+        /// True for every folder export: the run walked the whole history, so
+        /// what it wrote is a *measured* count and replaces whatever the list
+        /// was carrying. False for a database-only sync, which reads the newest
+        /// few hundred messages on purpose — publishing 500 as the size of a
+        /// 6,643-message chat would be the list learning something false from
+        /// the one source that is supposed to be authoritative.
+        messages_measured: bool,
         /// Topic folders written, or `None` for a chat that has no topics at
         /// all. **Not zero.** The engine counts its single General sink as one
         /// "topic" for a chat that was never split, so passing the raw number
@@ -180,7 +188,9 @@ pub enum Event {
         topics: Option<usize>,
         media_downloaded: usize,
         media_failed: usize,
-        root: std::path::PathBuf,
+        /// The folder written, or `None` for a database-only run — which has no
+        /// folder, so the queue's "open folder" affordance has nothing to open.
+        root: Option<std::path::PathBuf>,
     },
     /// **A cancelled or failed export writes no count at all.** A truncated run
     /// must not leave its own length behind as the size of the chat.

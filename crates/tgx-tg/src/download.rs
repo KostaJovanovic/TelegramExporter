@@ -430,6 +430,10 @@ mod tests {
         let root = tmp("inline");
         let pending = PendingDownload {
             job: DownloadJob {
+                file_id: 0,
+                kind: "files",
+                mime_type: String::new(),
+                role: "file",
                 already_saved: false,
                 dest: "thumbnails/a.jpg".into(),
                 thumb_dest: None,
@@ -454,6 +458,10 @@ mod tests {
     /// A job for a photo of `size` bytes, named as the JSON already named it.
     fn photo_job(size: i64) -> DownloadJob {
         DownloadJob {
+            file_id: 0,
+            kind: "files",
+            mime_type: String::new(),
+            role: "file",
             already_saved: false,
             dest: "photos/photo_1@01-01-2026_00-00-00.jpg".into(),
             thumb_dest: None,
@@ -597,6 +605,10 @@ mod tests {
 
     fn job_with_all_three() -> DownloadJob {
         DownloadJob {
+            file_id: 0,
+            kind: "files",
+            mime_type: String::new(),
+            role: "file",
             already_saved: false,
             dest: "video_files/clip.mp4".into(),
             thumb_dest: Some("video_files/clip.mp4_thumb.jpg".into()),

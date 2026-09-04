@@ -41,6 +41,26 @@ pub struct DownloadJob {
     pub inline_bytes: Option<Vec<u8>>,
     /// Which message this belongs to, for `missing_media.txt`.
     pub message_id: i64,
+    /// Telegram's own id for this photo or document, `0` if it has none.
+    ///
+    /// Carried so the database can store the bytes once and point every message
+    /// that references them at the one copy. `NameBook` already dedupes by this
+    /// id, but only inside one folder and only while the run lasts.
+    pub file_id: i64,
+    /// The `_LAYOUT` kind — `photos`, `video_files`, `stickers`, …
+    ///
+    /// The second half of the archive's blob key: photo ids and document ids
+    /// are two spaces, and the database dedupes across every chat it has ever
+    /// seen, so the folder the file's *shape* put it in is what keeps the two
+    /// apart. Follows the shape, not `media_type` — a WebM video sticker is
+    /// `video_files` and still reports `"media_type": "sticker"`.
+    pub kind: &'static str,
+    pub mime_type: String,
+    /// Which payload key names this file: `"photo"` or `"file"`.
+    ///
+    /// Decided here, where the branch that writes the key is, rather than
+    /// re-derived from the finished map later — the two could then disagree.
+    pub role: &'static str,
     /// This file was already written by an earlier message carrying the same
     /// Telegram id, so `dest` is a path to fetch *nothing* into.
     ///
@@ -612,6 +632,10 @@ pub fn plan(
             size: facts.size,
             inline_bytes: None,
             message_id,
+            file_id: facts.id,
+            kind: facts.kind,
+            mime_type: facts.mime_type.clone(),
+            role: if is_photo { "photo" } else { "file" },
             // The bytes are already on disk under this name; only the thumbnail
             // and the preview, which took fresh names, still have to be fetched.
             already_saved: reused.is_some(),
@@ -630,6 +654,15 @@ pub fn plan(
                 size: bytes.len() as i64,
                 inline_bytes: Some(bytes.clone()),
                 message_id,
+                // **Not archived.** A stripped thumbnail is the ~180-byte blur
+                // that arrives inside the message, standing in for a file the
+                // run deliberately did not save. It has no Telegram file id of
+                // its own, and storing it would put a placeholder in the
+                // archive under the identity of the thing it is standing in for.
+                file_id: 0,
+                kind: "thumbnails",
+                mime_type: "image/jpeg".into(),
+                role: "file",
                 already_saved: false,
             }
         }),

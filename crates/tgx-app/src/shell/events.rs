@@ -147,6 +147,7 @@ impl Shell {
                 chat_id,
                 messages,
                 expected,
+                messages_measured,
                 topics,
                 media_downloaded,
                 media_failed,
@@ -162,8 +163,14 @@ impl Shell {
                     root,
                 );
                 // What the export actually wrote is a **measured** number, so
-                // it replaces whatever the list was carrying.
-                self.set_count(chat_id, Some(messages as i64));
+                // it replaces whatever the list was carrying — *when the run
+                // read the whole chat*. A database-only sync deliberately reads
+                // the newest few hundred, and writing that back as the chat's
+                // size would teach the list something false from the one source
+                // it trusts most.
+                if messages_measured {
+                    self.set_count(chat_id, Some(messages as i64));
+                }
             }
             Event::ChatFailed { chat_id, message } => {
                 // **A cancelled or failed export writes no count at all**: a

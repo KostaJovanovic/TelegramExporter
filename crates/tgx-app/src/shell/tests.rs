@@ -184,13 +184,14 @@ fn what_an_export_wrote_replaces_what_the_list_was_carrying() {
     let mut s = shell_with(vec![chat(1, "a", Some(6643))]);
     s.queue.start([(1, "a".to_string())]);
     s.apply(Event::ChatDone {
+        messages_measured: true,
         chat_id: 1,
         messages: 6640,
         expected: 6643,
         topics: Some(4),
         media_downloaded: 830,
         media_failed: 6,
-        root: std::path::PathBuf::from("out"),
+        root: Some(std::path::PathBuf::from("out")),
     });
     assert_eq!(s.count_of(1), Some(6640), "a measured number wins");
     assert_eq!(s.queue.jobs()[0].state, JobState::Done);
@@ -352,13 +353,14 @@ fn a_chat_that_was_never_split_reports_no_topic_count() {
     let mut s = shell_with(vec![chat(1, "a", None)]);
     s.queue.start([(1, "a".to_string())]);
     s.apply(Event::ChatDone {
+        messages_measured: true,
         chat_id: 1,
         messages: 250,
         expected: 250,
         topics: None,
         media_downloaded: 12,
         media_failed: 0,
-        root: std::path::PathBuf::from("out"),
+        root: Some(std::path::PathBuf::from("out")),
     });
     assert_eq!(s.queue.jobs()[0].topics_text(), "\u{2014}");
 }
@@ -388,13 +390,14 @@ fn a_stopped_run_is_not_reported_as_a_success() {
     s.exporting = true;
     s.queue.start([(1, "a".to_string()), (2, "b".to_string())]);
     s.apply(Event::ChatDone {
+        messages_measured: true,
         chat_id: 1,
         messages: 5,
         expected: 5,
         topics: None,
         media_downloaded: 0,
         media_failed: 0,
-        root: std::path::PathBuf::from("out"),
+        root: Some(std::path::PathBuf::from("out")),
     });
     s.stop();
     s.apply(Event::Finished { stopped: true });

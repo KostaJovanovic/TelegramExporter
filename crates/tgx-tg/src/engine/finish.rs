@@ -17,17 +17,33 @@ impl<'a> ChatExporter<'a> {
     /// because `&self.names` would then be held across a loop body that calls
     /// `&mut self`. It is nine call sites in the one file no parity leg covers,
     /// so it is its own change, not a rider on a defect fix.
+    /// **The database commits here too**, for the same reason the outputs close
+    /// here: this is the one place every exit already comes through, so putting
+    /// the commit anywhere else would mean nine sites remembering to. Unlike
+    /// `Output`, the store has no `Drop` backstop that could cover a miss — a
+    /// `Drop` cannot await — so "no site can forget it" has to be structural.
+    /// The commit runs **first**, before anything that can fail.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn close_all(
+    pub(super) async fn close_all(
         sinks: &mut HashMap<i64, TopicSink>,
-        root: &Path,
+        root: Option<&Path>,
         chat: &ChatInfo,
         topics: &[Topic],
         names: &NameBook,
         split: bool,
         result: &mut ExportResult,
+        store: Option<&tgx_archive::Store>,
         progress: ProgressFn<'_>,
     ) {
+        if let Some(store) = store {
+            if let Err(e) = store.commit_batch().await {
+                // Reported, not returned: every caller is already on its way
+                // out, several of them carrying an error of their own that
+                // matters more than this one.
+                progress(Progress::Log(format!("database: committing: {e}")));
+            }
+        }
+
         let mut written: HashMap<i64, usize> = HashMap::new();
         let mut ids: Vec<i64> = sinks.keys().copied().collect();
         ids.sort();
@@ -35,22 +51,37 @@ impl<'a> ChatExporter<'a> {
             let Some(sink) = sinks.get_mut(&id) else {
                 continue;
             };
-            let n = sink.output.count();
-            if let Err(e) = sink.output.close() {
-                progress(Progress::Log(format!("closing {}: {e}", sink.title)));
-            }
+            // **The sink's own tally when there is no `Output` to ask.** A
+            // database-only run still has a per-topic count to report; it is
+            // just not the number of messages a file received.
+            let n = match sink.output.as_mut() {
+                Some(out) => {
+                    let n = out.count();
+                    if let Err(e) = out.close() {
+                        progress(Progress::Log(format!("closing {}: {e}", sink.title)));
+                    }
+                    n
+                }
+                None => sink.stored,
+            };
             if n == 0 {
                 // Topics with no messages are skipped rather than producing
                 // empty folders; the count is reported when the job finishes.
                 result.empty_topics += 1;
                 // **Only a topic subfolder.** When the chat is not split by
                 // topic, `Output::new` was handed `root` itself, so
-                // `sink.output.root == root` — and pruning it deleted the whole
-                // chat directory, taking `participants.json` (written before
-                // the read) with it and releasing the `unique_dir` reservation.
-                // An empty chat should leave an empty export, not no export.
-                if sink.output.root != root {
-                    let _ = std::fs::remove_dir_all(&sink.output.root);
+                // `sink.dir == root` — and pruning it deleted the whole chat
+                // directory, taking `participants.json` (written before the
+                // read) with it and releasing the `unique_dir` reservation. An
+                // empty chat should leave an empty export, not no export.
+                //
+                // Nothing to prune at all without a folder: the scratch tree a
+                // database-only run downloads into is removed wholesale by the
+                // media pass.
+                if let Some(root) = root {
+                    if sink.dir != root {
+                        let _ = std::fs::remove_dir_all(&sink.dir);
+                    }
                 }
             } else {
                 result.topics += 1;
@@ -60,9 +91,11 @@ impl<'a> ChatExporter<'a> {
                     messages: n,
                 });
             }
-            for name in sink.output.degraded.names() {
-                if !result.degraded.contains(&name) {
-                    result.degraded.push(name);
+            if let Some(out) = sink.output.as_ref() {
+                for name in out.degraded.names() {
+                    if !result.degraded.contains(&name) {
+                        result.degraded.push(name);
+                    }
                 }
             }
         }
@@ -72,7 +105,7 @@ impl<'a> ChatExporter<'a> {
         // file — verified on a real export, where all nine pages carried the
         // link and the target was absent. The link comes from the same `split`
         // branch that sets `back_href`, so the two cannot drift apart.
-        if split {
+        if let (true, Some(root)) = (split, root) {
             if let Err(e) = Self::write_index(root, chat, topics, names, &written, result) {
                 progress(Progress::Log(format!("writing the index: {e}")));
             }

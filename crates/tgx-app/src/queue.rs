@@ -177,19 +177,30 @@ impl Queue {
         topics: Option<usize>,
         media_downloaded: usize,
         media_failed: usize,
-        root: PathBuf,
+        root: Option<PathBuf>,
     ) {
         if let Some(job) = self.job_mut(chat_id) {
             job.state = JobState::Done;
             job.messages = messages;
-            job.expected = Some(expected);
+            // **`0` is not a total**, here as everywhere else in this file. A
+            // database-only sync sends zero because the chat's size is not its
+            // denominator: it read the newest few hundred on purpose, and
+            // `Some(0)` would render as "500 of 0" with a full bar.
+            if expected > 0 {
+                job.expected = Some(expected);
+            }
             // Only overwrite with a real answer: a chat whose topics were
             // counted at the start must not lose them to a `None` here.
             if topics.is_some() {
                 job.topics = topics;
             }
             job.media = Some((media_downloaded, media_failed));
-            job.root = Some(root);
+            // Left alone rather than cleared when there is no folder: a chat
+            // exported to disk and later synced to the database only should
+            // keep pointing at the folder it does have.
+            if root.is_some() {
+                job.root = root;
+            }
         }
     }
 
@@ -357,7 +368,7 @@ mod tests {
         // that is never coming.
         let mut q = queue_of(3);
         q.began(1);
-        q.finished(1, 10, 10, None, 0, 0, PathBuf::from("a"));
+        q.finished(1, 10, 10, None, 0, 0, Some(PathBuf::from("a")));
         q.stop_remaining();
         assert_eq!(q.jobs()[0].state, JobState::Done);
         assert_eq!(q.jobs()[1].state, JobState::Stopped);
@@ -388,7 +399,7 @@ mod tests {
     fn the_media_column_says_nothing_until_the_media_pass_has_run() {
         let mut q = queue_of(1);
         assert_eq!(q.jobs()[0].media_text(), "");
-        q.finished(1, 5, 5, Some(1), 12, 2, PathBuf::from("a"));
+        q.finished(1, 5, 5, Some(1), 12, 2, Some(PathBuf::from("a")));
         assert_eq!(q.jobs()[0].media_text(), "12 (2 failed)");
     }
 
@@ -396,7 +407,7 @@ mod tests {
     fn a_new_run_replaces_the_previous_one_rather_than_appending() {
         // A row from an hour ago read as part of what is happening now.
         let mut q = queue_of(3);
-        q.finished(1, 1, 1, None, 0, 0, PathBuf::from("a"));
+        q.finished(1, 1, 1, None, 0, 0, Some(PathBuf::from("a")));
         q.start([(9, "later".to_string())]);
         assert_eq!(q.len(), 1);
         assert_eq!(q.jobs()[0].state, JobState::Queued);

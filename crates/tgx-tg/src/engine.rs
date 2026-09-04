@@ -31,7 +31,7 @@ use grammers_client::session::Session as _;
 use grammers_client::Client;
 use grammers_tl_types as tl;
 use serde_json::{json, Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tgx_format::peer::PeerKey;
@@ -49,7 +49,10 @@ pub const MAX_STALLED_WAITS: u32 = 10;
 /// 2. Here the borrow checker enforces what a comment could only request.
 #[derive(Debug, Default, Clone)]
 pub struct ExportResult {
-    pub root: PathBuf,
+    /// The folder this chat was written into — `None` for a database-only run,
+    /// which writes no folder at all. Everything that offers to open it has to
+    /// cope with there being nothing to open.
+    pub root: Option<PathBuf>,
     pub messages: usize,
     pub topics: usize,
     pub empty_topics: usize,
@@ -95,11 +98,44 @@ pub struct ExportResult {
     /// built before the read pass and the index is written after it, on nine
     /// different paths including every error return.
     pub has_invite_link: bool,
+
+    // --- the database, all zero when it is off ------------------------------
+    /// Messages this run put into the database for the first time.
+    pub db_new: usize,
+    /// Stored messages Telegram returned differently — an edit, a reaction, a
+    /// counter. The payload each one replaced is kept in `versions`.
+    pub db_changed: usize,
+    /// Stored messages Telegram no longer returns, marked and kept.
+    pub db_deleted: usize,
+    /// Files whose bytes went into the database this run.
+    pub db_blobs: usize,
+    /// What the database holds for this chat now.
+    pub db_archived: usize,
+    /// **This run read only the newest N messages on purpose.**
+    ///
+    /// A database-only sync, which has no business being measured against the
+    /// chat's total. See [`Self::complete`] — this is the flag that keeps the
+    /// two kinds of short run apart.
+    pub windowed: bool,
+    /// The read loop ended because Telegram ran out of messages, rather than
+    /// because it was cancelled, stalled or failed.
+    pub reached_end: bool,
 }
 
 impl ExportResult {
     /// Did the run get everything Telegram said was there?
+    ///
+    /// **A windowed run is judged by `reached_end`, and nothing else is.** It
+    /// is tempting to write this as `reached_end || <the old rule>` — the walk
+    /// finished, so surely it is complete — and that would quietly disable the
+    /// INCOMPLETE warning for *every* export. `Ok(None)` is the ordinary way
+    /// the read loop ends, including on the run that read 5,609 of the 6,600
+    /// messages Telegram counted, which is the exact failure that warning was
+    /// added for. So the two rules are alternatives, not alternatives-with-an-or.
     pub fn complete(&self) -> bool {
+        if self.windowed {
+            return self.reached_end;
+        }
         self.expected == 0 || self.messages as i64 >= self.expected
     }
 }
@@ -152,6 +188,40 @@ pub fn detail_wanted() -> bool {
     log::log_enabled!(log::Level::Debug)
 }
 
+/// Does this run read a trailing window instead of the whole history?
+///
+/// **Decided by the formats, not by a mode switch.** Pulled out as a function
+/// of four booleans because it is the one decision in `run` that changes what
+/// the export *means*, and every way of getting it wrong is silent: read a
+/// window when a folder was wanted and the export is short; read the whole
+/// history every sync and the feature is pointless.
+///
+/// A first sync reads everything (`stored == 0`): there is nothing to window
+/// against, and windowing anyway would store the newest few hundred messages of
+/// a chat and call the archive done.
+pub fn reads_a_window(files: bool, export_db: bool, reread_all: bool, stored: i64) -> bool {
+    export_db && !files && !reread_all && stored > 0
+}
+
+/// In a database-only run, is this file worth fetching?
+///
+/// Only when the message is new to the archive *and* the bytes are not there
+/// already. Four inputs rather than a `store` lookup, because
+/// `already_stored` cannot answer the whole question on its own: nothing
+/// reaches `blobs` until the pool has run, so two messages in one run carrying
+/// the same file would both pass it and the file would be downloaded twice.
+fn worth_fetching(
+    verdict: Option<tgx_archive::Merge>,
+    file_id: i64,
+    already_queued: bool,
+    already_stored: bool,
+) -> bool {
+    matches!(verdict, Some(tgx_archive::Merge::Inserted))
+        && file_id != 0
+        && !already_queued
+        && !already_stored
+}
+
 /// A setting, spelled the way a log reader wants to read it.
 fn on_off(v: bool) -> &'static str {
     if v {
@@ -200,7 +270,12 @@ fn topic_head(t: &Topic) -> Map<String, Value> {
 /// Reads the finished payload rather than the TL object, so what it reports is
 /// what was actually written — a line saying "photo" for a message whose photo
 /// was dropped somewhere between the two would be worse than no line at all.
-fn describe(m: &Map<String, Value>, topic: &str, queued: usize) -> String {
+fn describe(
+    m: &Map<String, Value>,
+    topic: &str,
+    queued: usize,
+    archived: Option<tgx_archive::Merge>,
+) -> String {
     let s = |k: &str| m.get(k).and_then(Value::as_str).unwrap_or("");
     let id = m.get("id").and_then(Value::as_i64).unwrap_or(0);
 
@@ -255,8 +330,17 @@ fn describe(m: &Map<String, Value>, topic: &str, queued: usize) -> String {
     } else {
         s("from")
     };
+    // What the database made of it, first, because on a re-read that is the
+    // only thing that differs between one line and the next — and reading a
+    // sync's log means looking for the handful that were not `same`.
+    let verdict = match archived {
+        Some(tgx_archive::Merge::Inserted) => "new ",
+        Some(tgx_archive::Merge::Changed { .. }) => "changed ",
+        Some(tgx_archive::Merge::Unchanged) => "same ",
+        None => "",
+    };
     format!(
-        "  #{id} [{topic}] {} {who} text:{len}{}{}",
+        "  #{id} {verdict}[{topic}] {} {who} text:{len}{}{}",
         s("type"),
         if what.is_empty() { "" } else { " " },
         what.join(" ")
@@ -339,9 +423,72 @@ fn session_peer_id(peer: &tl::enums::Peer) -> Option<PeerId> {
     }
 }
 
+/// What the archive needs to know about a download once it has landed.
+///
+/// Taken off the job before the pool consumes it. A `DownloadJob` carries the
+/// stripped thumbnail's bytes, so cloning the jobs to keep them around would
+/// copy those for nothing.
+struct Ingest {
+    dest: String,
+    thumb_dest: Option<String>,
+    file_id: i64,
+    kind: &'static str,
+    mime_type: String,
+    role: &'static str,
+    message_id: i64,
+    /// Bytes that came inside the message rather than off the wire. Never
+    /// archived — see `plan.rs`.
+    inline: bool,
+    /// The name to record beside the bytes.
+    ///
+    /// The basename of `dest`, which for a document *is* the name Telegram
+    /// sent, and for a photo is the `photo_N@stamp.jpg` Desktop synthesises.
+    /// Taken from the path rather than carried separately so it cannot come to
+    /// disagree with the file it names.
+    file_name: Option<String>,
+}
+
+impl Ingest {
+    fn of(pending: &PendingDownload) -> Self {
+        let job = &pending.job;
+        Self {
+            dest: job.dest.clone(),
+            thumb_dest: job.thumb_dest.clone(),
+            file_id: job.file_id,
+            kind: job.kind,
+            mime_type: job.mime_type.clone(),
+            role: job.role,
+            message_id: job.message_id,
+            inline: job.inline_bytes.is_some(),
+            file_name: job
+                .dest
+                .rsplit('/')
+                .next()
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty()),
+        }
+    }
+}
+
 /// One output folder plus the media names it has handed out.
 struct TopicSink {
-    output: Output,
+    /// `None` in a database-only run, which writes no `result.json` and no
+    /// pages. Everything else about the sink still happens: the payload is
+    /// built through this topic's own [`MediaNames`], so the metadata keys and
+    /// the file names are identical to what a folder export would have
+    /// written.
+    output: Option<Output>,
+    /// Where this topic's media lands.
+    ///
+    /// **A field rather than `output.root`**, because in a database-only run
+    /// there is no `Output` to ask, and because the two are genuinely different
+    /// directories then: the pool downloads into a scratch folder that is
+    /// deleted once the bytes are in the database. It is **per topic** either
+    /// way — `MediaNames` is per folder, so two topics both hand out
+    /// `photos/photo_1.jpg`, and one scratch directory for the whole chat would
+    /// have the second topic's download overwrite the first's and put the wrong
+    /// bytes in the archive.
+    dir: PathBuf,
     /// One [`MediaNames`] per folder — that is what gives each topic its own
     /// `photo_1`, `photo_2`, matching a standalone Desktop export.
     media: MediaNames,
@@ -349,6 +496,12 @@ struct TopicSink {
     /// Jobs this folder is waiting on. Filenames are already written into the
     /// JSON and HTML; only the bytes are outstanding.
     jobs: Vec<PendingDownload>,
+    /// Messages routed here, counted by the run rather than by a file.
+    ///
+    /// `Output::count` is the number a folder run reports, and it does not
+    /// exist when nothing is being written — so a database-only run would
+    /// otherwise report every topic as empty and prune them all.
+    stored: usize,
 }
 
 pub struct ChatExporter<'a> {
@@ -372,11 +525,32 @@ pub struct ChatExporter<'a> {
     /// the last live run belonged to 13 people. Shared by the forward-origin and
     /// service-message paths, which ask the same question about the same store.
     peers_tried: std::collections::HashSet<String>,
+    /// **One store for the whole queue**, like the one Telegram connection.
+    ///
+    /// Opened here rather than by the callers, so neither `tgx-app` nor the CLI
+    /// has to name `tgx-archive` — the window may depend only on `tgx-ui` and
+    /// `tgx-tg`, and `layering.rs` fails the build if that changes.
+    store: Option<tgx_archive::Store>,
 }
 
 impl<'a> ChatExporter<'a> {
-    pub fn new(client: &'a Client, settings: &'a Settings, session: Arc<SqliteSession>) -> Self {
-        Self {
+    /// Async only because opening the database is.
+    ///
+    /// An unopenable database ends the queue the way an unwritable output
+    /// folder does: every later chat would fail the same way, so failing once
+    /// and loudly beats failing per chat.
+    pub async fn new(
+        client: &'a Client,
+        settings: &'a Settings,
+        session: Arc<SqliteSession>,
+    ) -> Result<Self, ExportError> {
+        let store = if settings.export_db {
+            let path = Path::new(&settings.output_dir).join(tgx_archive::FILE_NAME);
+            Some(tgx_archive::Store::open(&path).await?)
+        } else {
+            None
+        };
+        Ok(Self {
             client,
             settings,
             names: NameBook {
@@ -385,7 +559,8 @@ impl<'a> ChatExporter<'a> {
             },
             session,
             peers_tried: std::collections::HashSet::new(),
-        }
+            store,
+        })
     }
 
     /// Export one chat into `root`.
@@ -405,16 +580,31 @@ impl<'a> ChatExporter<'a> {
         chat: &ChatInfo,
         peer: PeerRef,
         topics: &[Topic],
-        root: &Path,
+        root: Option<&Path>,
         progress: ProgressFn<'_>,
         cancel: &Cancel,
     ) -> Result<ExportResult, ExportError> {
         let started = std::time::Instant::now();
         let detail = detail_wanted();
         let mut result = ExportResult {
-            root: root.to_path_buf(),
+            root: root.map(Path::to_path_buf),
             ..Default::default()
         };
+        // The store, if this run has one. Read through a local so every use
+        // below is one `Option` test rather than a field lookup on `self` that
+        // would borrow the exporter across the read loop.
+        let db = self.settings.export_db;
+        // Whether a folder is being written at all. **This is what decides how
+        // much of the history the run reads** — not a mode switch. HTML or JSON
+        // on means the whole thing, so the database is filled from a pass that
+        // was happening anyway.
+        let files = root.is_some();
+        let db_only = db && !files;
+        // **One timestamp for the whole run.** Every `first_seen`, `last_seen`
+        // and `deleted_seen` this chat writes is the same second, so a query
+        // asking "what did that export do" gets one answer rather than a smear
+        // across however long the chat took.
+        let seen_at = chrono::Utc::now().timestamp();
 
         // **The settings, written down before anything uses them.** Nearly
         // every "why is this export different from the last one" question is
@@ -426,7 +616,14 @@ impl<'a> ChatExporter<'a> {
             chat.title,
             chat.kind.export_type(chat.public),
             chat.id,
-            root.display()
+            match root {
+                Some(r) => r.display().to_string(),
+                None => self
+                    .store
+                    .as_ref()
+                    .map(|s| s.path().display().to_string())
+                    .unwrap_or_else(|| "nowhere".into()),
+            }
         )));
         progress(Progress::Log(format!(
             "settings: media {}, size limit {}, kinds [{}], {} at a time, \
@@ -483,12 +680,13 @@ impl<'a> ChatExporter<'a> {
         // in the parameter. A count we *failed* to get is still not published:
         // it is `None` here, not `0`, and sending `Total { total: 0 }` would
         // paint "0 messages" over a channel of ten thousand that rate-limited.
-        if let Some(n) = known {
-            progress(Progress::Total {
-                chat_id: chat.id,
-                total: n,
-            });
-        }
+        //
+        // **A windowed run publishes no total**, because the chat's size is
+        // not that run's denominator: a sync reading the newest 500 of 6,643
+        // would fill 8% of a bar and stop, which reads as a failed export. The
+        // row shows a bare counter instead, exactly as an uncounted chat does.
+        // `windowed` is not known until the archive is consulted a few lines
+        // below, so the decision is deferred to there.
         let total = known.unwrap_or(0);
         result.expected = total;
 
@@ -586,10 +784,31 @@ impl<'a> ChatExporter<'a> {
             // the one rule Desktop provably does not use. See `Roster::book`.
             self.names.absorb(&roster.book);
             if !roster.members.is_empty() {
-                let body =
-                    serde_json::to_string_pretty(&roster.to_json()).unwrap_or_else(|_| "{}".into());
-                std::fs::create_dir_all(root)?;
-                std::fs::write(root.join("participants.json"), body)?;
+                if let Some(root) = root {
+                    let body = serde_json::to_string_pretty(&roster.to_json())
+                        .unwrap_or_else(|_| "{}".into());
+                    std::fs::create_dir_all(root)?;
+                    std::fs::write(root.join("participants.json"), body)?;
+                }
+                // **The database keeps ex-members.** `participants.json` is a
+                // snapshot of who is in the chat now and is rewritten whole
+                // every export; the table is who has ever been seen in it,
+                // which is the question an archive gets asked. Written whether
+                // or not a folder was, because the roster was fetched either
+                // way — gating it on `root` would have made "tick only
+                // Database" quietly drop the member list.
+                if let Some(store) = &self.store {
+                    for member in &roster.members {
+                        // `"user1234"`, the same shape a message's `from_id`
+                        // carries, so the two tables join.
+                        let Some(key) = member.get("id").and_then(Value::as_str) else {
+                            continue;
+                        };
+                        store
+                            .upsert_participant(chat.id, key, member, seen_at)
+                            .await?;
+                    }
+                }
             }
             if !roster.complete {
                 progress(Progress::Log(
@@ -607,9 +826,20 @@ impl<'a> ChatExporter<'a> {
 
         // Pre-create a sink per topic so the folder names are stable and the
         // index can list them even if a topic turns out empty.
+        // Where this chat's media lands when there is no export folder: a
+        // scratch tree the pool downloads into and the ingest deletes. **Per
+        // topic**, one level down, because `MediaNames` is per folder and two
+        // topics both hand out `photos/photo_1.jpg`.
+        let scratch = Path::new(&self.settings.output_dir)
+            .join(".tgx-scratch")
+            .join(chat.id.to_string());
+
         if split {
             for t in topics {
-                let dir = root.join(t.dirname());
+                let dir = match root {
+                    Some(root) => root.join(t.dirname()),
+                    None => scratch.join(t.id.to_string()),
+                };
                 // **All of it, because none of it costs a request.** The
                 // forum listing hands 22 fields over with the title and we
                 // were keeping one. Who opened a topic and when is part of
@@ -620,59 +850,168 @@ impl<'a> ChatExporter<'a> {
                 for (k, v) in &chat_head {
                     head.insert(k.clone(), v.clone());
                 }
-                let output = Output::new(
-                    &dir,
-                    &t.title,
-                    export_type,
-                    chat.id,
-                    self.settings,
-                    Some("../export_results.html".to_string()),
-                    Some(head),
-                )?;
+                // The same `head` either way: in a database-only run it is
+                // what the topic row records, so a folder export made later
+                // carries the header this run already knew.
+                if let Some(store) = &self.store {
+                    store
+                        .upsert_topic(chat.id, t.id, &t.title, &head, seen_at)
+                        .await?;
+                }
+                let output = match root {
+                    Some(_) => Some(Output::new(
+                        &dir,
+                        &t.title,
+                        export_type,
+                        chat.id,
+                        self.settings,
+                        Some("../export_results.html".to_string()),
+                        Some(head),
+                    )?),
+                    None => None,
+                };
                 sinks.insert(
                     t.id,
                     TopicSink {
                         output,
+                        dir,
                         media: MediaNames::new(),
                         title: t.title.clone(),
                         jobs: Vec::new(),
+                        stored: 0,
                     },
                 );
             }
         } else {
-            let output = Output::new(
-                root,
-                &chat.title,
-                export_type,
-                chat.id,
-                self.settings,
-                None,
-                (!chat_head.is_empty()).then(|| chat_head.clone()),
-            )?;
+            if let Some(store) = &self.store {
+                store
+                    .upsert_topic(chat.id, GENERAL_TOPIC_ID, &chat.title, &chat_head, seen_at)
+                    .await?;
+            }
+            let dir = match root {
+                Some(root) => root.to_path_buf(),
+                None => scratch.join(GENERAL_TOPIC_ID.to_string()),
+            };
+            let output = match root {
+                Some(root) => Some(Output::new(
+                    root,
+                    &chat.title,
+                    export_type,
+                    chat.id,
+                    self.settings,
+                    None,
+                    (!chat_head.is_empty()).then(|| chat_head.clone()),
+                )?),
+                None => None,
+            };
             sinks.insert(
                 GENERAL_TOPIC_ID,
                 TopicSink {
                     output,
+                    dir,
                     media: MediaNames::new(),
                     title: chat.title.clone(),
                     jobs: Vec::new(),
+                    stored: 0,
                 },
             );
         }
 
+        // --- how much of the history this run reads --------------------------
+        //
+        // Decided by the formats, not by a mode switch. With a folder being
+        // written the run walks the whole chat anyway, so the database is
+        // filled from that pass and every stored message it did not see can be
+        // marked deleted. With **only** the database on there is nothing else
+        // to write, so the run is a sync: what is new, plus a trailing window
+        // for edits and deletions.
+        let mut run_id: Option<i64> = None;
+        let mut start: i64 = 0;
+        if let Some(store) = &self.store {
+            let (stored_all, stored_live) = store.message_count(chat.id).await?;
+            result.db_archived = stored_all as usize;
+            // A first sync has nothing to window against, so it reads
+            // everything — otherwise "tick only Database" on a fresh archive
+            // would store the newest 500 messages and call it done.
+            result.windowed = reads_a_window(files, db, self.settings.reread_all, stored_all);
+            if result.windowed {
+                start = store
+                    .window_start(chat.id, self.settings.reread_window)
+                    .await?;
+            }
+            progress(Progress::Log(format!(
+                "database: {} — {} archived for this chat{}",
+                store.path().display(),
+                stored_all,
+                if stored_all == stored_live {
+                    String::new()
+                } else {
+                    format!(" ({} deleted on Telegram, kept)", stored_all - stored_live)
+                }
+            )));
+            if result.windowed {
+                progress(Progress::Log(format!(
+                    "database: syncing from #{start} (the last {} archived) for edits and \
+                     deletions — older deletions need \"Re-read the whole history\"",
+                    self.settings.reread_window
+                )));
+            } else if db_only {
+                progress(Progress::Log(
+                    "database: reading the whole history, so every deletion is noticed".into(),
+                ));
+            }
+            let record = serde_json::to_string(&self.settings.without_credentials())
+                .unwrap_or_else(|_| "{}".into());
+            store
+                .upsert_chat(chat.id, &chat.title, export_type, seen_at)
+                .await?;
+            run_id = Some(
+                store
+                    .start_run(
+                        chat.id,
+                        if result.windowed { "window" } else { "full" },
+                        root,
+                        &record,
+                        seen_at,
+                    )
+                    .await?,
+            );
+            store.begin_batch().await?;
+        }
+        // See the comment where `known` is computed: a windowed run has no
+        // denominator to publish.
+        if let (Some(n), false) = (known, result.windowed) {
+            progress(Progress::Total {
+                chat_id: chat.id,
+                total: n,
+            });
+        }
+        // What the read loop reports against. A windowed run has no total, so
+        // its rows carry a counter and no bar.
+        let reported_total = if result.windowed { 0 } else { total };
+
         // --- the single pass ------------------------------------------------
         progress(Progress::Log(format!(
             "reading history oldest first{}",
-            if total > 0 {
-                format!(", {total} expected")
+            if reported_total > 0 {
+                format!(", {reported_total} expected")
             } else {
                 String::new()
             }
         )));
-        let mut offset_id: i32 = 0;
+        // Telegram's message ids are 32-bit; the archive stores them as
+        // `INTEGER`, so the window start comes back wider than the cursor.
+        let mut offset_id: i32 = start as i32;
+        // Every id this run saw, for the deletion sweep at the end.
+        let mut seen: HashSet<i64> = HashSet::new();
+        // File ids already queued for download this run. `has_blob` cannot
+        // answer this: nothing is written to `blobs` until the pool has run, so
+        // two messages carrying the same file would both pass the check and the
+        // file would be fetched twice.
+        let mut queued_files: HashSet<(i64, &'static str)> = HashSet::new();
         let mut stalled: u32 = 0;
         let mut done = 0usize;
-        let stride = progress_stride(total);
+        let stride = progress_stride(reported_total);
 
         'resume: loop {
             // Checked here as well as per message so a cancel during a rate
@@ -688,12 +1027,19 @@ impl<'a> ChatExporter<'a> {
                     &self.names,
                     split,
                     &mut result,
+                    self.store.as_ref(),
                     progress,
-                );
+                )
+                .await;
                 return Err(ExportError::Cancelled);
             }
 
-            if offset_id != 0 {
+            // **`start`, not zero.** A windowed run begins with a non-zero
+            // cursor by design, and testing against zero made its very first
+            // pass announce "resuming from message 6120 (0 written so far)" —
+            // a resume that had not happened, immediately after the line that
+            // already said where the sync was starting.
+            if offset_id as i64 != start {
                 progress(Progress::Log(format!(
                     "resuming from message {offset_id} ({done} written so far)"
                 )));
@@ -719,8 +1065,10 @@ impl<'a> ChatExporter<'a> {
                         &self.names,
                         split,
                         &mut result,
+                        self.store.as_ref(),
                         progress,
-                    );
+                    )
+                    .await;
                     return Err(ExportError::Cancelled);
                 }
                 match iter.next().await {
@@ -757,15 +1105,64 @@ impl<'a> ChatExporter<'a> {
                         // so a converter that had already run would have
                         // written the short version.
                         let extra = self.enrich_message(&msg, peer, &mut tally, progress).await;
+                        let mut db_verdict = None;
                         if let Some(sink) = sinks.get_mut(&key) {
                             let before = sink.jobs.len();
+                            // **The payload is built the same way in a
+                            // database-only run**, through this topic's own
+                            // `MediaNames`, so the metadata keys and the file
+                            // paths are what a folder export would have
+                            // written. Only the writing is skipped.
                             let payload =
                                 self.payload(&msg, &extra, &mut sink.media, &mut sink.jobs);
+                            sink.stored += 1;
+
+                            // --- the database -------------------------------
+                            if let Some(store) = &self.store {
+                                let id = msg.id() as i64;
+                                seen.insert(id);
+                                // `_p` is presentation for the HTML writer and
+                                // nothing renders from the database, so it is
+                                // stripped here for the same reason
+                                // `Output::add` strips it for `result.json`.
+                                let body: Map<String, Value> = payload
+                                    .iter()
+                                    .filter(|(k, _)| k.as_str() != "_p")
+                                    .map(|(k, v)| (k.clone(), v.clone()))
+                                    .collect();
+                                let merged = match store.get(chat.id, id).await? {
+                                    Some(old) => tgx_archive::merge_volatile(&old.payload, &body),
+                                    None => body,
+                                };
+                                // `None` when the run could not resolve
+                                // topics: a forum exported unsplit calls
+                                // everything General, and that must not
+                                // overwrite what a split run learned.
+                                let topic = split.then_some(key);
+                                let what =
+                                    store.merge(chat.id, id, topic, &merged, seen_at).await?;
+                                match what {
+                                    tgx_archive::Merge::Inserted => result.db_new += 1,
+                                    tgx_archive::Merge::Changed { .. } => result.db_changed += 1,
+                                    tgx_archive::Merge::Unchanged => {}
+                                }
+                                db_verdict = Some(what);
+                                // A batch per couple of hundred messages: a
+                                // crash costs a batch rather than a chat, and
+                                // six thousand un-batched inserts is six
+                                // thousand fsyncs.
+                                if done.is_multiple_of(200) {
+                                    store.commit_batch().await?;
+                                    store.begin_batch().await?;
+                                }
+                            }
+
                             if detail {
                                 progress(Progress::Detail(describe(
                                     &payload,
                                     &sink.title,
                                     sink.jobs.len() - before,
+                                    db_verdict,
                                 )));
                             }
                             // Through `close_all`, not `?`. This was the one
@@ -777,18 +1174,53 @@ impl<'a> ChatExporter<'a> {
                             // previous audit closed. Every other exit here goes
                             // through `close_all`, and the doc on this function
                             // says every one does.
-                            if let Err(e) = sink.output.add(&payload) {
-                                Self::close_all(
-                                    &mut sinks,
-                                    root,
-                                    chat,
-                                    topics,
-                                    &self.names,
-                                    split,
-                                    &mut result,
-                                    progress,
-                                );
-                                return Err(e.into());
+                            if let Some(out) = sink.output.as_mut() {
+                                if let Err(e) = out.add(&payload) {
+                                    Self::close_all(
+                                        &mut sinks,
+                                        root,
+                                        chat,
+                                        topics,
+                                        &self.names,
+                                        split,
+                                        &mut result,
+                                        self.store.as_ref(),
+                                        progress,
+                                    )
+                                    .await;
+                                    return Err(e.into());
+                                }
+                            }
+
+                            // **In a database-only run the only reason to fetch
+                            // a file is that its bytes are not archived yet.**
+                            // A folder run keeps every job, because the folder
+                            // has to be complete whatever the database already
+                            // holds.
+                            //
+                            // `has_blob` alone is not enough: nothing reaches
+                            // `blobs` until the pool has run, so two messages
+                            // carrying the same file would both pass it and the
+                            // file would be downloaded twice. `queued_files` is
+                            // what this run has already promised to fetch.
+                            if db_only {
+                                if let Some(store) = &self.store {
+                                    let fresh: Vec<PendingDownload> = sink.jobs.split_off(before);
+                                    for pending in fresh {
+                                        let id = pending.job.file_id;
+                                        let kind = pending.job.kind;
+                                        let wanted = worth_fetching(
+                                            db_verdict,
+                                            id,
+                                            queued_files.contains(&(id, kind)),
+                                            id != 0 && store.has_blob(id, kind).await?,
+                                        );
+                                        if wanted {
+                                            queued_files.insert((id, kind));
+                                            sink.jobs.push(pending);
+                                        }
+                                    }
+                                }
                             }
                         }
                         done += 1;
@@ -797,7 +1229,7 @@ impl<'a> ChatExporter<'a> {
                             progress(Progress::Messages {
                                 chat_id: chat.id,
                                 done,
-                                total,
+                                total: reported_total,
                             });
                         }
                     }
@@ -816,8 +1248,10 @@ impl<'a> ChatExporter<'a> {
                                     &self.names,
                                     split,
                                     &mut result,
+                                    self.store.as_ref(),
                                     progress,
-                                );
+                                )
+                                .await;
                                 return Err(ExportError::Stalled { waits: stalled });
                             }
                             progress(Progress::FloodWait {
@@ -835,8 +1269,10 @@ impl<'a> ChatExporter<'a> {
                                 &self.names,
                                 split,
                                 &mut result,
+                                self.store.as_ref(),
                                 progress,
-                            );
+                            )
+                            .await;
                             return Err(ExportError::Invocation(other.to_string()));
                         }
                     },
@@ -844,13 +1280,43 @@ impl<'a> ChatExporter<'a> {
             }
         }
 
+        // --- what Telegram no longer has --------------------------------------
+        //
+        // **Only here**, which is the one place reached by the loop leaving via
+        // `Ok(None)`. Every other exit — cancelled, stalled, a wire error —
+        // returns from inside the loop, and none of them can tell "Telegram no
+        // longer has it" from "we never got that far". Marking on one of those
+        // would write a deletion date across most of a chat.
+        result.reached_end = true;
+        if let Some(store) = &self.store {
+            result.db_deleted = store
+                .mark_unseen_deleted(chat.id, start, &seen, seen_at)
+                .await?;
+            let (archived, _) = store.message_count(chat.id).await?;
+            result.db_archived = archived as usize;
+            progress(Progress::Log(format!(
+                "database: +{} new, {} changed, {} deleted on Telegram (kept) — {} archived",
+                result.db_new, result.db_changed, result.db_deleted, result.db_archived
+            )));
+        }
+
         // Messages queued to send later are in no history, so they get their
         // own file beside the export rather than being mixed into it.
-        let queued =
+        //
+        // **Not fetched at all without a folder to put them in.** The database
+        // has no table for them: they are not messages that happened, they are
+        // messages that might, and merging them into `messages` would have the
+        // next sync mark every one of them deleted the moment it was sent for
+        // real. Asking Telegram for a list nothing can record is a request
+        // spent on nothing. Recorded in ROADMAP as still open.
+        let queued = if files {
             enrich::fetch_scheduled(self.client, peer, self.settings, &mut tally, |seconds| {
                 progress(Progress::FloodWait { seconds })
             })
-            .await;
+            .await
+        } else {
+            Vec::new()
+        };
         if !queued.is_empty() {
             let rows: Vec<Value> = queued
                 .iter()
@@ -863,8 +1329,11 @@ impl<'a> ChatExporter<'a> {
             let body = json!({ "count": rows.len(), "messages": rows });
             match serde_json::to_string_pretty(&body)
                 .map_err(std::io::Error::other)
-                .and_then(|b| std::fs::write(root.join("scheduled.json"), b))
-            {
+                .and_then(|b| {
+                    // Unreachable without a folder: `queued` is empty then.
+                    let root = root.unwrap_or(Path::new("."));
+                    std::fs::write(root.join("scheduled.json"), b)
+                }) {
                 Ok(()) => progress(Progress::Log(format!(
                     "scheduled: {} message(s) -> scheduled.json",
                     rows.len()
@@ -912,8 +1381,10 @@ impl<'a> ChatExporter<'a> {
                 &self.names,
                 split,
                 &mut result,
+                self.store.as_ref(),
                 progress,
-            );
+            )
+            .await;
             return Err(ExportError::Cancelled);
         }
         // Keyed rather than `values_mut`: the cancel path below has to hand the
@@ -929,7 +1400,7 @@ impl<'a> ChatExporter<'a> {
             // borrow ends here: the cancel check below needs the map back.
             let Some((dir, title, jobs)) = sinks.get_mut(&id).map(|sink| {
                 (
-                    sink.output.root.clone(),
+                    sink.dir.clone(),
                     sink.title.clone(),
                     std::mem::take(&mut sink.jobs),
                 )
@@ -952,8 +1423,10 @@ impl<'a> ChatExporter<'a> {
                     &self.names,
                     split,
                     &mut result,
+                    self.store.as_ref(),
                     progress,
-                );
+                )
+                .await;
                 return Err(ExportError::Cancelled);
             }
             let queued = jobs.len();
@@ -973,6 +1446,15 @@ impl<'a> ChatExporter<'a> {
                     )));
                 }
             }
+            // What the archive needs about each job, taken before the pool
+            // consumes them. Cloning the jobs themselves would copy every
+            // stripped thumbnail's bytes for nothing.
+            let ingest: Vec<Ingest> = if self.store.is_some() {
+                jobs.iter().map(Ingest::of).collect()
+            } else {
+                Vec::new()
+            };
+
             let batch_started = std::time::Instant::now();
             // Drained while the pool runs, so the lines arrive during the
             // batch rather than in a burst after it.
@@ -1045,10 +1527,100 @@ impl<'a> ChatExporter<'a> {
             result.media_failed += tally.failed;
             result.media_missing += tally.missing.len();
             result.bytes_downloaded += tally.bytes;
-            // A dangling reference is worse than a stated gap.
-            if let Err(e) = download::write_missing(&dir, &tally.missing) {
-                progress(Progress::Log(format!("missing_media.txt: {e}")));
+            // A dangling reference is worse than a stated gap. Only where there
+            // is a folder to leave the note in — a scratch tree is deleted a
+            // few lines below, and the transcript already named every file that
+            // did not arrive.
+            if files {
+                if let Err(e) = download::write_missing(&dir, &tally.missing) {
+                    progress(Progress::Log(format!("missing_media.txt: {e}")));
+                }
             }
+
+            // --- the bytes into the database ---------------------------------
+            if let Some(store) = &self.store {
+                for item in &ingest {
+                    // Nothing to store, or nothing that arrived. A job the pool
+                    // could not fetch is in `missing`, and reading its `dest`
+                    // would either fail or — worse — pick up a stale file from
+                    // an earlier export into the same folder.
+                    if item.file_id == 0
+                        || item.inline
+                        || tally.missing.iter().any(|m| m.path == item.dest)
+                    {
+                        continue;
+                    }
+                    // Already archived, by an earlier run or an earlier message
+                    // in this one: `already_saved` jobs share their bytes with a
+                    // file the folder wrote once, and re-reading them off disk
+                    // to hand libsql something it would ignore is pure I/O.
+                    if !store.has_blob(item.file_id, item.kind).await? {
+                        let bytes = match std::fs::read(dir.join(&item.dest)) {
+                            Ok(b) => b,
+                            Err(e) => {
+                                progress(Progress::Log(format!(
+                                    "database: {} could not be read back to archive it: {e}",
+                                    item.dest
+                                )));
+                                continue;
+                            }
+                        };
+                        match store
+                            .put_blob(
+                                item.file_id,
+                                item.kind,
+                                &item.mime_type,
+                                item.file_name.as_deref(),
+                                &bytes,
+                                seen_at,
+                            )
+                            .await
+                        {
+                            Ok(()) => result.db_blobs += 1,
+                            // Not fatal: the folder still has it, and the
+                            // `media` row below still records that the message
+                            // had an attachment. An export must not fail on one
+                            // enormous video.
+                            Err(tgx_archive::Error::TooLarge { size, .. }) => {
+                                progress(Progress::Log(format!(
+                                    "database: {} is {} — too large to archive, {}",
+                                    item.dest,
+                                    human_bytes(size),
+                                    if files {
+                                        "left in the export folder"
+                                    } else {
+                                        "not saved anywhere"
+                                    }
+                                )));
+                            }
+                            Err(e) => return Err(e.into()),
+                        }
+                        if let Some(thumb) = &item.thumb_dest {
+                            if let Ok(b) = std::fs::read(dir.join(thumb)) {
+                                store.put_thumb(item.file_id, item.kind, &b).await?;
+                            }
+                        }
+                    }
+                    store
+                        .link_media(
+                            chat.id,
+                            item.message_id,
+                            item.role,
+                            item.file_id,
+                            item.kind,
+                            &item.dest,
+                        )
+                        .await?;
+                }
+            }
+        }
+
+        // **The scratch tree goes, whatever happened.** It only exists in a
+        // database-only run, the bytes it held are in the archive by now, and
+        // leaving it behind puts a folder of somebody's photos next to their
+        // exports under a name that looks like a mistake.
+        if !files {
+            let _ = std::fs::remove_dir_all(&scratch);
         }
 
         Self::close_all(
@@ -1059,12 +1631,30 @@ impl<'a> ChatExporter<'a> {
             &self.names,
             split,
             &mut result,
+            self.store.as_ref(),
             progress,
-        );
+        )
+        .await;
+        // After `close_all`, which commits: the run row is the record that the
+        // batch above it landed, so writing it inside the transaction it
+        // describes would make it disappear with everything else on a crash.
+        if let (Some(store), Some(run_id)) = (&self.store, run_id) {
+            store
+                .finish_run(
+                    run_id,
+                    result.db_new,
+                    result.db_changed,
+                    result.db_deleted,
+                    result.db_blobs,
+                    result.reached_end,
+                    seen_at,
+                )
+                .await?;
+        }
         progress(Progress::Messages {
             chat_id: chat.id,
             done,
-            total,
+            total: reported_total,
         });
         Ok(result)
     }
@@ -1342,6 +1932,92 @@ mod tests {
         assert!(r.complete());
     }
 
+    /// The trap the database output walks straight into.
+    ///
+    /// `reached_end` is true for essentially every successful export — `Ok(None)`
+    /// is the ordinary way the read loop finishes — so writing `complete()` as
+    /// `reached_end || <the count rule>` would report the 5,608-of-6,643 run
+    /// above as complete and take the INCOMPLETE warning out of the product
+    /// without failing a single test. The two rules are alternatives.
+    #[test]
+    fn reaching_the_end_does_not_excuse_a_short_folder_export() {
+        let r = ExportResult {
+            expected: 6643,
+            messages: 5608,
+            reached_end: true,
+            windowed: false,
+            ..Default::default()
+        };
+        assert!(
+            !r.complete(),
+            "a folder export short of Telegram's own count is INCOMPLETE, \
+             whether or not the walk ended tidily"
+        );
+    }
+
+    #[test]
+    fn a_windowed_sync_is_judged_by_the_walk_and_not_by_the_count() {
+        // It read the newest 500 of 6,643 on purpose. Measured against the
+        // chat's size that is an 8% export; measured against what it set out to
+        // do it is a complete one.
+        let mut r = ExportResult {
+            expected: 6643,
+            messages: 500,
+            windowed: true,
+            reached_end: true,
+            ..Default::default()
+        };
+        assert!(r.complete());
+        // But a sync that was cancelled or stalled is still short.
+        r.reached_end = false;
+        assert!(!r.complete());
+    }
+
+    #[test]
+    fn a_window_is_read_only_when_the_database_is_the_only_output() {
+        // A folder is being written: the whole history, always — that pass is
+        // what fills the database, and it is what lets deletions be noticed.
+        assert!(!reads_a_window(true, true, false, 6643));
+        // Database only, with an archive to window against.
+        assert!(reads_a_window(false, true, false, 6643));
+        // The first sync has nothing to window against, so it reads everything.
+        assert!(!reads_a_window(false, true, false, 0));
+        // "Re-read the whole history" overrides the window.
+        assert!(!reads_a_window(false, true, true, 6643));
+        // And with the database off there is no window in the first place.
+        assert!(!reads_a_window(false, false, false, 6643));
+    }
+
+    #[test]
+    fn a_file_already_in_the_database_is_not_downloaded_again() {
+        use tgx_archive::Merge;
+        // The only combination that fetches: a message new to the archive,
+        // carrying a file with an id, not already promised, not already stored.
+        assert!(worth_fetching(Some(Merge::Inserted), 77, false, false));
+
+        // Already stored by an earlier run.
+        assert!(!worth_fetching(Some(Merge::Inserted), 77, false, true));
+        // Already promised by an earlier message in *this* run. `has_blob`
+        // cannot see this — nothing reaches `blobs` until the pool has run — so
+        // without the queue set the file would be fetched twice.
+        assert!(!worth_fetching(Some(Merge::Inserted), 77, true, false));
+        // A message we already had: its media was fetched on the run that
+        // inserted it.
+        assert!(!worth_fetching(Some(Merge::Unchanged), 77, false, false));
+        assert!(!worth_fetching(
+            Some(Merge::Changed {
+                previous_version: 1
+            }),
+            77,
+            false,
+            false
+        ));
+        // A stripped thumbnail has no Telegram file id and is never archived.
+        assert!(!worth_fetching(Some(Merge::Inserted), 0, false, false));
+        // And with no database there is no verdict.
+        assert!(!worth_fetching(None, 77, false, false));
+    }
+
     /// How many `Progress::Messages` a chat of `total` messages would send.
     fn reports_for(total: i64) -> usize {
         let stride = progress_stride(total);
@@ -1453,7 +2129,7 @@ mod tests {
             "media_type": "sticker",
             "file": "stickers/sticker.webp",
         });
-        let line = describe(m.as_object().unwrap(), "ćaskanje", 1);
+        let line = describe(m.as_object().unwrap(), "ćaskanje", 1, None);
         assert!(
             !line.contains(secret),
             "the text leaked into the log: {line}"
@@ -1478,7 +2154,7 @@ mod tests {
             "actor": "UA KOLAB",
             "text": ["private words ", {"type": "mention", "text": "@someone"}],
         });
-        let line = describe(m.as_object().unwrap(), "t", 0);
+        let line = describe(m.as_object().unwrap(), "t", 0, None);
         assert!(!line.contains("private words"));
         assert!(!line.contains("@someone"));
         assert!(line.contains("text:2"));
@@ -1494,7 +2170,7 @@ mod tests {
             "text": "",
             "file": crate::plan::TOO_LARGE,
         });
-        let line = describe(m.as_object().unwrap(), "t", 0);
+        let line = describe(m.as_object().unwrap(), "t", 0, None);
         assert!(line.contains("file=skipped"), "{line}");
         assert!(!line.contains("exceeds maximum size"), "{line}");
     }

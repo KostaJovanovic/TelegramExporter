@@ -27,6 +27,10 @@ pub const SIZE_RANGE: (i64, i64) = (0, 20_000);
 /// Member roster cap. `0` is no cap. A public channel can have millions of
 /// members and Telegram stops serving the listing long before that.
 pub const MEMBER_RANGE: (i64, i64) = (0, 1_000_000);
+/// How many of the newest archived messages a database-only sync re-reads. `0`
+/// is a real answer — "only what is new" — so the floor is zero. The ceiling is
+/// where a sync stops being faster than the whole-history pass it replaces.
+pub const REREAD_RANGE: (i64, i64) = (0, 10_000);
 
 /// Read a number out of a text field.
 ///
@@ -54,6 +58,7 @@ pub struct SettingsForm {
     pub size_limit: String,
     pub downloads: String,
     pub member_limit: String,
+    pub reread_window: String,
 }
 
 impl SettingsForm {
@@ -83,6 +88,11 @@ impl SettingsForm {
             settings.download_concurrency as i64,
         ) as usize;
         settings.member_limit = number(&self.member_limit, MEMBER_RANGE, settings.member_limit);
+        settings.reread_window = number(
+            &self.reread_window,
+            REREAD_RANGE,
+            settings.reread_window as i64,
+        ) as usize;
     }
 
     /// Write the stored values back into the fields.
@@ -106,6 +116,7 @@ impl SettingsForm {
             &settings.download_concurrency.to_string(),
         );
         set(&mut self.member_limit, &settings.member_limit.to_string());
+        set(&mut self.reread_window, &settings.reread_window.to_string());
     }
 }
 

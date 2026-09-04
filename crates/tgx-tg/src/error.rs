@@ -110,8 +110,29 @@ pub enum ExportError {
     #[error("gave up after {waits} rate limits with no progress")]
     Stalled { waits: u32 },
 
+    /// The database output could not be opened or written.
+    ///
+    /// Given a message of its own rather than passed through, because what
+    /// libsql says on the one failure a user can actually cause —
+    /// two processes on one export root — is `SQLITE_BUSY`, and that is not a
+    /// sentence anybody can act on.
+    #[error("{}", archive_message(.0))]
+    Archive(#[from] tgx_archive::Error),
+
     #[error("cancelled")]
     Cancelled,
+}
+
+/// `tgx_archive::Error`, said the way the transcript needs it said.
+fn archive_message(e: &tgx_archive::Error) -> String {
+    let raw = e.to_string();
+    if raw.contains("SQLITE_BUSY") || raw.to_lowercase().contains("database is locked") {
+        return format!(
+            "telegram.sqlite is being written by something else — close the other \
+             TelegramExporter or `tgx` run on this output folder and try again ({raw})"
+        );
+    }
+    raw
 }
 
 /// Classify a grammers error into our own vocabulary.

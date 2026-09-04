@@ -140,7 +140,22 @@ pub async fn export(
         }
     };
 
-    let mut exporter = ChatExporter::new(&session.client, &settings, session.session());
+    // **Once for the whole queue**, like the one Telegram connection — and a
+    // database that will not open ends the queue rather than each chat, for the
+    // same reason an unwritable output folder does: every later chat would fail
+    // in exactly the same way.
+    let mut exporter = match ChatExporter::new(&session.client, &settings, session.session()).await
+    {
+        Ok(e) => e,
+        Err(e) => {
+            let _ = tx.send(Event::Failed {
+                activity: Activity::Export,
+                message: format!("cannot open the database: {e}"),
+            });
+            let _ = tx.send(Event::Finished { stopped: true });
+            return;
+        }
+    };
 
     for chat in &chats {
         if cancel.is_cancelled() {
@@ -197,28 +212,41 @@ pub async fn export(
             });
         }
 
-        let root = match tgx_tg::engine::unique_dir(
-            std::path::Path::new(&settings.output_dir),
-            &chat.title,
-        ) {
-            Ok(r) => r,
-            Err(e) => {
-                // The destination is free text and may be unwritable,
-                // disconnected or invalid. That ends the whole queue, not
-                // one chat: every later chat would fail the same way.
-                let _ = tx.send(Event::Failed {
-                    activity: Activity::Export,
-                    message: format!("cannot write into {}: {e}", settings.output_dir),
-                });
-                let _ = tx.send(Event::Finished { stopped: true });
-                return;
+        // **No folder when nothing goes into one.** With only the Database
+        // format ticked there is nothing to write, and reserving a directory
+        // anyway would leave an empty `Dev Team (7)` behind on every sync.
+        let root = if settings.export_html || settings.export_json {
+            match tgx_tg::engine::unique_dir(
+                std::path::Path::new(&settings.output_dir),
+                &chat.title,
+            ) {
+                Ok(r) => {
+                    let _ = tx.send(Event::Log(format!(
+                        "{}: writing to {}",
+                        chat.title,
+                        r.display()
+                    )));
+                    Some(r)
+                }
+                Err(e) => {
+                    // The destination is free text and may be unwritable,
+                    // disconnected or invalid. That ends the whole queue, not
+                    // one chat: every later chat would fail the same way.
+                    let _ = tx.send(Event::Failed {
+                        activity: Activity::Export,
+                        message: format!("cannot write into {}: {e}", settings.output_dir),
+                    });
+                    let _ = tx.send(Event::Finished { stopped: true });
+                    return;
+                }
             }
+        } else {
+            let _ = tx.send(Event::Log(format!(
+                "{}: into the database only — no folder",
+                chat.title
+            )));
+            None
         };
-        let _ = tx.send(Event::Log(format!(
-            "{}: writing to {}",
-            chat.title,
-            root.display()
-        )));
 
         let chat_id = chat.id;
         let tx2 = tx.clone();
@@ -255,14 +283,29 @@ pub async fn export(
         };
 
         match exporter
-            .run(chat, peer, &topics, &root, &mut on_progress, &cancel)
+            .run(
+                chat,
+                peer,
+                &topics,
+                root.as_deref(),
+                &mut on_progress,
+                &cancel,
+            )
             .await
         {
             Ok(result) => {
                 let _ = tx.send(Event::ChatDone {
                     chat_id,
                     messages: result.messages,
-                    expected: result.expected,
+                    // **A windowed run reports no expected count and no
+                    // measured one.** It read the newest few hundred messages
+                    // on purpose; handing that up would make the row read
+                    // "500 of 6,643" with an 8% bar, and `set_count` would then
+                    // overwrite the chat list's size with 500. See
+                    // `ExportResult::complete`, which draws the same
+                    // distinction for the INCOMPLETE warning.
+                    expected: if result.windowed { 0 } else { result.expected },
+                    messages_measured: !result.windowed,
                     // `result.topics` counts output folders, and an unsplit
                     // chat has exactly one. Only a chat that really was split
                     // has a topic count to report.
@@ -311,6 +354,21 @@ fn report_result(tx: &Events, title: &str, result: &tgx_tg::engine::ExportResult
     }
     line.push_str(&format!(", {} files ({mb:.1} MB)", result.media_downloaded));
     let _ = tx.send(Event::Log(line));
+
+    // The database gets a line of its own rather than four more clauses on the
+    // one above: the two are different accounts of the run. The first is what
+    // this export produced; this is what the archive holds now.
+    if result.db_archived > 0 || result.db_new > 0 {
+        let _ = tx.send(Event::Log(format!(
+            "{title}: database +{} new, {} changed, {} deleted on Telegram (kept), \
+             {} files stored — {} archived",
+            result.db_new,
+            result.db_changed,
+            result.db_deleted,
+            result.db_blobs,
+            result.db_archived
+        )));
+    }
 
     // **A short export must not read like a complete one.** A crash at message
     // 5,609 of 6,600 produced a cheerful summary and a thousand missing

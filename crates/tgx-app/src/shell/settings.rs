@@ -136,15 +136,21 @@ impl Shell {
                 1,
             ),
             (
+                "Database (telegram.sqlite, kept up to date across runs)",
+                self.settings.export_db,
+                2,
+            ),
+            (
                 "Split forum topics into separate folders",
                 self.settings.split_topics,
-                2,
+                3,
             ),
         ] {
             if self.check(ui, label, on, true) {
                 self.toggle_setting(|s| match change {
                     0 => s.export_html = !s.export_html,
                     1 => s.export_json = !s.export_json,
+                    2 => s.export_db = !s.export_db,
                     _ => s.split_topics = !s.split_topics,
                 });
             }
@@ -153,6 +159,39 @@ impl Shell {
         if page {
             self.commit_settings();
         }
+
+        // The two sync controls sit here rather than in a section of their own,
+        // because they are meaningless without the box above them — and they
+        // are drawn disabled when it is off for the same reason the media kinds
+        // are: a control that changes nothing must not look like one that does.
+        let db = self.settings.export_db;
+        hint(
+            ui,
+            "One file beside your exports holding every message, edit and file \
+             this app has ever seen in these chats — including messages later \
+             deleted on Telegram. The HTML and JSON exports are unaffected.",
+            &self.palette,
+        );
+        if self.number_row(ui, "Re-read the last N messages", db, |f| {
+            &mut f.reread_window
+        }) {
+            self.commit_settings();
+        }
+        if self.check(
+            ui,
+            "Re-read the whole history",
+            self.settings.reread_all,
+            db,
+        ) {
+            self.toggle_setting(|s| s.reread_all = !s.reread_all);
+        }
+        hint(
+            ui,
+            "Both apply only when Database is the *only* format ticked, which \
+             makes the run a quick sync. With HTML or JSON on, the whole history \
+             is read anyway and every deletion is noticed.",
+            &self.palette,
+        );
     }
 
     fn media_section(&mut self, ui: &mut Ui) {

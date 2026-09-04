@@ -138,9 +138,9 @@ impl Shell {
         // Whatever is in the fields is what the run should use, so the fields
         // are read here rather than trusted to have been committed already.
         self.commit_settings();
-        if !(self.settings.export_html || self.settings.export_json) {
+        if !(self.settings.export_html || self.settings.export_json || self.settings.export_db) {
             self.journal
-                .warn("Nothing to write: enable HTML, JSON or both under Format.");
+                .warn("Nothing to write: enable HTML, JSON or Database under Format.");
             self.status = "No output format selected".into();
             return;
         }
