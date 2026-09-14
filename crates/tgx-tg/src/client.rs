@@ -10,12 +10,54 @@
 use crate::config::{ensure_data_dir, session_file, Settings};
 use crate::error::{classify, EnrichError};
 use anyhow::{anyhow, Context, Result};
+use grammers_client::client::{AutoSleep, ClientConfiguration, RetryContext, RetryPolicy};
 use grammers_client::{Client, SenderPool};
 use grammers_session::storages::SqliteSession;
 use std::future::Future;
+use std::ops::ControlFlow;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::Mutex;
+
+/// How many times one request is re-sent after Telegram fails on its side.
+///
+/// Two, four and eight seconds apart: fourteen seconds, on a request that
+/// used to end a chat. Past that the error goes back to the caller, and the
+/// read loop has patience of its own — see `engine::UNAVAILABLE_PAUSE`.
+pub const SERVER_RETRIES: u32 = 3;
+
+/// grammers' own retry policy, plus the one class of error it gives up on at
+/// once.
+///
+/// **`AutoSleep` sleeps on flood waits and I/O errors, and on nothing else.**
+/// A 500 — `RPC_CALL_FAIL`, Telegram saying "internal issues, try again" —
+/// went straight back to the caller, and the read loop ended the chat on it:
+/// 48,312 of 122,487 messages, on 2026-09-13. Fixed here rather than at each
+/// call site, because this one policy sits under every request the program
+/// makes: every history page, every file, every enrichment.
+///
+/// Everything that is not a server error is handed to `AutoSleep` unchanged,
+/// so the flood-wait behaviour is grammers' own, byte for byte.
+struct Patient(AutoSleep);
+
+impl RetryPolicy for Patient {
+    fn should_retry(&self, ctx: &RetryContext) -> ControlFlow<(), Duration> {
+        if classify(&ctx.error).is_unavailable() {
+            let failures = ctx.fail_count.get();
+            return if failures <= SERVER_RETRIES {
+                ControlFlow::Continue(server_pause(failures))
+            } else {
+                ControlFlow::Break(())
+            };
+        }
+        self.0.should_retry(ctx)
+    }
+}
+
+/// Two seconds after the first failure, doubling after each one.
+fn server_pause(failures: u32) -> Duration {
+    Duration::from_secs(2u64 << failures.saturating_sub(1).min(5))
+}
 
 /// How long establishing the connection may take before it is called a failure.
 ///
@@ -117,7 +159,15 @@ impl Connection {
             )
         })?;
         let pool = SenderPool::new(session.clone(), api_id);
-        let client = Client::new(pool.handle);
+        // `Client::new` is this with grammers' default policy, which gives up
+        // on a server error at the first one. See [`Patient`].
+        let client = Client::with_configuration(
+            pool.handle,
+            ClientConfiguration {
+                retry_policy: Box::new(Patient(AutoSleep::default())),
+                ..ClientConfiguration::default()
+            },
+        );
         // `pool.updates` is deliberately dropped. Nothing here reacts to live
         // updates — an export reads history — and the runner sends them with
         // `let _ = tx.send(..)`, so a dropped receiver makes each send a
@@ -498,6 +548,67 @@ pub fn classify_error(e: &grammers_client::InvocationError) -> EnrichError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What grammers hands the policy after the `fail_count`th failure of one
+    /// request. Routed through `RpcError::from`, as `error.rs` does, so the
+    /// name and value are split the way they really arrive.
+    fn failed(code: i32, message: &str, fail_count: u32) -> RetryContext {
+        RetryContext {
+            fail_count: std::num::NonZeroU32::new(fail_count).unwrap(),
+            slept_so_far: Duration::ZERO,
+            error: grammers_client::InvocationError::Rpc(grammers_client::sender::RpcError::from(
+                grammers_tl_types::types::RpcError {
+                    error_code: code,
+                    error_message: message.to_string(),
+                },
+            )),
+        }
+    }
+
+    #[test]
+    fn a_server_error_is_sent_again_three_times_and_then_handed_back() {
+        // grammers' default gave up on the first one, and one `RPC_CALL_FAIL`
+        // ended a chat 48,312 messages in. Handed back after the third, not
+        // held forever: an outage that does not end is the read loop's to
+        // judge, with the cursor it has.
+        let policy = Patient(AutoSleep::default());
+        let answers: Vec<_> = (1..=4)
+            .map(|n| policy.should_retry(&failed(500, "RPC_CALL_FAIL", n)))
+            .collect();
+        assert_eq!(
+            answers,
+            vec![
+                ControlFlow::Continue(Duration::from_secs(2)),
+                ControlFlow::Continue(Duration::from_secs(4)),
+                ControlFlow::Continue(Duration::from_secs(8)),
+                ControlFlow::Break(()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_flood_wait_is_still_left_to_grammers() {
+        // The policy wraps `AutoSleep` rather than replacing it. A wait
+        // Telegram named is slept on for exactly its length, once, as before.
+        let policy = Patient(AutoSleep::default());
+        assert_eq!(
+            policy.should_retry(&failed(420, "FLOOD_WAIT_21", 1)),
+            ControlFlow::Continue(Duration::from_secs(21))
+        );
+        assert_eq!(
+            policy.should_retry(&failed(420, "FLOOD_WAIT_21", 2)),
+            ControlFlow::Break(())
+        );
+    }
+
+    #[test]
+    fn a_refusal_is_not_sent_again() {
+        let policy = Patient(AutoSleep::default());
+        assert_eq!(
+            policy.should_retry(&failed(400, "CHANNEL_PRIVATE", 1)),
+            ControlFlow::Break(())
+        );
+    }
 
     /// A `PasswordToken` with nothing real in it.
     ///

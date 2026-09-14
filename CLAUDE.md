@@ -200,6 +200,14 @@ address sits in the OS's SYN retry (~21s on Windows) with the UI reading
 longer because `auth.sendCode` can contain a whole second connection
 (`PHONE_MIGRATE` means a fresh DH exchange against the home DC first).
 
+**A Telegram server error is sent again, not believed.** `client::Patient` is
+the client's retry policy: grammers' own `AutoSleep` for flood waits, plus three
+re-sends (2, 4, 8 s) for the 500 family and -503 `Timeout`, which
+`classify` calls `EnrichError::Unavailable`. grammers' default gives up on
+those at once, and one `RPC_CALL_FAIL` ended a 122,487-message chat at 48,312.
+The read loop resumes on one that outlasts the policy, against
+`MAX_STALLED_WAITS`.
+
 **Anything needing an authorised account calls `ensure_connected` first**
 (`actions::ready`). It bounds a blocked network and names an unauthorised
 account instead of surfacing either as a wire error mid-listing. Cached on the

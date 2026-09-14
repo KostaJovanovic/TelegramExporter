@@ -10,7 +10,9 @@
 //!
 //! The resume loop exists so a long `FloodWait` mid-history resumes instead of
 //! aborting, and gives up only after [`MAX_STALLED_WAITS`] waits with **no
-//! progress** — a wait that moved the cursor forward resets the counter.
+//! progress** — a wait that moved the cursor forward resets the counter. A
+//! Telegram server error that outlasts `client::Patient` resumes the same way,
+//! after [`UNAVAILABLE_PAUSE`].
 
 use crate::cancel::Cancel;
 use crate::client::ChatInfo;
@@ -41,6 +43,17 @@ use tgx_media::topics::{topic_id_for, ReplyHeader, GENERAL_TOPIC_ID};
 /// How many rate limits with no progress before the read loop gives up.
 pub const MAX_STALLED_WAITS: u32 = 10;
 
+/// How long the read loop waits before asking again after Telegram failed on
+/// its side, **once `client::Patient` has already re-sent the page three
+/// times**.
+///
+/// Longer than those retries on purpose: an error that outlasted fourteen
+/// seconds of them is an outage rather than a blip. Counted against
+/// [`MAX_STALLED_WAITS`] like a rate limit, so an outage that does not end
+/// still ends the chat — about seven minutes in, with everything read so far
+/// kept.
+pub const UNAVAILABLE_PAUSE: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// What one chat's export produced.
 ///
 /// **Per-chat tallies live here, never on the exporter.** One exporter serves
@@ -63,8 +76,9 @@ pub struct ExportResult {
     /// which is what a crash at message 5,609 of 6,600 looked like — a cheerful
     /// summary and a thousand missing messages.
     pub expected: i64,
-    /// Enrichments a rate limit cost. **Not** the same as one being refused:
-    /// this means the data was there and we did not get it.
+    /// Enrichments a rate limit or a Telegram server error cost. **Not** the
+    /// same as one being refused: this means the data was there and we did not
+    /// get it.
     pub enrich_deferred: usize,
     pub extra_requests: usize,
     /// Type names the JSON encoder could not map.
@@ -79,7 +93,14 @@ pub struct ExportResult {
     /// It exists because the warning that points the user at that file was
     /// reporting `media_failed`: the run said "21 files could not be fetched —
     /// see missing_media.txt" over a file that listed 42.
+    ///
+    /// A database-only run has no folder and so no such file; the same paths
+    /// go to `tgx.log`, every one of them.
     pub media_missing: usize,
+    /// Contacts `own_names` wrote as their `@handle`, and contacts it could not
+    /// because they have no handle — **people in this chat**, not messages and
+    /// not the queue so far. See `convert::Aliased`.
+    pub aliased: (usize, usize),
     pub bytes_downloaded: i64,
     pub members: usize,
     /// **A short member list says so.** A truncated roster is
@@ -619,6 +640,11 @@ impl<'a> ChatExporter<'a> {
             root: root.map(Path::to_path_buf),
             ..Default::default()
         };
+        // **This chat's tally, on a book that outlives it.** The names mean the
+        // same thing in every chat, so the book is kept for the whole queue;
+        // who `own_names` touched is this chat's alone. Left running, the
+        // seventh chat of a queue reported 300,410 contacts.
+        self.names.aliased = Default::default();
         // **Classic or Database — the two are a choice, not a set of ticks.**
         //
         // Classic writes Desktop's folders and re-reads the chat from the
@@ -734,10 +760,18 @@ impl<'a> ChatExporter<'a> {
         result.expected = total;
 
         let split = self.settings.split_topics && chat.is_forum;
+        // **"Folder" only where one is written.** A database-only run records
+        // each message's topic and makes no folder at all, and these lines
+        // said "one folder each" on every chat of a twelve-chat queue.
         if split {
             progress(Progress::Log(format!(
-                "forum: {} topics, one folder each — {}",
+                "forum: {} topics, {} — {}",
                 topics.len(),
+                if files {
+                    "one folder each"
+                } else {
+                    "each message filed under its own"
+                },
                 topics
                     .iter()
                     .map(|t| t.title.as_str())
@@ -746,10 +780,22 @@ impl<'a> ChatExporter<'a> {
             )));
         } else if chat.is_forum {
             progress(Progress::Log(
-                "forum, but split_topics is off: everything into one folder".into(),
+                if files {
+                    "forum, but split_topics is off: everything into one folder"
+                } else {
+                    "forum, but split_topics is off: no message's topic is recorded"
+                }
+                .into(),
             ));
         } else {
-            progress(Progress::Log("not a forum: one folder".into()));
+            progress(Progress::Log(
+                if files {
+                    "not a forum: one folder"
+                } else {
+                    "not a forum"
+                }
+                .into(),
+            ));
         }
         let mut sinks: HashMap<i64, TopicSink> = HashMap::new();
         // `chat.public`, not `true`. Hardcoding it made the `false` arm of
@@ -806,8 +852,8 @@ impl<'a> ChatExporter<'a> {
             .await;
             result.members = roster.members.len();
             result.members_complete = roster.complete;
-            self.names.aliased.0 += roster.aliased.0;
-            self.names.aliased.1 += roster.aliased.1;
+            // By person: a member who also posts is one contact, not two.
+            self.names.aliased.absorb(&roster.aliased);
             progress(Progress::Log(format!(
                 "roster: {} members, {} — {} extra request(s), {:.1}s in",
                 roster.members.len(),
@@ -1302,6 +1348,38 @@ impl<'a> ChatExporter<'a> {
                             sleep_in_slices_until(d, cancel).await;
                             continue 'resume;
                         }
+                        // Only reached once `client::Patient` has re-sent this
+                        // page three times. It fell to the arm below and ended
+                        // the chat: one `RPC_CALL_FAIL`, 48,312 messages into
+                        // 122,487. Resumed from the cursor instead, against the
+                        // same no-progress budget as a rate limit.
+                        EnrichError::Unavailable(name) => {
+                            stalled += 1;
+                            if stalled >= MAX_STALLED_WAITS {
+                                Self::close_all(
+                                    &mut sinks,
+                                    root,
+                                    chat,
+                                    topics,
+                                    &self.names,
+                                    split,
+                                    &mut result,
+                                    self.store.as_ref(),
+                                    progress,
+                                )
+                                .await;
+                                return Err(ExportError::Invocation(format!(
+                                    "Telegram kept failing on its side ({name}) — \
+                                     {stalled} times with no message in between"
+                                )));
+                            }
+                            progress(Progress::Log(format!(
+                                "Telegram failed on its side ({name}) — trying again in {}s",
+                                UNAVAILABLE_PAUSE.as_secs()
+                            )));
+                            sleep_in_slices_until(UNAVAILABLE_PAUSE, cancel).await;
+                            continue 'resume;
+                        }
                         other => {
                             Self::close_all(
                                 &mut sinks,
@@ -1389,9 +1467,14 @@ impl<'a> ChatExporter<'a> {
         // exactly like a switch that does nothing — the failure this codebase
         // has had five of.
         if self.settings.own_names {
-            let (replaced, kept) = self.names.aliased;
+            result.aliased = self.names.aliased.counts();
+            let (replaced, kept) = result.aliased;
+            // A `\` at the end of the first line, not a bare line break: without
+            // it the next line's indentation became part of the sentence, and
+            // every one of these carried eighteen spaces in the middle.
             progress(Progress::Log(format!(
-                "own names: {replaced} contact(s) written as their @handle,                  {kept} kept under your name for want of one"
+                "own names: {replaced} contact(s) written as their @handle, \
+                 {kept} kept under your name for want of one"
             )));
         }
         result.extra_requests += tally.requests;
@@ -1560,10 +1643,22 @@ impl<'a> ChatExporter<'a> {
                 )));
             }
             if tally.missing.len() > SHOWN {
-                progress(Progress::Log(format!(
-                    "  … and {} more — all of them in missing_media.txt",
-                    tally.missing.len() - SHOWN
-                )));
+                let rest = tally.missing.len() - SHOWN;
+                if files {
+                    progress(Progress::Log(format!(
+                        "  … and {rest} more — all of them in missing_media.txt"
+                    )));
+                } else {
+                    // No folder, so no missing_media.txt — and this line
+                    // promised one. The rest go to tgx.log alone, which keeps
+                    // every path without flushing the transcript's ring.
+                    for m in tally.missing.iter().skip(SHOWN) {
+                        log::info!("  not saved: {} — {}", m.path, m.reason);
+                    }
+                    progress(Progress::Log(format!(
+                        "  … and {rest} more — every one of them in tgx.log"
+                    )));
+                }
             }
             result.media_downloaded += tally.downloaded;
             result.media_failed += tally.failed;

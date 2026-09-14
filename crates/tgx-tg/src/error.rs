@@ -60,6 +60,24 @@ pub enum EnrichError {
     #[error("stale file reference: {0}")]
     Stale(String),
 
+    /// Telegram failed on its own side — `RPC_CALL_FAIL`, `HISTORY_GET_FAILED`,
+    /// a `Timeout`: the 500 family, which Telegram documents as "try again".
+    ///
+    /// **Not a rate limit and not a refusal.** Nothing asked us to wait and
+    /// nothing said no: the request was fine, and the same request can succeed
+    /// a moment later.
+    ///
+    /// Classified as [`Refused`] it ended a whole chat. A database export on
+    /// 2026-09-13 read 48,312 of one forum's 122,487 messages and stopped on a
+    /// single `RPC_CALL_FAIL`, retried by nobody: grammers' own policy sleeps
+    /// on flood waits and I/O errors only, and the read loop took everything
+    /// that was not a wait as the end. `client::Patient` now re-sends these
+    /// under every request, and the read loop resumes on one that outlasts it.
+    ///
+    /// [`Refused`]: EnrichError::Refused
+    #[error("Telegram server error: {0}")]
+    Unavailable(String),
+
     /// Telegram said no, and will keep saying no — an admin-only method for a
     /// non-admin, a channel we cannot read. Giving up quietly is correct.
     #[error("refused: {0}")]
@@ -94,6 +112,17 @@ impl EnrichError {
     /// [`is_transient`]: EnrichError::is_transient
     pub fn is_stale(&self) -> bool {
         matches!(self, EnrichError::Stale(_))
+    }
+
+    /// Did Telegram fail on its own side? See [`EnrichError::Unavailable`].
+    ///
+    /// Deliberately not folded into [`is_transient`] either: every caller of
+    /// that reads it as a rate limit — it tells the user "rate limited" and
+    /// waits the length Telegram named, and a server error names none.
+    ///
+    /// [`is_transient`]: EnrichError::is_transient
+    pub fn is_unavailable(&self) -> bool {
+        matches!(self, EnrichError::Unavailable(_))
     }
 }
 
@@ -175,6 +204,15 @@ pub fn classify(err: &grammers_client::InvocationError) -> EnrichError {
             // wearing a different name.
             if name.contains("FILE_REFERENCE") {
                 return EnrichError::Stale(name.clone());
+            }
+            // Telegram's own side failed. Matched on the code, not the name:
+            // there are two dozen names in the family — `RPC_CALL_FAIL`,
+            // `RPC_MCGET_FAIL`, `HISTORY_GET_FAILED`,
+            // `WORKER_BUSY_TOO_LONG_RETRY` — and the code is the part Telegram
+            // documents as the contract. -503 is the code it documents for
+            // `Timeout`, which wrote off 9 files in one run as "refused".
+            if rpc.code >= 500 || rpc.code == -503 {
+                return EnrichError::Unavailable(name.clone());
             }
             // Everything else from the RPC layer is Telegram declining.
             EnrichError::Refused(rpc.name.clone())
@@ -299,7 +337,38 @@ mod tests {
                 !got.is_stale(),
                 "{message} was mistaken for a stale reference"
             );
+            assert!(
+                !got.is_unavailable(),
+                "{message} was mistaken for a server error — it would be re-sent \
+                 three times to be refused three more"
+            );
             assert_eq!(got.retry_after(), None);
+        }
+    }
+
+    #[test]
+    fn a_server_error_is_neither_a_wait_nor_a_refusal() {
+        // One `RPC_CALL_FAIL` ended a chat 48,312 messages into 122,487, because
+        // it landed in `Refused` and the read loop gives up on those. The code
+        // is what is matched, so a name nobody has seen yet is covered too.
+        for (code, message) in [
+            (500, "RPC_CALL_FAIL"),
+            (500, "HISTORY_GET_FAILED"),
+            (500, "SOME_NAME_NOBODY_HAS_SEEN_YET"),
+            (-503, "Timeout"),
+        ] {
+            let got = classify(&rpc(code, message));
+            assert!(got.is_unavailable(), "{message} was not recognised");
+            assert!(!got.is_transient(), "{message} was mistaken for a wait");
+            assert!(
+                !got.is_stale(),
+                "{message} was mistaken for a stale reference"
+            );
+            assert_eq!(
+                got.retry_after(),
+                None,
+                "{message}: Telegram named no wait, so none may be invented here"
+            );
         }
     }
 

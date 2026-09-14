@@ -455,7 +455,7 @@ mod tests {
         })
         .await;
 
-        assert!(matches!(outcome, TopicsResolution::RateLimited));
+        assert!(matches!(outcome, TopicsResolution::TryLater));
         assert_eq!(calls, 2, "one retry, not zero and not more");
 
         let mut events = Vec::new();
@@ -464,6 +464,45 @@ mod tests {
         }
         // The one text that must never appear here: it is what told the user
         // their forum had been quietly exported as a single folder.
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::Warn(m) if m.contains("one folder"))),
+            "got {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::ChatFailed { chat_id: 42, .. })),
+            "got {events:?}"
+        );
+    }
+
+    /// Telegram failing on its side is temporary too, so it must not collapse
+    /// a forum either. `client::Patient` has already re-sent the request by
+    /// the time this sees it, so there is no second attempt here.
+    #[tokio::test]
+    async fn a_server_error_during_topic_discovery_skips_the_chat_rather_than_collapsing_it() {
+        let (raw, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = crate::bridge::Events::detached(raw);
+        let cancel = Cancel::new();
+        let mut calls = 0u32;
+        let outcome = resolve_topics("Some Forum", 42, &cancel, &tx, || {
+            calls += 1;
+            async {
+                Result::<Vec<dialogs::Topic>, EnrichError>::Err(EnrichError::Unavailable(
+                    "RPC_CALL_FAIL".into(),
+                ))
+            }
+        })
+        .await;
+
+        assert!(matches!(outcome, TopicsResolution::TryLater));
+        assert_eq!(calls, 1);
+        let mut events = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
         assert!(
             !events
                 .iter()

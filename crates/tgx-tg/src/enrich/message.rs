@@ -95,10 +95,11 @@ pub async fn fetch_reactors(
             Ok(p) => p,
             Err(e) => {
                 let err = classify(&e);
-                // A rate limit is the caller's to wait out. A refusal — this
-                // is admin-visible on some chats — costs the message its full
-                // list and nothing else.
-                if err.is_transient() {
+                // A rate limit is the caller's to wait out, and a server error
+                // the caller's to count. A refusal — this is admin-visible on
+                // some chats — costs the message its full list and nothing
+                // else.
+                if err.is_transient() || err.is_unavailable() {
                     return Err(err);
                 }
                 return Ok(Vec::new());
@@ -139,7 +140,7 @@ pub async fn fetch_poll_results(
         Ok(u) => u,
         Err(e) => {
             let err = classify(&e);
-            if err.is_transient() {
+            if err.is_transient() || err.is_unavailable() {
                 return Err(err);
             }
             return Ok(None);

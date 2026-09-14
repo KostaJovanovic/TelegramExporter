@@ -31,7 +31,37 @@ pub struct NameBook {
     /// Counted because this option is otherwise invisible: on an account with
     /// no contacts in the chat it legitimately changes nothing, and that looks
     /// exactly like a switch that does nothing.
-    pub aliased: (usize, usize),
+    ///
+    /// **This chat's, on a book that is the queue's.** The engine clears it at
+    /// the top of every run — see [`Aliased`] for what it reported when it did
+    /// not.
+    pub aliased: Aliased,
+}
+
+/// The contacts `own_names` touched, **counted by person**.
+///
+/// It was a pair of counters bumped on every [`NameBook::learn`], and `learn`
+/// runs for the sender of every message — so a chat of 33 members reported
+/// "75118 contact(s) written as their @handle". The counters also lived on the
+/// exporter, which serves the whole queue, so each chat's figure carried every
+/// chat before it: 300,410 by the seventh.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Aliased {
+    replaced: std::collections::HashSet<i64>,
+    kept: std::collections::HashSet<i64>,
+}
+
+impl Aliased {
+    /// `(written as their handle, kept under your name for want of one)`.
+    pub fn counts(&self) -> (usize, usize) {
+        (self.replaced.len(), self.kept.len())
+    }
+
+    /// Take another tally's people. Someone in both is still one person.
+    pub fn absorb(&mut self, other: &Aliased) {
+        self.replaced.extend(&other.replaced);
+        self.kept.extend(&other.kept);
+    }
 }
 
 impl NameBook {
@@ -48,6 +78,7 @@ impl NameBook {
         let (first, last) = own_name_parts(
             self.own_names,
             f.contact,
+            f.id,
             f.username,
             f.first,
             f.last,
@@ -181,25 +212,26 @@ pub struct UserFacts<'a> {
 /// name they chose; rewriting those to handles would lose real names to
 /// implement an option about false ones.
 ///
-/// `tally` counts `(replaced, kept)` — the second being a contact with no
-/// username, where their own name is unobtainable and yours is better than
-/// nothing.
+/// `tally` records user `id` as replaced or kept — the second being a contact
+/// with no username, where their own name is unobtainable and yours is better
+/// than nothing.
 pub(crate) fn own_name_parts<'a>(
     own_names: bool,
     contact: bool,
+    id: i64,
     username: &str,
     first: &'a str,
     last: &'a str,
-    tally: &mut (usize, usize),
+    tally: &mut Aliased,
 ) -> (&'a str, &'a str) {
     if !own_names || !contact {
         return (first, last);
     }
     if username.is_empty() {
-        tally.1 += 1;
+        tally.kept.insert(id);
         return (first, last);
     }
-    tally.0 += 1;
+    tally.replaced.insert(id);
     ("", "")
 }
 

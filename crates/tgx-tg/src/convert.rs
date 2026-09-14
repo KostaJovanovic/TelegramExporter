@@ -29,7 +29,7 @@ mod presentation;
 pub(crate) use actions::{action_user_ids, service_action};
 pub use entities::entities_of;
 pub(crate) use names::{own_name_parts, peer_colour};
-pub use names::{peer_key, NameBook, UserFacts};
+pub use names::{peer_key, Aliased, NameBook, UserFacts};
 pub use presentation::presentation;
 
 /// Desktop's `date` / `date_unixtime` pair.
@@ -815,10 +815,10 @@ mod tests {
         // the username is the only identifier guaranteed to be the person's
         // own. Confirmed against the account holder's own export: the name in
         // `result.json` was their contact name, not hers.
-        let mut tally = (0, 0);
-        let parts = own_name_parts(true, true, "tamara", "Tamara", "Blokade", &mut tally);
+        let mut tally = Aliased::default();
+        let parts = own_name_parts(true, true, 11, "tamara", "Tamara", "Blokade", &mut tally);
         assert_eq!(parts, ("", ""), "the contact name was kept");
-        assert_eq!(tally, (1, 0));
+        assert_eq!(tally.counts(), (1, 0));
         // Blanking the pair is the substitution: `display_name` already falls
         // back to the handle, so this goes down the same path as a user who
         // genuinely set no name.
@@ -833,10 +833,10 @@ mod tests {
         // For a non-contact Telegram already sends the name they chose.
         // Rewriting those to handles would lose real names in order to
         // implement an option about false ones.
-        let mut tally = (0, 0);
-        let parts = own_name_parts(true, false, "someone", "Nada", "Gavrilović", &mut tally);
+        let mut tally = Aliased::default();
+        let parts = own_name_parts(true, false, 12, "someone", "Nada", "Gavrilović", &mut tally);
         assert_eq!(parts, ("Nada", "Gavrilović"));
-        assert_eq!(tally, (0, 0), "a non-contact must not be counted");
+        assert_eq!(tally.counts(), (0, 0), "a non-contact must not be counted");
     }
 
     #[test]
@@ -844,20 +844,53 @@ mod tests {
         // Their own name is unobtainable and yours is better than none — but
         // it is counted, so the run can say how often it could not be honoured
         // rather than reporting a clean substitution it did not make.
-        let mut tally = (0, 0);
-        let parts = own_name_parts(true, true, "", "Tam Fmk", "", &mut tally);
+        let mut tally = Aliased::default();
+        let parts = own_name_parts(true, true, 13, "", "Tam Fmk", "", &mut tally);
         assert_eq!(parts, ("Tam Fmk", ""));
-        assert_eq!(tally, (0, 1));
+        assert_eq!(tally.counts(), (0, 1));
     }
 
     #[test]
     fn the_option_off_changes_nothing_at_all() {
-        let mut tally = (0, 0);
+        let mut tally = Aliased::default();
         assert_eq!(
-            own_name_parts(false, true, "tamara", "Tamara", "Blokade", &mut tally),
+            own_name_parts(false, true, 11, "tamara", "Tamara", "Blokade", &mut tally),
             ("Tamara", "Blokade")
         );
-        assert_eq!(tally, (0, 0));
+        assert_eq!(tally.counts(), (0, 0));
+    }
+
+    #[test]
+    fn a_contact_is_counted_once_however_often_they_post() {
+        // `learn` runs for the sender of every message, and the tally was a
+        // counter it bumped: a chat of 33 members reported 75,118 contacts
+        // written as their handle. It counts people now.
+        let mut book = NameBook {
+            own_names: true,
+            ..NameBook::default()
+        };
+        for _ in 0..500 {
+            book.learn(UserFacts {
+                id: 11,
+                first: "Tamara",
+                username: "tamara",
+                contact: true,
+                ..Default::default()
+            });
+        }
+        book.learn(UserFacts {
+            id: 13,
+            first: "Tam Fmk",
+            contact: true,
+            ..Default::default()
+        });
+        assert_eq!(book.aliased.counts(), (1, 1));
+
+        // And the roster naming the same person again is still one person.
+        let mut roster = Aliased::default();
+        own_name_parts(true, true, 11, "tamara", "Tamara", "", &mut roster);
+        book.aliased.absorb(&roster);
+        assert_eq!(book.aliased.counts(), (1, 1));
     }
 
     #[test]
@@ -881,7 +914,7 @@ mod tests {
         let key = PeerKey::user(11).to_string();
         assert_eq!(book.get(&key), "@tamara");
         assert_eq!(book.html_name(&key), "@tamara");
-        assert_eq!(book.aliased, (1, 0));
+        assert_eq!(book.aliased.counts(), (1, 0));
     }
 
     #[test]

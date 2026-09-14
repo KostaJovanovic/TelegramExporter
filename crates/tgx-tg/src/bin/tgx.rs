@@ -432,7 +432,8 @@ async fn export(settings: &Settings, want: &str) -> Result<()> {
     }
     if result.enrich_deferred > 0 {
         println!(
-            "{} optional requests were lost to rate limits (the data was there)",
+            "{} optional requests were lost to rate limits or Telegram server errors \
+             (the data was there)",
             result.enrich_deferred
         );
     }

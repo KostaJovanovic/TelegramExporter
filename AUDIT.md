@@ -161,6 +161,40 @@ the ones a future reader would otherwise repeat.
 
 ---
 
+# What the first database queue found — 2026-09-13
+
+Twelve forum supergroups queued in Database mode, one `.sqlite` each. The chats
+that finished were whole — per-topic counts summing to the chat's, stored files
+matching the files fetched. These are what the log of that run said that it
+should not have.
+
+- [x] **One `RPC_CALL_FAIL` ended a chat 48,312 messages into 122,487.** A 500
+  is Telegram saying "internal issues, try again", and nothing retried it:
+  grammers' `AutoSleep` sleeps on flood waits and I/O errors only, and
+  `classify` filed everything else as `Refused`, which the read loop ends on.
+  Now `EnrichError::Unavailable`, matched on the code (500 and -503) rather
+  than on the two dozen names; `client::Patient` re-sends it three times under
+  every request; and the read loop resumes on one that outlasts that. The same
+  run wrote off 9 files as `refused: Timeout, in 5 attempts` — each attempt is
+  now re-sent with a pause before it counts.
+- [x] **"see missing_media.txt", with no folder to hold one.** Database mode
+  writes no folder, so the list existed only in the log, and the transcript
+  showed 20 per topic. The rest now go to `tgx.log`, and the warning says so.
+- [x] **"own names: 75118 contact(s)" in a chat of 33 members — and 300,410 by
+  the seventh chat.** A counter bumped on every `learn`, which runs per
+  message, living on the exporter that serves the whole queue. Now
+  `convert::Aliased`, counted by person and cleared per run. The same line
+  carried eighteen spaces in its middle: a line break inside the literal with
+  no `\`.
+- [x] **"17 topic folders" from a run that writes no folders.** Wording only.
+
+**What recovering the failed chat costs.** A plain re-run syncs forward from
+its newest 500 stored messages, so it fetches the missing messages — but not
+the media of the 47,800 it already holds, because a sync backfills files only
+for messages it re-reads. "Re-read the whole history" is the recovery.
+
+---
+
 # The three numbers to check on the next live run
 
 Each was measured on the last run rather than reasoned about. Write the observed

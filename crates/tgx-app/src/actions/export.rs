@@ -20,10 +20,11 @@ pub(super) enum TopicsResolution {
     /// chat exports as one folder, the same answer a chat that was never a
     /// forum gets.
     Unsplit,
-    /// Still rate-limited after the one retry [`resolve_topics`] gives it.
+    /// Still rate-limited after the one retry [`resolve_topics`] gives it, or
+    /// Telegram still failing on its side after `client::Patient`'s three.
     /// **Not** the same answer as [`Unsplit`](Self::Unsplit) — a forum stays
     /// a forum, it just cannot be exported this run.
-    RateLimited,
+    TryLater,
     /// Cancelled while waiting out the rate limit.
     Cancelled,
 }
@@ -77,7 +78,21 @@ where
                               chat later rather than lose its topic split"
                         .into(),
                 });
-                return TopicsResolution::RateLimited;
+                return TopicsResolution::TryLater;
+            }
+            // Telegram failed on its side, and `client::Patient` has already
+            // asked three more times. Falling through to the arm below would
+            // export the forum as one folder — item 11's bug again, for a
+            // different temporary cause.
+            Err(e) if e.is_unavailable() => {
+                let _ = tx.send(Event::ChatFailed {
+                    chat_id,
+                    message: format!(
+                        "Telegram failed on its side while listing topics ({e}) — \
+                         retry this chat later rather than lose its topic split"
+                    ),
+                });
+                return TopicsResolution::TryLater;
             }
             Err(e) => {
                 let _ = tx.send(Event::Warn(format!(
@@ -225,7 +240,7 @@ pub async fn export(settings: Settings, pending: Pending, cancel: Cancel, tx: Ev
                 // neither may fall into the branch above and export a forum
                 // as one folder — `resolve_topics` has already said which one
                 // happened.
-                TopicsResolution::RateLimited => continue,
+                TopicsResolution::TryLater => continue,
                 TopicsResolution::Cancelled => break,
             }
         } else {
@@ -372,10 +387,22 @@ fn report_result(tx: &Events, title: &str, result: &tgx_tg::engine::ExportResult
     // Only a chat that was split has topic folders. `result.topics` counts
     // output folders, and an unsplit chat has one — which read as
     // "1 topic folders" on every private chat.
+    //
+    // "Folders" only where there are some: a database-only run writes none,
+    // and every chat of a twelve-chat queue still said "17 topic folders".
     if split && result.topics > 0 {
-        line.push_str(&format!(", {} topic folders", result.topics));
+        let folders = result.root.is_some();
+        line.push_str(&format!(
+            ", {} {}",
+            result.topics,
+            if folders { "topic folders" } else { "topics" }
+        ));
         if result.empty_topics > 0 {
-            line.push_str(&format!(" ({} empty skipped)", result.empty_topics));
+            line.push_str(&format!(
+                " ({} empty{})",
+                result.empty_topics,
+                if folders { " skipped" } else { "" }
+            ));
         }
     }
     line.push_str(&format!(", {} files ({mb:.1} MB)", result.media_downloaded));
@@ -409,10 +436,20 @@ fn report_result(tx: &Events, title: &str, result: &tgx_tg::engine::ExportResult
     // at a file, so it has to be the number of lines in that file. One failed
     // job takes its thumbnail and its preview with it, and the run reported 21
     // over a missing_media.txt that listed 42.
+    //
+    // A database-only run has no folder to hold missing_media.txt, and this
+    // sent the user looking for one anyway. The paths are in tgx.log then, and
+    // only a full re-read reaches back far enough to ask for them again.
     if result.media_missing > 0 {
         let _ = tx.send(Event::Warn(format!(
-            "{title}: {} files could not be fetched — see missing_media.txt",
-            result.media_missing
+            "{title}: {} files could not be fetched — {}",
+            result.media_missing,
+            if result.root.is_some() {
+                "see missing_media.txt"
+            } else {
+                "each one is named in tgx.log, and \"Re-read the whole history\" \
+                 asks for them again"
+            }
         )));
     }
     if result.members > 0 && !result.members_complete {
@@ -424,7 +461,8 @@ fn report_result(tx: &Events, title: &str, result: &tgx_tg::engine::ExportResult
     }
     if result.enrich_deferred > 0 {
         let _ = tx.send(Event::Warn(format!(
-            "{title}: {} extra lookups were lost to rate limits — reaction \
+            "{title}: {} extra lookups were lost to rate limits or Telegram \
+             server errors — reaction \
              names, poll results or custom emoji may be missing. Re-exporting \
              this chat later will fill them in.",
             result.enrich_deferred

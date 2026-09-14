@@ -48,8 +48,9 @@ pub const PARTICIPANT_PAGE: i32 = 200;
 #[derive(Debug, Default, Clone)]
 pub struct Enrichment {
     pub requests: usize,
-    /// Enrichments a **rate limit** cost. Not the same as one being refused:
-    /// this means the data was there and we did not get it.
+    /// Enrichments a **rate limit** or a Telegram server error cost. Not the
+    /// same as one being refused: this means the data was there and we did not
+    /// get it.
     pub deferred: usize,
 }
 
@@ -87,6 +88,13 @@ where
                     tally.deferred += 1;
                     return None;
                 }
+                // Telegram failing on its side is not a refusal: the data is
+                // there, and `client::Patient` has already asked three more
+                // times. Lost, and counted like a rate limit's loss.
+                None if e.is_unavailable() => {
+                    tally.deferred += 1;
+                    return None;
+                }
                 // A refusal is permanent. Giving up quietly is correct, and it
                 // is *not* a deferral.
                 None => return None,
@@ -111,8 +119,8 @@ pub struct Roster {
     /// Separate from `complete`, because hitting our own limit is a different
     /// thing from Telegram cutting us off.
     pub capped: bool,
-    /// `(replaced, kept)` under `own_names` — see `convert::own_name_parts`.
-    pub aliased: (usize, usize),
+    /// Who `own_names` touched — see `convert::own_name_parts`.
+    pub aliased: crate::convert::Aliased,
     /// Everyone the roster named, as the name book records a person.
     ///
     /// **The roster used to write two of the four facts a peer has.** It
@@ -304,6 +312,7 @@ fn add_member_facts(
     let (first, last) = crate::convert::own_name_parts(
         own_names,
         f.contact,
+        f.id,
         f.username,
         f.first,
         f.last,
